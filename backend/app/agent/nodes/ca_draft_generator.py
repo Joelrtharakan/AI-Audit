@@ -9,13 +9,41 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
+from app.agent.grounding_guard import (
+    build_source_text,
+    claims_unsupported_effectiveness,
+    is_placeholder_leak,
+    mentions_unsupported_domain,
+    ungrounded_entities,
+)
 from app.agent.permissions import build_ca_draft
 from app.agent.state import AgentState
 from app.config import get_settings
 from app.models.agent import AgentTraceStep
 from app.services.llm_client import LLMError, get_llm_client
 from app.services.llm_json import parse_llm_json
+
+_UNSUPPORTED_IMPACT_SEVERITY_RE = re.compile(
+    r"\b(recall|quarantine|notify\s+\w*\s*customer|inform\s+\w*\s*client|product safety|"
+    r"patient safety|regulatory requirement|non-compliance|noncompliance)\b",
+    re.IGNORECASE,
+)
+
+_SAFE_FALLBACK_BY_FIELD = {
+    "immediate_action": (
+        "Review the specific records/items/activities described in this finding and "
+        "determine whether containment or retrospective verification is required."
+    ),
+    "root_cause": "Root cause not yet established for this finding — further investigation is required.",
+    "root_cause_category": "TO_BE_CONFIRMED",
+    "preventive_action": (
+        "Preventive action cannot be finalized until investigation establishes which "
+        "control actually failed for this finding."
+    ),
+    "impact_analysis": "Impact requires assessment — auditor to determine scope for this finding.",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -82,23 +110,36 @@ async def ca_draft_generator_node(state: AgentState) -> AgentState:
             else:
                 parsed_dict[key] = str(val)
 
+        # Fallbacks below are deliberately generic/entity-free — they only fire when
+        # the model returned an empty or placeholder value, and must never inject a
+        # fixed scenario's entities into a different finding's CA draft.
         if not parsed_dict["immediate_action"].strip() or "pending investigation" in parsed_dict["immediate_action"].lower():
             parsed_dict["immediate_action"] = (
-                "Prevent the affected personnel from independently performing the revised procedure "
-                "until mandatory training and competency requirements are completed and documented. "
-                "Identify activities performed since the revision became effective and assess whether "
-                "retrospective review is required."
+                "Review the specific records/items/activities described in this finding and determine "
+                "whether containment or retrospective verification is required before further "
+                "auditor investigation is complete."
             )
         if not parsed_dict["root_cause"].strip():
             rc_narrative = root_cause.narrative if root_cause else "Root cause not yet established."
             parsed_dict["root_cause"] = f"{root_cause.status if root_cause else 'NOT_ESTABLISHED'} — {rc_narrative}"
         if not parsed_dict["root_cause_category"].strip() or parsed_dict["root_cause_category"] == "PENDING_INVESTIGATION":
-            parsed_dict["root_cause_category"] = root_cause.category if (root_cause and root_cause.category) else "MANAGEMENT / SYSTEM — UNVERIFIED"
+            parsed_dict["root_cause_category"] = root_cause.category if (root_cause and root_cause.category) else "TO_BE_CONFIRMED"
+        # CATEGORY DISCIPLINE: this is a SEPARATE LLM call from rca.py, so it can
+        # (and in production testing, did) independently guess a definitive
+        # category like "MEASUREMENT" even when the RCA step itself already
+        # determined the cause isn't established and set TO_BE_CONFIRMED. The
+        # CA draft must never be more confident than the root cause it's based on.
+        if root_cause and root_cause.category == "TO_BE_CONFIRMED" and parsed_dict["root_cause_category"] != "TO_BE_CONFIRMED":
+            trace.append(AgentTraceStep.warn(
+                f"CA draft category '{parsed_dict['root_cause_category']}' overridden to TO_BE_CONFIRMED "
+                "— root cause is not yet established"
+            ))
+            parsed_dict["root_cause_category"] = "TO_BE_CONFIRMED"
         if not parsed_dict["preventive_action"].strip() or "pending verification" in parsed_dict["preventive_action"].lower():
             parsed_dict["preventive_action"] = (
-                "If a training or authorization-control weakness is confirmed, strengthen the process "
-                "for identifying personnel affected by procedure revisions, verifying training completion, "
-                "and preventing assignment before mandatory training requirements are satisfied."
+                "Once a root cause is confirmed for this finding, strengthen the specific control "
+                "process implicated by that cause. Preventive action cannot be finalized until "
+                "investigation establishes which control actually failed."
             )
         # Sanitize all 5 fields into clean human-readable strings free of python reprs
         def _clean_str(val: str) -> str:
@@ -106,7 +147,6 @@ async def ca_draft_generator_node(state: AgentState) -> AgentState:
                 return ""
             s = str(val).strip()
             if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
-                import re
                 s = re.sub(r"'(?:status|id|name)':\s*'[^']*',?", "", s)
                 s = re.sub(r"'(?:description|statement|text)':\s*", "", s)
                 s = s.replace("{", "").replace("}", "").replace("[", "").replace("]", "").strip()
@@ -114,6 +154,56 @@ async def ca_draft_generator_node(state: AgentState) -> AgentState:
 
         for key in ("immediate_action", "root_cause", "root_cause_category", "preventive_action", "impact_analysis"):
             parsed_dict[key] = _clean_str(parsed_dict[key])
+
+        # GROUNDING GUARD: the CA draft is what actually gets written into the
+        # form, so this is the last chance to catch an entity/number that
+        # doesn't trace back to THIS finding before it reaches the auditor.
+        extra_trusted = []
+        if root_cause and root_cause.narrative:
+            extra_trusted.append(root_cause.narrative)
+        if impact and impact.narrative:
+            extra_trusted.append(impact.narrative)
+        source_text = build_source_text(state["request"].finding_text, evidence_ledger, extra_trusted)
+        finding_text = state["request"].finding_text
+        extraction = state.get("extraction")
+        external_impact_stated = bool(extraction and extraction.external_impact_stated)
+
+        for key in ("immediate_action", "root_cause", "preventive_action", "impact_analysis"):
+            violations = ungrounded_entities(parsed_dict[key], source_text)
+            if violations:
+                trace.append(AgentTraceStep.warn(
+                    f"CA draft field '{key}' replaced — referenced ungrounded entity/number {violations}"
+                ))
+                logger.warning("CA draft field %s grounding violation: %s", key, violations)
+                parsed_dict[key] = _SAFE_FALLBACK_BY_FIELD[key]
+            elif claims_unsupported_effectiveness(parsed_dict[key], finding_text):
+                trace.append(AgentTraceStep.warn(
+                    f"CA draft field '{key}' replaced — claimed previous-CAPA effectiveness not "
+                    "supported by this finding"
+                ))
+                parsed_dict[key] = _SAFE_FALLBACK_BY_FIELD[key]
+            elif mentions_unsupported_domain(parsed_dict[key], source_text):
+                trace.append(AgentTraceStep.warn(
+                    f"CA draft field '{key}' replaced — invoked training/authorization domain not "
+                    "supported by this finding"
+                ))
+                parsed_dict[key] = _SAFE_FALLBACK_BY_FIELD[key]
+            elif is_placeholder_leak(parsed_dict[key]):
+                trace.append(AgentTraceStep.warn(
+                    f"CA draft field '{key}' replaced — echoed prompt instruction text instead of "
+                    "real analysis"
+                ))
+                parsed_dict[key] = _SAFE_FALLBACK_BY_FIELD[key]
+            elif key == "impact_analysis" and not external_impact_stated and _UNSUPPORTED_IMPACT_SEVERITY_RE.search(parsed_dict[key]):
+                # Same firewall impact.py already applies to its own output —
+                # the CA draft's impact_analysis is a SEPARATE LLM call and can
+                # independently invent product-safety/recall/regulatory
+                # language with no basis (observed in production testing).
+                trace.append(AgentTraceStep.warn(
+                    "CA draft field 'impact_analysis' replaced — invented unsupported severity "
+                    "(recall/regulatory/product-safety) language with no external impact stated"
+                ))
+                parsed_dict[key] = _SAFE_FALLBACK_BY_FIELD[key]
 
         ca_draft = build_ca_draft(parsed_dict)
         trace.append(AgentTraceStep.ok(

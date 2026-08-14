@@ -16,24 +16,64 @@ CRITIC FEEDBACK: {critic_feedback}
 
 YOUR TASK: Generate EXACTLY these five fields. No other fields.
 
-FIELD RULES:
-- immediate_action: Containment action. Prevent affected operators from performing revised procedures until training is completed; identify activities since revision for retrospective review.
-- root_cause: Leading causal hypothesis or root cause statement. NEVER restate the finding. Explain the potential control failure.
-- root_cause_category: One of: MAN / METHOD / MACHINE / MATERIAL / MEASUREMENT / ENVIRONMENT_MGMT / OTHER / PENDING_INVESTIGATION
-- preventive_action: Systemic preventive actions addressing the control hypothesis: 1) Strengthen identification of personnel affected by procedure revisions and training assignment; 2) Verify mandatory training completion before personnel are authorized to perform revised procedures; 3) Review effectiveness of training completion and authorization controls. Do NOT assume communication/reminders caused the issue unless evidence confirms it.
-- impact_analysis: Identify specific assessment pathways: 1) activities performed by affected personnel; 2) affected timeframe; 3) requirements introduced by revision; 4) whether results were used in downstream quality decisions.
+============================================================
+FIELD RULES
+============================================================
+Every field must be derived from THIS finding's own entities, root cause, and evidence above.
+Never reuse wording, entities, or scenarios from any other finding or example.
 
-ABSOLUTE RULES:
+IMMEDIATE_ACTION — CONTAINMENT ONLY:
+The immediate_action field MUST be a genuine CONTAINMENT action: remove, restrict, segregate,
+suspend, escalate, or quarantine the specific affected item/record/process from this finding.
+It must NOT be an investigation step (e.g. "review records" or "investigate the cause").
+Investigation steps belong in recommended_investigation, not here.
+Scope it to what was actually observed — do not default to training-suspension unless this
+finding is actually about training authorization.
+Example containment actions (do NOT use verbatim — derive from this finding):
+  - "Suspend use of [specific equipment] pending calibration verification."
+  - "Withdraw [specific document revision] from use until training completion is confirmed."
+  - "Segregate [specific batch/record set] pending review of [specific condition]."
+
+ROOT_CAUSE_CATEGORY:
+Use exactly the ROOT CAUSE CATEGORY value given above. Do NOT independently guess a more
+definitive category — the RCA step already determined the correct confidence level.
+
+ROOT_CAUSE:
+If ROOT CAUSE STATUS above is NOT_ESTABLISHED, do NOT write a one-line "not established."
+Instead, summarize in 1-2 sentences the reported explanation and/or plausible mechanism from
+ROOT CAUSE above so the auditor sees what IS known, not just that nothing is confirmed.
+NEVER restate the finding as if it were the cause.
+
+PREVENTIVE_ACTION:
+Address the systemic control hypothesis actually implicated by this finding and root cause.
+Choose from the control layer relevant to this finding:
+  - Training/authorization findings → training matrix controls, completion verification
+  - Calibration/equipment findings → calibration schedule controls, maintenance oversight
+  - Supplier findings → supplier qualification, incoming inspection controls
+  - Documentation findings → document control, record-review processes
+Do NOT assume a cause not confirmed by evidence.
+
+IMPACT_ANALYSIS:
+Name the specific object/record/period actually affected in this finding and state what is
+not yet known about its scope. A sentence that could apply to any finding is a failure —
+name what THIS finding's own items are. Include the stated period if one is given.
+
+============================================================
+ABSOLUTE RULES
+============================================================
 - Do NOT output any field other than these five.
 - Do NOT claim certainty where there is none.
 - Do NOT reference SOPs, records, or policies not in the evidence ledger.
-- Label everything appropriately: "reportedly", "requires verification", "potential", "pending".
+- Do NOT reuse entities, numbers, dates, procedure names, or scenario content from any other finding.
+- Do NOT mention product safety, patient safety, recall, quarantine, or regulatory non-compliance
+  unless this finding explicitly gives a basis for it.
+- Label everything appropriately: "reportedly", "requires verification", "potential", "pending confirmation".
 
 Respond with JSON containing EXACTLY these five keys:
 {{
-  "immediate_action": "...",
-  "root_cause": "...",
-  "root_cause_category": "...",
-  "preventive_action": "...",
-  "impact_analysis": "..."
+  "immediate_action": "<<A specific CONTAINMENT action (not investigation) naming this finding's own affected item — what is being removed from use, restricted, or escalated pending resolution>>",
+  "root_cause": "<<Per the root_cause field rule above — summarize known facts and plausible mechanism, never restate the finding as the cause>>",
+  "root_cause_category": "<<Exactly the ROOT CAUSE CATEGORY value given above>>",
+  "preventive_action": "<<Systemic prevention addressing the control hypothesis from this finding's root cause — specific to this finding's domain and entities>>",
+  "impact_analysis": "<<Named affected object/record/period from this finding, with statement of what is not yet confirmed about scope>>"
 }}

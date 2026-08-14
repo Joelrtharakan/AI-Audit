@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+from app.agent.grounding_guard import build_source_text, filter_list_field, ungrounded_entities
 from app.agent.state import AgentState
 from app.models.agent import (
     AgentFinalState,
@@ -23,6 +24,52 @@ from app.models.agent import (
 from app.models.analysis import ObservationQualityStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _final_grounding_sweep(state: AgentState, root_cause, five_why, capa, impact, trace: list) -> None:
+    """Defense-in-depth: every field checked here should already be clean from
+    the per-node guards in rca.py/impact.py/capa.py. This sweep exists so that
+    if any code path is ever added that bypasses those guards, a residual
+    violation is caught and logged here rather than silently reaching the
+    auditor. Mutates root_cause/five_why/capa/impact in place."""
+    evidence_ledger = state.get("evidence_ledger", [])
+    # Base source text deliberately excludes root_cause.narrative itself --
+    # checking a field against text that includes that same field would make
+    # every check trivially self-grounded and catch nothing.
+    base_source_text = build_source_text(state["request"].finding_text, evidence_ledger)
+
+    if root_cause.narrative and ungrounded_entities(root_cause.narrative, base_source_text):
+        trace.append(AgentTraceStep.warn(
+            "FINAL SWEEP: root cause narrative referenced an ungrounded entity — replaced"
+        ))
+        logger.error("Final grounding sweep caught a violation that should have been caught upstream (root_cause.narrative)")
+        root_cause.narrative = "Root cause analysis could not be validated for this finding. Manual investigation is required."
+        root_cause.status = "NOT_ESTABLISHED"  # type: ignore[assignment]
+        root_cause.statement = None
+
+    root_cause.candidate_hypotheses = [
+        h for h in root_cause.candidate_hypotheses if not ungrounded_entities(h.statement, base_source_text)
+    ]
+
+    for step in five_why.steps:
+        if step.answer and ungrounded_entities(step.answer, base_source_text):
+            trace.append(AgentTraceStep.warn("FINAL SWEEP: 5-Why answer referenced an ungrounded entity — replaced"))
+            step.answer = "Could not be validated against this finding's evidence."
+            step.status = "UNKNOWN"  # type: ignore[assignment]
+
+    # CAPA/impact are allowed to reference the now-cleaned root cause narrative
+    # as legitimate context (it has already passed its own check above).
+    extended_source_text = build_source_text(
+        state["request"].finding_text, evidence_ledger,
+        [root_cause.narrative] if root_cause.narrative else [],
+    )
+    capa.potential_areas, _ = filter_list_field(capa.potential_areas, extended_source_text)
+    capa.recommended_investigation, _ = filter_list_field(capa.recommended_investigation, extended_source_text)
+
+    impact.areas, _ = filter_list_field(impact.areas, extended_source_text)
+    if impact.narrative and ungrounded_entities(impact.narrative, extended_source_text):
+        trace.append(AgentTraceStep.warn("FINAL SWEEP: impact narrative referenced an ungrounded entity — removed"))
+        impact.narrative = None
 
 
 def _compute_observation_quality(state: AgentState) -> str:
@@ -108,12 +155,15 @@ async def generate_report_node(state: AgentState) -> AgentState:
     investigation_required = _compute_investigation_required(state)
     final_state = _compute_final_state(state)
 
+    # Fallback objects are deliberately generic/entity-free: they only fire when an
+    # upstream node failed to produce a result, and must never inject another
+    # case's facts (or any invented entity) into this finding's output.
     root_cause = state.get("root_cause") or RootCauseAnalysis(
         status="NOT_ESTABLISHED",
         category=None,
-        narrative="Leading Hypothesis: Possible failure of the training/authorization control to prevent personnel from performing a revised procedure before mandatory training completion.",
+        narrative="Root cause analysis could not be completed for this finding. Manual investigation is required.",
         evidence_status=EvidenceStatus.UNKNOWN,
-        verification_needed="Full auditor investigation required to confirm underlying control failure.",
+        verification_needed="Full auditor investigation required — AI root cause analysis was unavailable for this finding.",
     )
 
     investigation_plan = state.get("investigation_plan") or InvestigationPlan()
@@ -126,16 +176,18 @@ async def generate_report_node(state: AgentState) -> AgentState:
     from app.models.agent import CapaAnalysis
     capa = state.get("capa_analysis") or CapaAnalysis(
         status=CapaStatus.INVESTIGATION_REQUIRED,
-        potential_areas=["Review procedure revision communication and training assignment workflows."],
-        recommended_investigation=["Investigate authorization controls and supervisory verification procedures."],
+        potential_areas=[],
+        recommended_investigation=["Full manual investigation required — AI CAPA analysis was unavailable for this finding."],
     )
 
     from app.models.agent import ImpactAssessment
     impact = state.get("impact_assessment") or ImpactAssessment(
         status=ImpactStatus.IMPACT_REQUIRES_ASSESSMENT,
-        areas=["Determine scope and period of potential impact."],
+        areas=["Determine scope and period of potential impact — auditor assessment required."],
         narrative=None,
     )
+
+    _final_grounding_sweep(state, root_cause, five_why, capa, impact, trace)
 
     report = InvestigationReport(
         observation_quality=observation_quality,  # type: ignore[arg-type]

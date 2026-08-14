@@ -1,8 +1,19 @@
-"""Thin client for a local Ollama server's OpenAI-compatible chat completions
-endpoint. Mirrors OpenRouterClient's interface exactly (same method
-signature, same retry/backoff pattern) so finding_analysis_service.py's
-get_llm_client() factory can hand either one to the rest of the pipeline
-without any provider-specific branching downstream.
+"""Thin client for a local Ollama server's NATIVE /api/chat endpoint (not the
+OpenAI-compat /v1/chat/completions layer). Mirrors OpenRouterClient's
+interface exactly (same method signature, same retry/backoff pattern) so
+finding_analysis_service.py's get_llm_client() factory can hand either one to
+the rest of the pipeline without any provider-specific branching downstream.
+
+Uses the native endpoint specifically for "think": false -- hybrid-reasoning
+models (e.g. qwen3) emit a large hidden reasoning trace by default that (a)
+only the OpenAI-compat layer's "think" field silently ignores, and (b) counts
+against the same token budget as the actual JSON content, risking truncated/
+empty output on the long prompts this pipeline sends. The native endpoint
+honors "think": false and drops the reasoning trace entirely -- verified via
+direct API test: OpenAI-compat endpoint burned ~300 completion tokens on a
+trivial prompt even with "think": false in the payload (ignored), while the
+native endpoint with the same flag used 6. Harmless no-op for non-thinking
+models (e.g. qwen2.5) -- verified directly, not assumed.
 
 No API key: Ollama is a local, unauthenticated server. This is intentionally
 for fast local dev iteration, not production -- see README section 6b.
@@ -46,24 +57,31 @@ class OllamaClient:
         max_tokens: int | None = None,
     ) -> str:
         settings = self._settings
+        # settings.ollama_base_url is the OpenAI-compat base (".../v1"); the
+        # native endpoint lives one level up at ".../api/chat".
+        base = settings.ollama_base_url
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        native_url = f"{base}/api/chat"
+
+        options: dict = {"temperature": temperature}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
 
         payload: dict = {
             "model": settings.ollama_model,
             "messages": messages,
-            "temperature": temperature,
+            "stream": False,
+            "think": False,
+            "options": options,
         }
         if response_format_json:
-            payload["response_format"] = {"type": "json_object"}
-        if max_tokens is not None:
-            # Ollama's OpenAI-compat layer also honors "num_predict" natively; send
-            # both so the token budget applies regardless of which one it reads.
-            payload["max_tokens"] = max_tokens
-            payload["num_predict"] = max_tokens
+            payload["format"] = "json"
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 resp = await client.post(
-                    f"{settings.ollama_base_url}/chat/completions",
+                    native_url,
                     headers={"Content-Type": "application/json"},
                     json=payload,
                 )
@@ -87,6 +105,6 @@ class OllamaClient:
 
         data = resp.json()
         try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as exc:
+            return data["message"]["content"]
+        except (KeyError, TypeError) as exc:
             raise OllamaError("Unexpected Ollama response shape.") from exc

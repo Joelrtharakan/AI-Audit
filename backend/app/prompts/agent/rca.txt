@@ -14,81 +14,133 @@ EVIDENCE GAPS:
 
 TOOL DATA AVAILABLE: {tools_were_available}
 
-Your tasks:
-1. Determine root cause status based on evidence:
+============================================================
+STEP 0 — MAP THE CAUSAL CHAIN SILENTLY BEFORE PRODUCING JSON
+============================================================
+Work through these layers using ONLY this finding's own facts:
+  1. OBSERVED CONDITION: The objective, verifiable fact (not the cause).
+  2. REPORTED EXPLANATION: What a person/document claims caused it (if anything).
+  3. POSSIBLE MECHANISM(S): How this finding's facts plausibly produce the condition.
+     If more than one mechanism fits, name each as a separate hypothesis.
+  4. VERIFICATION GAP: Exactly what evidence is missing to confirm/refute each mechanism.
+  5. CONTROL/PROCESS LAYER: Only if evidence reaches this deep — what control failed.
+  6. SYSTEMIC LAYER: Only if evidence reaches this deep — what explains the control weakness.
+
+A finding can have a clear layer 1, plausible layer 3, and NOT_ESTABLISHED layers 5-6.
+That is a GOOD analysis. NEVER collapse this into "root cause not established" — show the chain.
+
+============================================================
+STEP A-E — MANDATORY CAUSAL FRAMEWORK
+============================================================
+A. CAUSAL BOUNDARY: Identify the Trigger (what happened) vs. the Path (why the control failed).
+B. DISCRIMINATION: If multiple hypotheses exist, identify the Pivot Fact — the single evidence
+   item that would definitively favor one hypothesis over the others.
+C. EVIDENTIARY LIMITS: Do not infer systemic failures if evidence only proves process gaps.
+D. NARRATIVE QUALITY: 2-4 sentences: (1) Verified condition, (2) Named mechanism(s), (3) Known
+   unknowns, (4) What evidence would discriminate between competing hypotheses.
+E. RECURRENCE: A previous CAPA recorded as completed is NOT evidence of effectiveness.
+
+============================================================
+YOUR TASKS
+============================================================
+
+1. Determine root cause status:
    - VERIFIED: Objective records in the ledger confirm the cause.
    - SUPPORTED: Strongly supported by verified facts.
-   - STATED_UNVERIFIED: A specific cause was stated/reported but ledger has no corroborating record.
+   - STATED_UNVERIFIED: Cause stated/reported but no corroborating record in ledger.
    - INFERRED: Logical conclusion without direct record confirmation.
-   - NOT_ESTABLISHED: No causal signal at all. Cannot determine cause from available evidence.
+   - NOT_ESTABLISHED: No causal signal. Cannot determine cause from available evidence.
    - CONTRADICTED: Evidence refutes the suspected cause.
 
-2. NEVER use the observed condition itself ("training was not completed") as the root cause statement. If cause is unverified, generate a LEADING HYPOTHESIS explaining the potential control failure.
+2. NEVER use the observed condition as the root cause statement. The cause is NOT the observation.
+   If cause is unverified, generate a LEADING HYPOTHESIS naming the plausible control failure
+   using only entities and processes actually in THIS finding.
 
-3. Assign root cause category from 6M taxonomy: MAN, METHOD, MACHINE, MATERIAL, MEASUREMENT, ENVIRONMENT_MGMT, OTHER.
+3. Assign root cause category from 6M taxonomy:
+   MAN, METHOD, MACHINE, MATERIAL, MEASUREMENT, ENVIRONMENT_MGMT, OTHER.
 
-4. Identify possible contributing factors (conditions, not action items).
-   Mark status as "POSSIBLE_UNCONFIRMED" unless supported by VERIFIED evidence.
+4. Identify contributing factors — conditions only, not action items.
+   Mark status as POSSIBLE_UNCONFIRMED unless supported by VERIFIED evidence.
 
-5. Perform a 5-step 5-Why analysis progressing logically toward control/system level:
-   - WHY 1 MUST use established facts:
-     Question: "Why were three operators performing the revised inspection procedure without completing mandatory training?"
-     Answer: "The operators performed the revised procedure despite having no recorded completion of the mandatory training requirement." (Status: VERIFIED)
-   - WHY 2 explores immediate condition:
-     Question: "Why were they permitted to perform the revised procedure without documented training completion?"
-     Answer: "The available evidence does not establish whether training status was not verified before assignment, authorization controls were ineffective, or another process allowed the operators to perform the procedure." (Status: UNKNOWN)
-   - WHY 3 explores verification control:
-     Question: "Why was the lack of training completion not prevented or detected before the work was performed?"
-     Answer: "The effectiveness of the organization's training verification and authorization controls has not yet been established." (Status: NOT_ESTABLISHED)
-   - WHY 4 explores control failure mechanism:
-     Question: "Why did the relevant control fail, if such a control existed?"
-     Answer: "The actual training assignment, completion-monitoring, authorization, and supervisory controls require investigation." (Status: NOT_ESTABLISHED)
-   - WHY 5 explores systemic condition:
-     Question: "What systemic condition allowed personnel without documented training completion to perform the revised procedure?"
-     Answer: "A definitive systemic root cause cannot yet be established from the available evidence." (Status: NOT_ESTABLISHED)
+5. Evidence-bound 5-Why analysis (max 5 steps, STOPS when evidence runs out):
+   - WHY 1: Must be a VERIFIED fact directly from the finding/ledger.
+   - WHY 2+: Must explain WHY a preceding fact came to be — NOT restate another fact.
+     ANTI-RESTATEMENT RULE: A temporal fact is NOT a causal explanation.
+     BAD: WHY were employees using the old procedure? → "Because the procedure was revised two months ago."
+          (This restates when it happened — it is NOT an explanation of why the old version remained in use.)
+     GOOD: WHY did the obsolete version remain in use? → "The available evidence does not establish whether
+          the cause was distribution, withdrawal, electronic access, or local copies." (Status: UNKNOWN, STOP.)
+   - Use ONLY entities, roles, procedures, records named in THIS finding.
+   - STOP the moment the ledger cannot supply a specific answer. At that stop-point,
+     state SPECIFICALLY what evidence would be needed to go one layer deeper.
+   - Every question/answer must stay in this finding's own subject domain.
 
-6. Generate 2-4 candidate hypotheses (H1, H2, H3, H4) explaining potential causes, evidence needed, and status (POSSIBLE).
+6. Generate 2-4 candidate hypotheses DYNAMICALLY DERIVED from this finding:
+   - A documentation finding → hypotheses about workload, competency, procedure design, review controls.
+   - An equipment finding → hypotheses about calibration, maintenance, operator practice, condition.
+   - A supplier finding → hypotheses about qualification, incoming inspection, specification, communication.
+   - A training finding → hypotheses about ASSIGNMENT, COMPLETION, RECORDKEEPING, VERIFICATION.
+     Do NOT reach for "communication failure" or "supervision failure" unless those words appear in the finding.
+   - Drop any hypothesis you cannot connect to something actually stated in this finding.
+   - 1 hypothesis is fine. 0 is fine if nothing plausible can be named.
+
+   For EACH hypothesis, ALL three fields are mandatory:
+   - "statement": The hypothesis AND why it is plausible using this finding's own entities/facts.
+   - "evidence_needed": The specific record/document that would confirm OR refute this hypothesis.
+   - "discrimination_evidence": What evidence would DISTINGUISH this hypothesis from the others —
+     i.e. what would be uniquely true for THIS hypothesis but false for the competing ones.
+     Example: "If training assignment records show the assignment was never issued, H1 is confirmed
+     and H2 (completion failure) is excluded — because H2 requires an assignment to have existed."
 
 ABSOLUTE RULES:
-- Do NOT claim VERIFIED unless a VERIFIED evidence item directly confirms the cause.
-- Do NOT present REPORTED items as facts.
-- Do NOT invent identifiers (e.g. SOP-OPS-014) or QMS features (e.g. automated reminders) not present in evidence.
-- "NOT_ESTABLISHED" is a correct and valid conclusion.
+- Do NOT claim VERIFIED unless a VERIFIED ledger item directly confirms the cause.
+- Do NOT present REPORTED items as established facts.
+- Do NOT invent identifiers, procedure names, numbers, dates, roles, or QMS features not in THIS finding.
+- Do NOT reuse entities, numbers, dates, or hypotheses from any other case, example, or prior conversation.
+- NOT_ESTABLISHED is a correct and valid STATUS. Only select leading_hypothesis when evidence clearly
+  favors one over the others; otherwise leave null. But the NARRATIVE must walk through the causal
+  layers — status=NOT_ESTABLISHED with a one-sentence narrative is a FAILURE.
+- If evidence conflicts, do NOT pick a side. Say it is conflicting and requires reconciliation.
+- If this finding describes a recurrence: a previous CAPA recorded as completed is NOT evidence
+  that it was implemented, verified, or effective — those are separate facts requiring separate evidence.
 
-Respond with JSON:
+NARRATIVE QUALITY RULE (most important single output):
+The "narrative" field is what the auditor reads first. It must:
+  (a) State the verified/established condition using THIS finding's own subject matter and entities.
+  (b) Name the possible mechanism(s) — not "a potential cause" but the actual named hypothesis.
+  (c) State explicitly what remains unknown and WHY (what evidence is absent).
+  (d) If more than one mechanism is plausible, state what evidence would distinguish between them.
+A narrative that could be pasted into a completely different finding without changing a word is a FAILURE.
+
+Respond with JSON only. The placeholder text <<like this>> describes what belongs in that slot —
+it is NOT example prose and must NEVER appear verbatim in your response:
 {{
   "root_cause": {{
     "status": "VERIFIED|SUPPORTED|STATED_UNVERIFIED|INFERRED|NOT_ESTABLISHED|CONTRADICTED",
     "category": "MAN|METHOD|MACHINE|MATERIAL|MEASUREMENT|ENVIRONMENT_MGMT|OTHER|null",
-    "statement": "concise root cause statement or null if NOT_ESTABLISHED",
-    "leading_hypothesis": "Potential failure of training/authorization control to ensure mandatory training completion was verified before task performance",
+    "statement": "<<concise root cause statement specific to this finding, or null if NOT_ESTABLISHED>>",
+    "leading_hypothesis": "<<null unless evidence clearly favors one hypothesis; if so, one sentence grounded in this finding's own entities and process>>",
     "candidate_hypotheses": [
       {{
         "id": "H1",
-        "name": "TRAINING_ASSIGNMENT",
-        "statement": "Training may not have been assigned to affected operators after procedure revision.",
+        "name": "<<short code for this finding's hypothesis, e.g. TRAINING_ASSIGNMENT_FAILURE>>",
+        "statement": "<<the hypothesis AND why it is plausible for this specific finding, using only entities named in this finding>>",
         "status": "POSSIBLE",
-        "evidence_needed": "Training assignment records"
-      }},
-      {{
-        "id": "H2",
-        "name": "AUTHORIZATION_CONTROL",
-        "statement": "Authorization controls may not have verified training completion before operators performed the procedure.",
-        "status": "POSSIBLE",
-        "evidence_needed": "Authorization/qualification records and supervisory verification"
+        "evidence_needed": "<<the specific record/evidence type that would confirm or refute this hypothesis>>",
+        "discrimination_evidence": "<<the specific record/evidence that would distinguish THIS hypothesis from the other hypotheses — what would be uniquely true here but not for the competing hypotheses>>"
       }}
     ],
-    "narrative": "clear description of root cause or leading hypothesis",
-    "supporting_evidence": ["claim or record 1"],
-    "contradicting_evidence": ["claim or record 2"],
-    "missing_evidence": ["what is missing to establish cause"],
+    "narrative": "<<2-4 sentences: (a) verified condition, (b) named mechanism(s), (c) known unknowns, (d) discriminating evidence between hypotheses — all using this finding's own entities>>",
+    "supporting_evidence": ["<<claim or record from the ledger supporting the leading explanation>>"],
+    "contradicting_evidence": ["<<claim or record from the ledger that contradicts it>>"],
+    "missing_evidence": ["<<specifically what is missing to establish cause for THIS finding>>"],
     "confidence": "LOW|MEDIUM|HIGH",
     "evidence_status": "VERIFIED|REPORTED|INFERRED|UNVERIFIED|UNKNOWN",
-    "verification_needed": "what the auditor needs to verify, or null"
+    "verification_needed": "<<what the auditor needs to verify, or null>>"
   }},
   "contributing_factors": [
     {{
-      "description": "condition (not an action item)",
+      "description": "<<a condition (not an action item) supported by this finding — omit array if none supported>>",
       "evidence_status": "INFERRED|REPORTED|VERIFIED",
       "status": "POSSIBLE_UNCONFIRMED|VERIFIED"
     }}
@@ -96,12 +148,12 @@ Respond with JSON:
   "five_why": {{
     "steps": [
       {{
-        "question": "Question 1-5",
-        "answer": "Answer 1-5",
+        "question": "<<a why-question in this finding's own subject domain — derived from causal chain above>>",
+        "answer": "<<the answer grounded in this finding's evidence — or what evidence is needed if unknown>>",
         "status": "VERIFIED|SUPPORTED|REPORTED_UNVERIFIED|INFERRED|UNKNOWN|NOT_ESTABLISHED"
       }}
     ],
     "is_complete": false,
-    "status_note": "INCOMPLETE — ROOT CAUSE NOT ESTABLISHED (or COMPLETE)"
+    "status_note": "<<Chain stops at step N: evidence does not establish why [X] occurred. To go deeper, [specific record type] would be required.>>"
   }}
 }}

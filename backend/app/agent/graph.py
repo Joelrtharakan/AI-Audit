@@ -35,6 +35,7 @@ from app.agent.nodes.critic import critic_node
 from app.agent.nodes.evidence_recorder import record_evidence_node
 from app.agent.nodes.final_evidence_verification import final_evidence_verification_node
 from app.agent.nodes.impact import impact_assessment_node
+from app.agent.nodes.impact_capa_parallel import impact_capa_parallel_node
 from app.agent.nodes.investigation_planner import plan_investigation_node
 from app.agent.nodes.rca import root_cause_node
 from app.agent.nodes.report_generator import generate_report_node
@@ -114,8 +115,7 @@ def build_agent_graph() -> StateGraph:
     graph.add_node("execute_tool", execute_tool_node)
     graph.add_node("record_evidence", record_evidence_node)
     graph.add_node("root_cause_analysis", root_cause_node)
-    graph.add_node("impact_assessment", impact_assessment_node)
-    graph.add_node("capa_analysis", capa_analysis_node)
+    graph.add_node("impact_capa", impact_capa_parallel_node)  # impact + CAPA run in parallel
     graph.add_node("critic", critic_node)
     graph.add_node("final_evidence_verification", final_evidence_verification_node)
     graph.add_node("generate_report", generate_report_node)
@@ -148,10 +148,9 @@ def build_agent_graph() -> StateGraph:
         },
     )
 
-    # Analysis chain
-    graph.add_edge("root_cause_analysis", "impact_assessment")
-    graph.add_edge("impact_assessment", "capa_analysis")
-    graph.add_edge("capa_analysis", "critic")
+    # Analysis chain (impact + CAPA run in parallel for speed)
+    graph.add_edge("root_cause_analysis", "impact_capa")
+    graph.add_edge("impact_capa", "critic")
 
     # Conditional: critic decision
     graph.add_conditional_edges(

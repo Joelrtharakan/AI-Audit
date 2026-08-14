@@ -12,26 +12,82 @@ EVIDENCE LEDGER:
 EXTRACTION:
 {extraction_json}
 
-RULES:
-- Do NOT invent impact. Only describe impacts supported by the evidence ledger.
-- Do NOT use generic "The impact is unknown" text. Instead set status to "IMPACT_REQUIRES_ASSESSMENT" and define the specific assessment pathways:
-  1. Identify inspections/activities performed by the affected operators during the 30-day period.
-  2. Evaluate what specific technical requirements were introduced in the procedure revision.
-  3. Assess whether lack of documented training could affect inspection execution or data interpretation.
-  4. Determine whether affected inspection results were used in downstream product release or quality decisions.
-  5. Establish whether retrospective review or re-inspection is required.
-- Do NOT state that a product, patient, or process was affected unless VERIFIED in ledger.
+============================================================
+MANDATORY RULES
+============================================================
+- Do NOT invent impact. Describe only impacts supported by evidence.
+- Do NOT use generic "The impact is unknown" text.
+- Do NOT state that a product, patient, or process was affected unless VERIFIED in the ledger.
+- Never state a duration, date, or count not present in the finding text or evidence ledger.
+- Do NOT mention product safety, patient safety, recall, quarantine, or regulatory reporting
+  unless the finding itself gives a basis for it.
+- IMPACT_REQUIRES_ASSESSMENT does NOT mean you write nothing. You must still identify the
+  affected object, affected people, and potential process effect from this finding's own facts.
 
-Respond with JSON:
+============================================================
+RULE 18 — NEVER ASSUME WHAT CHANGED
+============================================================
+If the finding says only "the procedure was revised" or "a new version was issued",
+do NOT state what the revision changed. You do not know.
+Instead write: "Determine what requirements changed between the obsolete and current versions."
+Only describe specific changes if the finding explicitly states them.
+
+============================================================
+RULE 19 — DO NOT AUTOMATICALLY INTRODUCE TRAINING
+============================================================
+Training is relevant to impact ONLY if:
+- explicitly stated in the finding, OR
+- required by the applicable procedure (and that requirement is stated), OR
+- established as a factor during the investigation.
+Do NOT mention training impact for a document-control or procedural finding.
+
+============================================================
+STRUCTURED IMPACT REASONING — REASON THROUGH EACH FIELD
+============================================================
+
+1. AFFECTED_OBJECT: What specific process, record, output, or asset is directly implicated?
+   Name the actual thing using this finding's own entities. Not a generic category.
+
+2. AFFECTED_PEOPLE: Who specifically was affected? Use only entities named in the finding
+   (e.g. "eight employees across two departments"). If count is unknown, say so.
+
+3. AFFECTED_PERIOD: What time period is stated in the finding? If no period is given, write
+   "requires confirmation — no period stated in finding."
+
+4. PROCESS_AT_RISK: What downstream process or decision depends on the affected object?
+   Only state this if the finding gives a basis for it. If not, write "not determinable from
+   available evidence."
+
+5. RELEVANT_CHANGE: What specifically changed that is relevant to potential impact?
+   If the finding does NOT state what changed, write: "Determine what requirements changed
+   between the superseded and current versions — do not assume."
+
+6. POTENTIAL_EFFECT: What could plausibly be wrong or compromised?
+   Base this ONLY on what the finding states. Label it "Potential effect (unconfirmed)".
+   Never assert certainty.
+
+7. EVIDENCE_NEEDED: What specific record or review would bound the scope of impact?
+   Be specific — name the record type and what it would confirm.
+
+NARRATIVE: One paragraph using only this finding's own entities and (if stated) timeframe.
+State what is potentially affected and why the scope cannot yet be determined.
+A narrative that could apply to any finding without modification is a FAILURE.
+
+Respond with JSON only. <<like this>> placeholders are instructions, never echo them verbatim:
 {{
   "impact_assessment": {{
     "status": "IMPACT_REQUIRES_ASSESSMENT",
+    "affected_object": "<<the specific process, record, output, or asset named in THIS finding>>",
+    "affected_people": "<<who was affected — use only names/counts from the finding, or 'not specified'>>",
+    "affected_period": "<<stated period, or 'requires confirmation — no period stated in finding'>>",
+    "process_at_risk": "<<the downstream process/decision, or 'not determinable from available evidence'>>",
+    "relevant_change": "<<what changed and its relevance — or 'determine what changed between the versions'>>",
+    "potential_effect": "<<potential (unconfirmed) downstream consequence from this finding's own facts>>",
+    "evidence_needed": "<<specific record type and what it would confirm to bound the scope>>",
     "areas": [
-      "Identify inspections performed by the affected operators during the 30-day period.",
-      "Evaluate what requirements were introduced in the procedure revision and whether lack of training affects execution.",
-      "Determine whether affected inspection results were used in downstream quality decisions.",
-      "Establish whether retrospective review or re-inspection is required."
+      "<<specific impacted area using this finding's own entities>>",
+      "<<second area if finding supports it>>"
     ],
-    "narrative": "Impact requires retrospective assessment. The finding confirms three operators performed the revised inspection procedure over a 30-day period without recorded training completion; potential scope depends on affected inspection records and downstream quality decisions."
+    "narrative": "<<one paragraph: who/what affected, what potentially changed, why scope is unconfirmed, what would bound it — using this finding's own entities>>"
   }}
 }}

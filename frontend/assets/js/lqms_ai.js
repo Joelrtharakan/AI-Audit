@@ -45,6 +45,23 @@
         return $("<div/>").text(text || "").html();
     }
 
+    // Rule 21: Never show [object Object] — recursively convert any non-string value
+    function safeStr(val) {
+        if (val === null || val === undefined) return "";
+        if (typeof val === "string") return val;
+        if (typeof val === "boolean" || typeof val === "number") return String(val);
+        if (Array.isArray(val)) return val.map(safeStr).filter(Boolean).join("; ");
+        if (typeof val === "object") {
+            // Try common text-bearing fields first
+            return val.question || val.statement || val.description || val.text ||
+                   val.narrative || val.action || val.recommended_action ||
+                   val.if_cause_confirmed || JSON.stringify(val);
+        }
+        return String(val);
+    }
+
+    function safeEsc(val) { return escapeHtml(safeStr(val)); }
+
     function addAiBadge($field) {
         $field.attr(AI_POPULATED_FLAG, "1");
         var $existing = $field.next("." + AI_BADGE_CLASS);
@@ -113,8 +130,7 @@
         var impact = report.impact_assessment || {};
         var fiveWhy = report.five_why || {};
 
-        var categoryText = rc.category ? rc.category : "MANAGEMENT / SYSTEM — UNVERIFIED";
-        var rcStatement = rc.narrative || rc.statement || "Potential failure of the training/authorization control to ensure mandatory training completion was verified before operators were permitted to perform the revised inspection procedure.";
+        var categoryText = rc.category ? rc.category : "TO_BE_CONFIRMED";
 
         var html = "<div style='font-family: inherit; color: #1e293b; background: #f8fafc; border-radius: 8px; padding: 18px;'>";
 
@@ -131,35 +147,36 @@
         html += "<span class='label label-default' style='background:#e2e8f0; color:#334155; font-size:11px; font-weight:600; padding:4px 10px; border-radius:12px;'>" + escapeHtml(categoryText) + "</span>";
         html += "</div>";
         html += "<div style='font-size:12px; color:#64748b; margin-bottom:8px;'>Root Cause Status: <span class='label label-warning' style='font-size:10px;'>" + escapeHtml(rc.status || "NOT_ESTABLISHED") + "</span> &nbsp;&nbsp;&middot;&nbsp;&nbsp; Confidence: <span class='label label-default' style='font-size:10px;'>LOW</span></div>";
-        var leadingTitle = rc.leading_hypothesis_id ? ("Leading Hypothesis — " + rc.leading_hypothesis_id + ": " + (rc.leading_hypothesis_name || "Authorization Control")) : "Leading Hypothesis — H4: Authorization Control";
-        html += "<div style='font-weight:700; font-size:13px; color:#1e293b; margin-bottom:4px;'>" + escapeHtml(leadingTitle) + "</div>";
-        var cleanLeadStatement = (rcStatement && rcStatement.indexOf("NOT ESTABLISHED") === -1) ? rcStatement : "Training completion may not have been verified before the affected operators were permitted to perform the revised inspection procedure.";
-        html += "<p style='font-size:14px; color:#334155; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(cleanLeadStatement) + "</p>";
-        html += "<div style='font-size:11px; color:#64748b; margin-bottom:8px;'>Hypothesis Status: <span class='label label-info' style='font-size:10px;'>POSSIBLE — NOT CONFIRMED</span></div>";
-        html += "<div style='font-size:12px; color:#475569; background:#fffdf5; border:1px solid #fef3c7; border-radius:6px; padding:8px 12px; margin-bottom:12px;'>";
-        html += "<strong>Why this is the leading hypothesis:</strong> The finding establishes that the operators performed the revised procedure despite having no recorded training completion. Therefore, the effectiveness of the training/authorization control is a primary causal question. The available evidence does not establish whether the control was absent, ineffective, bypassed, or otherwise operated differently.";
-        html += "</div>";
-        
-        // Canonical Candidate Hypotheses Set (H1 - H4)
-        var candList = [
-            { id: "H1", name: "TRAINING_ASSIGNMENT", statement: "Training may not have been assigned to affected operators after procedure revision.", status: "POSSIBLE", evidence_needed: "Training assignment records" },
-            { id: "H2", name: "TRAINING_COMPLETION", statement: "Training may have been assigned but not completed by affected operators.", status: "POSSIBLE", evidence_needed: "Attendance/completion records" },
-            { id: "H3", name: "RECORDKEEPING", statement: "Training may have occurred but completion was not recorded in the matrix.", status: "POSSIBLE", evidence_needed: "Attendance evidence, competency records" },
-            { id: "H4", name: "AUTHORIZATION_CONTROL", statement: "Personnel may have been allowed to perform the revised procedure without training completion verification.", status: "POSSIBLE", evidence_needed: "Authorization/qualification records & control process" }
-        ];
+        var candList = rc.candidate_hypotheses || [];
 
-        html += "<div style='background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:12px; margin-bottom:12px;'>";
-        html += "<div style='font-weight:700; font-size:12px; color:#475569; margin-bottom:8px;'>Canonical Candidate Hypotheses Set (H1 &ndash; H4):</div>";
-        candList.forEach(function(h) {
-            html += "<div style='font-size:12px; color:#334155; margin-bottom:6px; line-height:1.4;'>";
-            html += "<strong style='color:#0f172a;'>" + escapeHtml(h.id) + " (" + escapeHtml(h.name) + "):</strong> " + escapeHtml(h.statement);
-            html += " <span class='label label-info' style='font-size:9px; margin-left:4px;'>" + escapeHtml(h.status) + "</span>";
-            if (h.evidence_needed) {
-                html += "<br/><span style='color:#64748b; font-size:11px;'>↳ Evidence needed: " + escapeHtml(h.evidence_needed) + "</span>";
-            }
+        if (rc.leading_hypothesis && rc.status !== "NOT_ESTABLISHED") {
+            html += "<div style='font-weight:700; font-size:13px; color:#1e293b; margin-bottom:4px;'>Leading Hypothesis</div>";
+            html += "<p style='font-size:14px; color:#334155; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(rc.leading_hypothesis) + "</p>";
+            html += "<div style='font-size:11px; color:#64748b; margin-bottom:12px;'>Hypothesis Status: <span class='label label-info' style='font-size:10px;'>POSSIBLE — NOT CONFIRMED</span></div>";
+        } else if (candList.length) {
+            html += "<div style='font-weight:700; font-size:13px; color:#1e293b; margin-bottom:4px;'>Candidate Root-Cause Hypotheses:</div>";
+            html += "<p style='font-size:13px; color:#475569; margin-bottom:12px; font-style:italic;'>No leading hypothesis established from the available evidence. The following competing causal hypotheses require investigation:</p>";
+        } else {
+            html += "<p style='font-size:13px; color:#475569; margin-bottom:12px; font-style:italic;'>No leading hypothesis established from the available evidence, and no candidate hypotheses were generated for this finding. Auditor investigation is required.</p>";
+        }
+
+        if (candList.length) {
+            html += "<div style='background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:12px; margin-bottom:12px;'>";
+            html += "<div style='font-weight:700; font-size:12px; color:#475569; margin-bottom:8px;'>Candidate Hypotheses:</div>";
+            candList.forEach(function(h) {
+                html += "<div style='font-size:12px; color:#334155; margin-bottom:10px; line-height:1.4; background:#fff; border:1px solid #e2e8f0; border-radius:5px; padding:8px 10px;'>";
+                html += "<strong style='color:#0f172a;'>" + safeEsc(h.id) + " (" + safeEsc(h.name) + "):</strong> " + safeEsc(h.statement);
+                html += " <span class='label label-info' style='font-size:9px; margin-left:4px;'>" + safeEsc(h.status) + "</span>";
+                if (h.evidence_needed) {
+                    html += "<br/><span style='color:#64748b; font-size:11px;'>↳ Evidence needed: " + safeEsc(h.evidence_needed) + "</span>";
+                }
+                if (h.discrimination_evidence) {
+                    html += "<br/><span style='color:#7c3aed; font-size:11px;'>↳ Distinguishes from others: " + safeEsc(h.discrimination_evidence) + "</span>";
+                }
+                html += "</div>";
+            });
             html += "</div>";
-        });
-        html += "</div>";
+        }
 
         // --- 3. Risk of Recurrence / CAPA Owner ---
         html += "<div style='font-size:12px; color:#64748b; border-top:1px solid #f1f5f9; padding-top:8px;'>";
@@ -167,137 +184,174 @@
         html += "Recommended CAPA owner: <strong>Auditor to Assign</strong>";
         html += "</div></div>";
 
-        // --- 4. Investigation Section ---
+        // --- 4. Investigation Section (built from the actual investigation plan
+        // and candidate hypotheses returned for THIS finding — never a fixed list) ---
         html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
         html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:12px;'>Investigation Areas</h5>";
-        var invAreas = [
-            "Determine whether training was assigned to the three operators following the procedure revision.",
-            "Determine why the operators were permitted to perform the revised procedure without documented training completion.",
-            "Determine whether training completion was required before authorization to perform the procedure.",
-            "Review the applicable training, authorization, and supervisory controls.",
-            "Identify inspections performed by the affected operators."
-        ];
-        html += "<ol style='padding-left:18px; font-size:13px; color:#334155; margin-bottom:14px;'>";
-        invAreas.forEach(function(area) { html += "<li style='margin-bottom:4px;'>" + escapeHtml(area) + "</li>"; });
-        html += "</ol>";
+        var invQuestions = (inv.questions && inv.questions.length) ? inv.questions : [];
+        var invEvidence = (inv.evidence_to_collect && inv.evidence_to_collect.length) ? inv.evidence_to_collect : [];
+        if (invQuestions.length) {
+            html += "<ul style='padding-left:0; list-style:none; font-size:13px; color:#334155; margin-bottom:14px;'>";
+            invQuestions.forEach(function(q, idx) {
+                html += "<li style='margin-bottom:10px; background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:10px 12px;'>";
+                // Handle new structured {question, purpose, evidence} format
+                if (q && typeof q === 'object') {
+                    html += "<div style='font-weight:600; color:#0f172a; margin-bottom:4px;'>" + escapeHtml(q.question || '') + "</div>";
+                    if (q.purpose && q.purpose !== 'not specified') {
+                        html += "<div style='font-size:11px; color:#6366f1; margin-bottom:3px;'>↳ Resolves: " + escapeHtml(q.purpose) + "</div>";
+                    }
+                    if (q.evidence && q.evidence !== 'not specified') {
+                        html += "<div style='font-size:11px; color:#64748b;'>↳ Evidence needed: " + escapeHtml(q.evidence) + "</div>";
+                    }
+                } else {
+                    // Legacy plain string fallback
+                    html += escapeHtml(q);
+                    if (invEvidence[idx]) {
+                        html += "<br/><span style='color:#64748b; font-size:11px;'>↳ Evidence: " + escapeHtml(invEvidence[idx]) + "</span>";
+                    }
+                }
+                html += "</li>";
+            });
+            html += "</ul>";
+        } else {
+            html += "<p style='font-size:13px; color:#475569; font-style:italic; margin-bottom:14px;'>No investigation questions were generated for this finding.</p>";
+        }
+        if (invEvidence.length > invQuestions.length) {
+            html += "<div style='font-size:12px; color:#64748b;'><strong>Additional evidence to collect:</strong> " + escapeHtml(invEvidence.slice(invQuestions.length).join("; ")) + "</div>";
+        }
+        html += "</div>";
 
-        html += "<h5 style='font-weight:700; color:#0f172a; margin-bottom:8px;'>Questions for Auditor</h5>";
-        var invQuestions = [
-            "Why were the operators permitted to perform the revised procedure without documented training completion?",
-            "Was mandatory training assigned to each affected operator?",
-            "Was training completion a prerequisite for authorization?",
-            "Did training occur but fail to be recorded?",
-            "Which inspections were performed by the affected operators?"
-        ];
-        html += "<ul style='padding-left:18px; font-size:13px; color:#334155; margin-bottom:14px;'>";
-        invQuestions.forEach(function(q) { html += "<li style='margin-bottom:4px;'>" + escapeHtml(q) + "</li>"; });
-        html += "</ul>";
-
-        html += "<h5 style='font-weight:700; color:#0f172a; margin-bottom:8px;'>Evidence to Collect</h5>";
-        var invEvidence = [
-            "Training assignment records",
-            "Training completion/attendance records",
-            "Training matrix history",
-            "Procedure revision records",
-            "Authorization/qualification records",
-            "Supervisory verification records",
-            "Affected inspection records"
-        ];
-        html += "<ul style='padding-left:18px; font-size:13px; color:#334155; margin-bottom:0;'>";
-        invEvidence.forEach(function(ev) { html += "<li style='margin-bottom:4px;'>" + escapeHtml(ev) + "</li>"; });
-        html += "</ul></div>";
-
-        // --- 5. 5-Why Root Cause Chain ---
+        // --- 5. 5-Why Root Cause Chain (rendered only from what the backend actually
+        // returned for THIS finding — no fabricated steps) ---
         html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:14px;'>5-Why Root Cause Chain <span style='font-size:12px; font-weight:normal; color:#64748b;'>(INCOMPLETE — ROOT CAUSE NOT ESTABLISHED)</span></h5>";
-        var defaultSteps = [
-            { question: "Why were three operators performing the revised procedure without completing mandatory training?", answer: "The operators performed the revised procedure despite having no recorded completion of the mandatory training requirement.", status: "VERIFIED" },
-            { question: "Why were the operators able to perform the procedure without documented training completion?", answer: "The available evidence does not establish why the operators were permitted to perform the procedure without documented training completion.", status: "UNKNOWN" },
-            { question: "Why was the lack of training completion not prevented or detected before the work was performed?", answer: "The effectiveness of the organization's training verification and authorization controls has not yet been established.", status: "NOT_ESTABLISHED" },
-            { question: "What control failure allowed the condition to occur?", answer: "The applicable training assignment, completion monitoring, authorization, and supervisory controls require investigation.", status: "NOT_ESTABLISHED" },
-            { question: "What systemic root cause allowed personnel without documented training completion to perform the revised procedure?", answer: "A definitive systemic root cause cannot be established from the available evidence.", status: "NOT_ESTABLISHED" }
-        ];
-        var stepsToRender = (fiveWhy.steps && fiveWhy.steps.length) ? fiveWhy.steps : defaultSteps;
-        $.each(stepsToRender, function(i, step) {
-            var num = i + 1;
-            var stStatus = (num === 1) ? "VERIFIED" : (step.status || "UNKNOWN");
-            html += "<div style='display:flex; gap:12px; margin-bottom:12px; align-items:flex-start;'>";
-            html += "<div style='background:#1e293b; color:#ffffff; font-weight:700; border-radius:4px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0;'> " + num + " </div>";
-            html += "<div style='flex-grow:1; background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:10px 14px;'>";
-            html += "<div style='font-weight:600; font-size:13px; color:#1e293b;'>" + escapeHtml(step.question) + "</div>";
-            html += "<div style='font-size:13px; color:#475569; margin-top:4px;'>&#8627; " + escapeHtml(step.answer || "Requires verification") + " <span class='label label-default' style='font-size:10px; margin-left:6px;'>" + escapeHtml(stStatus) + "</span></div>";
-            html += "</div></div>";
-        });
+        html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:14px;'>5-Why Root Cause Chain <span style='font-size:12px; font-weight:normal; color:#64748b;'>(" + escapeHtml(fiveWhy.status_note || (fiveWhy.is_complete ? "COMPLETE" : "INCOMPLETE")) + ")</span></h5>";
+        var stepsToRender = (fiveWhy.steps && fiveWhy.steps.length) ? fiveWhy.steps : [];
+        if (stepsToRender.length) {
+            $.each(stepsToRender, function(i, step) {
+                var num = i + 1;
+                var stStatus = (num === 1) ? "VERIFIED" : (step.status || "UNKNOWN");
+                html += "<div style='display:flex; gap:12px; margin-bottom:12px; align-items:flex-start;'>";
+                html += "<div style='background:#1e293b; color:#ffffff; font-weight:700; border-radius:4px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0;'> " + num + " </div>";
+                html += "<div style='flex-grow:1; background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:10px 14px;'>";
+                html += "<div style='font-weight:600; font-size:13px; color:#1e293b;'>" + escapeHtml(step.question) + "</div>";
+                html += "<div style='font-size:13px; color:#475569; margin-top:4px;'>&#8627; " + escapeHtml(step.answer || "Requires verification") + " <span class='label label-default' style='font-size:10px; margin-left:6px;'>" + escapeHtml(stStatus) + "</span></div>";
+                html += "</div></div>";
+            });
+        } else {
+            html += "<p style='font-size:13px; color:#475569; font-style:italic;'>No 5-Why chain was generated for this finding.</p>";
+        }
+        if (rc.status === "NOT_ESTABLISHED") {
+            html += "<div style='font-size:12px; font-weight:600; color:#b45309; background:#fffdf5; border:1px solid #fef3c7; border-radius:6px; padding:8px 12px; margin-top:8px;'>";
+            html += "5-Why Status: INCOMPLETE &mdash; additional evidence required.";
+            html += "</div>";
+        }
         html += "</div>";
 
         // --- 6. Contributing Factors ---
         html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
         html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:12px;'>Contributing Factors</h5>";
-        var cfs = [
-            "Training completion may not have been verified before personnel were assigned to perform the revised procedure.",
-            "The process for identifying personnel affected by procedure revisions and assigning mandatory training may require review.",
-            "Authorization controls may not have prevented personnel without documented training completion from performing the revised procedure."
-        ];
-        html += "<ul style='list-style:none; padding-left:0; margin-bottom:0;'>";
-        cfs.forEach(function(cf) {
-            html += "<li style='font-size:13px; color:#334155; margin-bottom:8px; display:flex; align-items:center; gap:8px;'>";
-            html += "<span style='color:#eab308; font-weight:bold;'>&#9670;</span> " + escapeHtml(cf) + " <span class='label label-warning' style='font-size:10px;'>POSSIBLE — NOT CONFIRMED</span></li>";
-        });
-        html += "</ul></div>";
+        html += "<p style='font-size:13px; color:#64748b; font-style:italic; margin-bottom:0;'>Additional contributing factors are not established from the available evidence.</p>";
+        html += "</div>";
 
         // --- 7 & 8. Action Cards (Side-by-Side: Corrective Actions vs Preventive Actions) ---
         html += "<div class='row' style='margin-bottom:16px;'>";
 
-        // 7. Corrective Actions (Immediate)
+        // 7. Corrective Actions (Immediate) — from the CA draft's immediate_action
+        // field for this finding, falling back to CAPA's recommended_investigation.
         html += "<div class='col-sm-6'><div style='background:#fffdf5; border:1px solid #fef3c7; border-radius:8px; padding:16px; height:100%; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
         html += "<h5 style='font-weight:700; color:#b45309; margin-top:0; margin-bottom:12px;'><span class='glyphicon glyphicon-shield' style='margin-right:6px;'></span> Corrective Actions (immediate)</h5>";
-        html += "<ol style='padding-left:18px; margin-bottom:0; font-size:13px; color:#334155;'>";
-        var immActions = [
-            "Prevent affected operators from independently performing the revised procedure until mandatory training and competency requirements are completed and documented.",
-            "Identify inspections performed by the affected operators since the revised procedure became effective.",
-            "Assess whether affected inspections require retrospective review, verification, or re-inspection."
-        ];
-        immActions.forEach(function(act) {
-            html += "<li style='margin-bottom:8px; line-height:1.4;'>" + escapeHtml(act) + "</li>";
-        });
-        html += "</ol></div></div>";
+        var immActions = [];
+        if (caDraft && caDraft.immediate_action) {
+            immActions = String(caDraft.immediate_action).split(/\n+/).filter(Boolean);
+        } else if (capa.recommended_investigation && capa.recommended_investigation.length) {
+            immActions = capa.recommended_investigation;
+        }
+        if (immActions.length) {
+            html += "<ol style='padding-left:18px; margin-bottom:0; font-size:13px; color:#334155;'>";
+            immActions.forEach(function(act) {
+                html += "<li style='margin-bottom:8px; line-height:1.4;'>" + escapeHtml(act) + "</li>";
+            });
+            html += "</ol>";
+        } else {
+            html += "<p style='font-size:13px; color:#475569; font-style:italic; margin-bottom:0;'>No immediate corrective action was generated for this finding.</p>";
+        }
+        html += "</div></div>";
 
         // 8. Potential CAPA Areas — Pending Investigation (Recurrence)
         html += "<div class='col-sm-6'><div style='background:#f0fdf4; border:1px solid #dcfce7; border-radius:8px; padding:16px; height:100%; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#15803d; margin-top:0; margin-bottom:4px;'><span class='glyphicon glyphicon-ok-sign' style='margin-right:6px;'></span> Potential CAPA Areas — Pending Investigation</h5>";
-        html += "<div style='font-size:11px; color:#15803d; font-weight:600; margin-bottom:10px;'>Status: PENDING_INVESTIGATION (Conditional on confirmed hypothesis)</div>";
-        html += "<ul style='padding-left:14px; margin-bottom:0; font-size:12px; color:#334155; list-style:none;'>";
-        var conditionalCapa = [
-            { cond: "IF H1 IS CONFIRMED (Training Assignment)", text: "Strengthen assignment of mandatory training following procedure revisions and verify assignment completion." },
-            { cond: "IF H2 IS CONFIRMED (Training Completion)", text: "Strengthen monitoring and escalation of mandatory training completion." },
-            { cond: "IF H3 IS CONFIRMED (Recordkeeping)", text: "Strengthen training record capture, reconciliation, and verification." },
-            { cond: "IF H4 IS CONFIRMED (Authorization Control)", text: "Require documented training completion before authorization to perform revised procedures." }
-        ];
-        conditionalCapa.forEach(function(item) {
-            html += "<li style='margin-bottom:8px; line-height:1.4;'>";
-            html += "<strong style='color:#166534; font-size:11px;'>" + escapeHtml(item.cond) + ":</strong><br/>" + escapeHtml(item.text);
-            html += "</li>";
-        });
-        html += "</ul></div></div>";
+        html += "<h5 style='font-weight:700; color:#15803d; margin-top:0; margin-bottom:4px;'><span class='glyphicon glyphicon-ok-sign' style='margin-right:6px;'></span> Potential CAPA Areas</h5>";
+        html += "<div style='font-size:11px; color:#15803d; font-weight:600; margin-bottom:10px;'>Status: " + escapeHtml(capa.status || "INVESTIGATION_REQUIRED") + "</div>";
+        var potentialAreas = capa.potential_areas || [];
+        if (potentialAreas.length) {
+            html += "<ul style='padding-left:14px; margin-bottom:0; font-size:12px; color:#334155; list-style:none;'>";
+            potentialAreas.forEach(function(text) {
+                html += "<li style='margin-bottom:8px; line-height:1.4;'>" + escapeHtml(text) + "</li>";
+            });
+            html += "</ul>";
+        } else {
+            html += "<p style='font-size:12px; color:#475569; font-style:italic; margin-bottom:0;'>No potential CAPA areas identified pending investigation.</p>";
+        }
+        html += "</div></div>";
 
         html += "</div>";
 
-        // --- 9. Impact Assessment ---
+        // --- 8b. Conditional CAPA Actions (IF cause confirmed → THEN action) ---
+        var conditionalActions = capa.conditional_actions || [];
+        if (conditionalActions.length) {
+            html += "<div style='background:#f0f9ff; border:1px solid #bae6fd; border-radius:8px; padding:14px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
+            html += "<h5 style='font-weight:700; color:#0369a1; margin-top:0; margin-bottom:8px;'><span class='glyphicon glyphicon-random' style='margin-right:6px;'></span>Conditional CAPA — Pending Investigation</h5>";
+            html += "<div style='font-size:11px; color:#0369a1; margin-bottom:10px;'>These actions apply only if the stated cause is confirmed during investigation.</div>";
+            conditionalActions.forEach(function(ca_action) {
+                var ifText = safeStr(ca_action.if_cause_confirmed);
+                var thenText = safeStr(ca_action.recommended_action);
+                if (!ifText && !thenText) return;
+                html += "<div style='background:#fff; border:1px solid #e0f2fe; border-radius:5px; padding:8px 12px; margin-bottom:8px; font-size:12px;'>";
+                html += "<div style='color:#0369a1; font-weight:600; margin-bottom:3px;'>IF: " + escapeHtml(ifText) + "</div>";
+                html += "<div style='color:#334155;'>→ THEN: " + escapeHtml(thenText) + "</div>";
+                html += "</div>";
+            });
+            html += "</div>";
+        }
+
+        // --- 9. Impact Assessment (structured per Rule 17) ---
         html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:8px;'>Impact Assessment <span class='label label-default' style='font-size:11px; margin-left:6px;'>REQUIRES_ASSESSMENT</span></h5>";
-        html += "<p style='font-size:13px; color:#334155; margin-bottom:8px;'>The finding confirms that three operators performed the revised inspection procedure without recorded training completion. The revision was issued 30 days before the analysis; the actual period during which the affected operators performed the revised procedure requires confirmation.</p>";
-        html += "<div style='font-weight:600; font-size:12px; color:#475569; margin-bottom:6px;'>Potential impact pathway:</div>";
-        var impactPathways = [
-            "Identify inspections performed by affected operators since the revised procedure became effective.",
-            "Establish the actual affected period.",
-            "Determine what changed in the revised procedure.",
-            "Assess whether lack of training could affect execution or interpretation.",
-            "Determine whether affected inspection results were used in downstream decisions.",
-            "Determine whether retrospective review or re-inspection is required."
-        ];
-        html += "<ul style='padding-left:18px; font-size:13px; color:#334155; margin-bottom:0;'>";
-        impactPathways.forEach(function(p) { html += "<li style='margin-bottom:4px;'>" + escapeHtml(p) + "</li>"; });
-        html += "</ul></div>";
+        html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:8px;'>Impact Assessment <span class='label label-default' style='font-size:11px; margin-left:6px;'>" + safeEsc(impact.status || "REQUIRES_ASSESSMENT") + "</span></h5>";
+        if (impact.narrative) {
+            html += "<p style='font-size:13px; color:#334155; margin-bottom:10px;'>" + safeEsc(impact.narrative) + "</p>";
+        }
+        // Render structured impact fields as a compact table when available
+        var impactFields = [
+            { label: "Affected Object", val: impact.affected_object },
+            { label: "Affected People", val: impact.affected_people },
+            { label: "Affected Period", val: impact.affected_period },
+            { label: "Process at Risk", val: impact.process_at_risk },
+            { label: "Relevant Change", val: impact.relevant_change },
+            { label: "Potential Effect", val: impact.potential_effect },
+            { label: "Evidence Needed", val: impact.evidence_needed }
+        ].filter(function(f) { return f.val && safeStr(f.val); });
+        if (impactFields.length) {
+            html += "<table style='width:100%; font-size:12px; border-collapse:collapse; margin-bottom:8px;'>";
+            impactFields.forEach(function(f) {
+                html += "<tr>";
+                html += "<td style='font-weight:600; color:#475569; width:130px; padding:4px 8px 4px 0; vertical-align:top;'>" + escapeHtml(f.label) + ":</td>";
+                html += "<td style='color:#334155; padding:4px 0;'>" + safeEsc(f.val) + "</td>";
+                html += "</tr>";
+            });
+            html += "</table>";
+        }
+        // Fallback: show areas list if no structured fields
+        if (!impactFields.length) {
+            var impactAreas = impact.areas || [];
+            if (impactAreas.length) {
+                html += "<div style='font-weight:600; font-size:12px; color:#475569; margin-bottom:6px;'>Potential impact pathway:</div>";
+                html += "<ul style='padding-left:18px; font-size:13px; color:#334155; margin-bottom:0;'>";
+                impactAreas.forEach(function(p) { html += "<li style='margin-bottom:4px;'>" + safeEsc(p) + "</li>"; });
+                html += "</ul>";
+            } else if (!impact.narrative) {
+                html += "<p style='font-size:13px; color:#475569; font-style:italic; margin-bottom:0;'>No impact assessment was generated for this finding.</p>";
+            }
+        }
+        html += "</div>";
 
         // --- 10. AI CA Draft Suggestions (5 Writable Fields) ---
         if (caDraft) {
@@ -306,11 +360,6 @@
             html += "<div style='font-size:12px; color:#64748b;'>Form fields below have been populated with AI recommendations. Auditor review is required before saving.</div>";
             html += "</div>";
         }
-
-        // --- 11. Grounding Report Footer ---
-        html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:6px; padding:10px 14px; font-size:12px; color:#64748b;'>";
-        html += "<strong>Claim Grounding Report:</strong> Hard violations: 0 &nbsp;|&nbsp; Verified facts: 4 &nbsp;|&nbsp; Temporal claims: Grounded &nbsp;|&nbsp; Unsupported claims: Removed";
-        html += "</div>";
 
         html += "<div style='text-align:center; font-size:11px; font-weight:600; color:#94a3b8; margin-top:16px; letter-spacing:0.5px;'>AI-GENERATED &mdash; HUMAN AUDITOR REVIEW REQUIRED</div>";
         html += "</div>";

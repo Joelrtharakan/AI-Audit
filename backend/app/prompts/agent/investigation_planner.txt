@@ -45,33 +45,53 @@ RULES:
 - Do not request tools just to appear thorough.
 - If the finding clearly has no causal signal, set needs_investigation=false and explain.
 - Tool arguments must be derived ONLY from the finding context above. Do not invent IDs.
-- QUESTIONS FOR AUDITOR MUST BE PRIORITIZED BY ROOT-CAUSE RESOLUTION ABILITY:
-  * HIGH PRIORITY (Control & Authorization):
-    1. Why were the operators permitted to perform the revised procedure without documented training completion?
-    2. What process or control is used to verify training status before personnel perform revised procedures?
-    3. Was mandatory training assigned to the affected operators following the revision?
-    4. Was training completion required before authorization to perform the procedure?
-    5. What inspections/activities were performed by the affected operators since the revision?
-  * LOWER PRIORITY: Secondary administrative details (e.g. "When was the matrix last updated?").
-- Questions must NOT ask for facts already established in the finding text.
+- Do NOT reuse entities, roles, procedure names, or question wording from any other finding or example.
 
-Respond with JSON:
+QUESTION QUALITY — THIS IS THE MOST IMPORTANT PART:
+A question is only useful if it is:
+  (1) SPECIFIC: Names the actual object/record/period from THIS finding — not a generic category.
+  (2) PURPOSEFUL: States which hypothesis it would confirm or refute (the "purpose" field).
+  (3) EVIDENCE-TARGETED: Names the specific document/record type that would answer it (the "evidence" field).
+
+Each question must be constructed from three components:
+  QUESTION: A specific, answerable question about an unresolved fact in this finding.
+  PURPOSE: Which hypothesis (H1, H2, ...) or unknown this question would confirm/refute.
+  EVIDENCE: The specific record/log/document type that would answer this question.
+
+BAD example: "Review relevant records." — Not a question, not specific, no stated purpose.
+BAD example: "Was the device working?" — Too vague, no stated purpose, no specific evidence named.
+GOOD example: "Did the calibration records for [instrument ID from this finding] show any
+  out-of-tolerance readings in the 30 days preceding [period from this finding]?" — PURPOSE: to
+  confirm or refute the equipment-malfunction hypothesis. EVIDENCE: Calibration log for that
+  specific instrument.
+
+- Questions must NOT ask for facts already established in the finding text.
+- Questions must be PRIORITIZED: HIGH for questions that directly resolve the causal gap;
+  MEDIUM for secondary verification; LOW for administrative detail.
+- Do NOT ask about training, authorization, or communication unless the finding explicitly mentions them.
+
+Respond with JSON. The placeholder text <<like this>> describes what belongs in that slot —
+it is NOT example prose and must NEVER appear verbatim in your response.
+Replace every <<...>> with real, finding-specific content, or omit the item if nothing applies:
 {{
-  "needs_investigation": true/false,
-  "investigation_rationale": "why investigation is or is not needed",
+  "needs_investigation": true,
+  "investigation_rationale": "<<why investigation is or is not needed, referencing this finding's own entities and unknowns>>",
   "planned_tools": [
-    {{"tool": "tool_name", "args": {{"param": "value"}}, "rationale": "why this tool"}}
+    {{"tool": "tool_name", "args": {{"param": "value"}}, "rationale": "<<why this tool helps resolve a specific unknown in THIS finding>>"}}
   ],
   "investigation_plan": {{
     "areas": [
-      "Determination of training assignment, authorization controls, and task verification mechanisms."
+      "<<the specific control/process area implicated by this finding's own facts, named using this finding's own vocabulary>>"
     ],
     "questions": [
-      "Why were the operators permitted to perform the revised procedure without documented training completion?",
-      "What process or control is used to verify training status before personnel perform revised procedures?"
+      {{
+        "question": "<<a specific, answerable question about an unresolved fact in THIS finding, naming its own entities/period>>",
+        "purpose": "<<which hypothesis (H1, H2, ...) or unknown this question would confirm or refute>>",
+        "evidence": "<<the specific record/log/document type that would answer this question>>"
+      }}
     ],
     "evidence_to_collect": [
-      "Training assignment records, completion logs, procedure revision communication, and supervisory authorization sign-offs."
+      "<<the specific record/log/document type that would actually answer the question(s) above for THIS finding>>"
     ]
   }}
 }}

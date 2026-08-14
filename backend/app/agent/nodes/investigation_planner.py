@@ -13,11 +13,18 @@ from __future__ import annotations
 import json
 import logging
 
+from app.agent.grounding_guard import (
+    build_source_text,
+    clean_structured_leak,
+    is_placeholder_leak,
+    mentions_unsupported_domain,
+)
 from app.agent.state import AgentState
 from app.config import get_settings
-from app.models.agent import AgentTraceStep, InvestigationPlan
+from app.models.agent import AgentTraceStep, InvestigationPlan, InvestigationQuestion
 from app.services.llm_client import LLMError, get_llm_client
 from app.services.llm_json import parse_llm_json
+from app.services.text_grounding import significant_words
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +102,89 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
         state["_planned_tool_calls"] = valid_tools  # store full spec with args
 
         raw_plan = parsed.get("investigation_plan", {})
+
+        # Parse structured question objects {question, purpose, evidence}
+        # Fall back gracefully if the model returns plain strings (older format)
+        raw_questions = raw_plan.get("questions", [])
+        parsed_questions: list[InvestigationQuestion] = []
+        for q in raw_questions:
+            if isinstance(q, dict):
+                q_text = clean_structured_leak(q.get("question", ""))
+                q_purpose = clean_structured_leak(q.get("purpose", ""))
+                q_evidence = clean_structured_leak(q.get("evidence", ""))
+                if q_text:
+                    parsed_questions.append(InvestigationQuestion(
+                        question=q_text,
+                        purpose=q_purpose or "not specified",
+                        evidence=q_evidence or "not specified",
+                    ))
+            elif isinstance(q, str):
+                # Backward-compat: plain string — wrap as InvestigationQuestion
+                q_text = clean_structured_leak(q)
+                if q_text:
+                    parsed_questions.append(InvestigationQuestion(
+                        question=q_text,
+                        purpose="not specified",
+                        evidence="not specified",
+                    ))
+
         plan = InvestigationPlan(
-            areas=[str(x) for x in raw_plan.get("areas", [])],
-            questions=[str(x) for x in raw_plan.get("questions", [])],
-            evidence_to_collect=[str(x) for x in raw_plan.get("evidence_to_collect", [])],
+            areas=[a for a in (clean_structured_leak(x) for x in raw_plan.get("areas", [])) if a],
+            questions=parsed_questions,
+            evidence_to_collect=[
+                a for a in (clean_structured_leak(x) for x in raw_plan.get("evidence_to_collect", [])) if a
+            ],
         )
+
+        # DOMAIN GUARD: drop any area/evidence item that invokes a training/authorization domain
+        # this finding never mentions.
+        domain_source_text = build_source_text(
+            state["request"].finding_text, state.get("evidence_ledger", []),
+            extraction.stated_facts if extraction else [],
+        )
+        for field_name in ("areas", "evidence_to_collect"):
+            kept = []
+            for item in getattr(plan, field_name):
+                if mentions_unsupported_domain(item, domain_source_text):
+                    trace.append(AgentTraceStep.warn(
+                        f"Investigation {field_name[:-1] if field_name != 'evidence_to_collect' else 'evidence item'} "
+                        f"dropped — invokes training/authorization domain not supported by this finding: {item!r}"
+                    ))
+                    continue
+                if is_placeholder_leak(item):
+                    trace.append(AgentTraceStep.warn(
+                        f"Investigation {field_name} item dropped — echoed prompt instruction text: {item!r}"
+                    ))
+                    continue
+                kept.append(item)
+            setattr(plan, field_name, kept)
+
+        # Apply domain guard to structured question objects
+        kept_questions = []
+        for iq in plan.questions:
+            if mentions_unsupported_domain(iq.question, domain_source_text):
+                trace.append(AgentTraceStep.warn(
+                    f"Investigation question dropped — unsupported domain: {iq.question!r}"
+                ))
+                continue
+            if is_placeholder_leak(iq.question):
+                trace.append(AgentTraceStep.warn(
+                    f"Investigation question dropped — echoed prompt instruction text: {iq.question!r}"
+                ))
+                continue
+            kept_questions.append(iq)
+        plan.questions = kept_questions
+
+        # QUESTION -> EVIDENCE CONSISTENCY CHECK (over structured questions)
+        evidence_vocab = [significant_words(e) for e in plan.evidence_to_collect]
+        for iq in plan.questions:
+            q_words = significant_words(iq.question)
+            if not q_words:
+                continue
+            if not any(q_words & ev_words for ev_words in evidence_vocab):
+                trace.append(AgentTraceStep.warn(
+                    f"Investigation question has no matching evidence item: {iq.question!r}"
+                ))
 
         if needs_investigation and planned_tools:
             trace.append(AgentTraceStep.ok(

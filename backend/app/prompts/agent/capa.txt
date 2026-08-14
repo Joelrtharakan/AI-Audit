@@ -7,28 +7,57 @@ ROOT CAUSE NARRATIVE: {root_cause_narrative}
 EVIDENCE LEDGER:
 {evidence_ledger_json}
 
-CAPA STATUS DECISION RULES (ENFORCE STRICTLY — not just guidelines):
-- CAPA_RECOMMENDED: ONLY when root_cause_status == ESTABLISHED and VERIFIED evidence exists.
-- CAPA_DRAFT_POSSIBLE: root_cause_status == STATED_UNVERIFIED (draft can be prepared but labeled as unverified).
+============================================================
+CAPA STATUS DECISION RULES (ENFORCE STRICTLY)
+============================================================
+- CAPA_RECOMMENDED: ONLY when root_cause_status == VERIFIED or SUPPORTED and VERIFIED evidence exists.
+- CAPA_DRAFT_POSSIBLE: root_cause_status == STATED_UNVERIFIED (draft can be prepared but labeled unverified).
 - INVESTIGATION_REQUIRED: root_cause_status == NOT_ESTABLISHED or evidence is insufficient.
 - INSUFFICIENT_EVIDENCE: Critical evidence gaps prevent any meaningful recommendation.
 - NO_CAPA_RECOMMENDATION_YET: Too early in investigation.
 
-RULES:
+============================================================
+CONDITIONAL CAPA REASONING
+============================================================
+Since the root cause is often not yet confirmed, generate CONDITIONAL action branches.
+For each plausible hypothesis in the RCA narrative, generate a conditional branch:
+
+  IF [specific cause condition is confirmed] THEN [specific corrective action]
+
+Example structure (do NOT use this example verbatim — derive from this finding's own causes):
+  IF it is confirmed that training was never assigned to the affected operators,
+  THEN the corrective action is to update the training matrix to include the revised procedure
+  and verify assignment before authorizing those operators to perform the task.
+
+Each conditional action must:
+- Name the specific cause condition from THIS finding (not a generic statement).
+- Specify the concrete action that addresses exactly that cause.
+- Not assume causes that are not plausible based on this finding's evidence.
+
+============================================================
+RULES
+============================================================
 - Do NOT recommend CAPA_RECOMMENDED when root cause is STATED_UNVERIFIED or NOT_ESTABLISHED.
-- Potential corrective action areas are possibilities only — label them as such.
-- Recommended investigation tells the auditor what to do BEFORE a real CAPA can be established.
+- potential_areas are possibilities only — label them as "Potential area (pending confirmation)".
+- recommended_investigation tells the auditor what to do BEFORE a real CAPA can be established.
 - Do NOT invent specific SOPs, procedures, or policies not present in the evidence ledger.
+- Conditional actions must not mention any entity, role, or process not present in this finding.
 
 Respond with JSON:
 {{
   "capa": {{
     "status": "CAPA_RECOMMENDED|CAPA_DRAFT_POSSIBLE|INVESTIGATION_REQUIRED|INSUFFICIENT_EVIDENCE|NO_CAPA_RECOMMENDATION_YET",
     "potential_areas": [
-      "Potential corrective action area (not a confirmed requirement)"
+      "<<Potential area (pending confirmation): specific corrective action area from this finding's own control landscape>>"
     ],
     "recommended_investigation": [
-      "What to investigate before a final CAPA can be established"
+      "<<What to investigate before a final CAPA can be established — specific to this finding's unknowns>>"
+    ],
+    "conditional_actions": [
+      {{
+        "if_cause_confirmed": "<<IF the specific cause condition from this finding is confirmed (e.g. 'If it is confirmed that training was never assigned...')>>",
+        "recommended_action": "<<THEN the specific corrective action that addresses exactly that cause — not a generic recommendation>>"
+      }}
     ]
   }}
 }}

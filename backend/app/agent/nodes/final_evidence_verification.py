@@ -82,7 +82,11 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # Clean Investigation Plan
     inv = state.get("investigation_plan")
     if inv:
-        inv.questions = [_clean_text(q) or q for q in inv.questions]
+        # questions are InvestigationQuestion objects — clean each text field
+        for iq in inv.questions:
+            iq.question = _clean_text(iq.question) or iq.question
+            iq.purpose = _clean_text(iq.purpose) or iq.purpose
+            iq.evidence = _clean_text(iq.evidence) or iq.evidence
         inv.areas = [_clean_text(a) or a for a in inv.areas]
 
     # Clean 5-Why
@@ -136,7 +140,10 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             if report.root_cause.missing_evidence:
                 report.root_cause.missing_evidence = [_clean_text(e) or e for e in report.root_cause.missing_evidence]
         if report.investigation:
-            report.investigation.questions = [_clean_text(q) or q for q in report.investigation.questions]
+            for iq in report.investigation.questions:
+                iq.question = _clean_text(iq.question) or iq.question
+                iq.purpose = _clean_text(iq.purpose) or iq.purpose
+                iq.evidence = _clean_text(iq.evidence) or iq.evidence
             report.investigation.areas = [_clean_text(a) or a for a in report.investigation.areas]
             if report.investigation.evidence_to_collect:
                 report.investigation.evidence_to_collect = [_clean_text(e) or e for e in report.investigation.evidence_to_collect]

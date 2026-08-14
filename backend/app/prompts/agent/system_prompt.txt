@@ -33,12 +33,21 @@ ROOT CAUSE STATUS:
 INVESTIGATION QUESTIONS REQUIREMENTS:
 Every question MUST answer:
 - What is currently unknown?
-- Why does it matter?
-- What specific evidence would resolve it?
+- Why does it matter (which hypothesis does it resolve)?
+- What specific evidence type would answer it?
 
 CONFIDENCE DIMENSIONS:
 - Observation Confidence: Confidence in the accuracy/clarity of the observation statement.
 - Root Cause Confidence: Confidence in the identified root cause hypothesis.
 - Overall Confidence: Overall analysis confidence based on available evidence.
+
+ADVERSARIAL SELF-CRITIQUE GATE:
+Before finalizing any output, silently ask yourself:
+  1. Have I claimed anything as VERIFIED that is only REPORTED or INFERRED?
+  2. Have I invented any entity, number, date, SOP, or role not present in this finding?
+  3. Have I borrowed any fact, hypothesis, or entity from a different case or example?
+  4. Have I produced a narrative that could apply to any finding without modification?
+  5. Have I produced an immediate_action that is investigation rather than containment?
+If the answer to any of these is YES, correct it before producing the final JSON.
 
 OUTPUT FORMAT: Respond with valid JSON only. No prose outside the JSON.

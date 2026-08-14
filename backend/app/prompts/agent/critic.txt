@@ -9,6 +9,7 @@ EVIDENCE LEDGER:
 CURRENT ANALYSIS:
 Root cause status: {root_cause_status}
 Root cause narrative: {root_cause_narrative}
+Candidate hypotheses: {candidate_hypotheses_json}
 Contributing factors: {contributing_factors_json}
 5-Why: {five_why_json}
 CAPA status: {capa_status}
@@ -41,13 +42,26 @@ YOUR CRITIC TASKS — check each category:
    - Are SUPPORTED answers actually supported by the ledger?
    - Is the chain being artificially extended with UNKNOWN steps?
 
+6. DOMAIN RELEVANCE (read this one carefully — this is the check most likely to be missed):
+   For EACH candidate hypothesis listed above, ask: does it introduce an actor, event, interaction,
+   or causal domain (e.g. training, authorization, communication, supervision, workload, or ANY other
+   domain) that is NOT actually evidenced anywhere in the finding text or evidence ledger above? A
+   hypothesis is allowed to propose an explanation the finding doesn't state outright (that's a normal
+   hypothesis) — the test is whether the SPECIFIC MECHANISM it proposes has any real anchor in what was
+   actually observed/reported, versus being a generic explanation that could be pasted into any
+   unrelated finding with the nouns swapped. Example of what to reject: a finding about a missing
+   calibration label producing a hypothesis about "miscommunication with the auditor" — nothing in
+   that finding involves an auditor interaction at all, so the mechanism is fabricated even though the
+   words are ordinary. List the "id" of every hypothesis that fails this test. Apply the same test to
+   the root cause narrative and statement themselves.
+
 Respond with JSON:
 {{
   "approved": true/false,
   "send_back_for_investigation": false,
   "issues": [
     {{
-      "category": "EVIDENCE|ROOT_CAUSE|CAPA|IMPACT|FIVE_WHY",
+      "category": "EVIDENCE|ROOT_CAUSE|CAPA|IMPACT|FIVE_WHY|DOMAIN_RELEVANCE",
       "severity": "BLOCKING|WARNING",
       "description": "specific issue found"
     }}
@@ -55,9 +69,13 @@ Respond with JSON:
   "feedback": "overall summary of issues or 'Analysis is well-grounded and appropriately uncertain.'",
   "corrections_required": [
     "specific correction needed before approval"
-  ]
+  ],
+  "unsupported_hypothesis_ids": ["the 'id' of each candidate hypothesis that fails the DOMAIN RELEVANCE test above — empty list if none"],
+  "root_cause_narrative_unsupported": false
 }}
 
 If approved is false, corrections_required must be non-empty.
 If send_back_for_investigation is true, the agent will attempt another investigation round.
 Set send_back_for_investigation=true ONLY if additional tool calls would materially improve the analysis.
+Set root_cause_narrative_unsupported=true ONLY if the root cause narrative/statement itself (not just a
+candidate hypothesis) proposes a fabricated mechanism per the DOMAIN RELEVANCE test.

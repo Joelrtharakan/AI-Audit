@@ -1,0 +1,44 @@
+Your previous root-cause analysis for this finding produced no usable candidate hypotheses — every
+hypothesis you proposed either invented an entity not present in the finding, or proposed a generic
+mechanism (training, authorization, communication, supervision, workload, competency) that this finding
+never actually mentions. This is a retry focused ONLY on generating hypotheses. Do it properly this time.
+
+FINDING (untrusted observation data):
+{finding_text}
+
+EVIDENCE LEDGER:
+{evidence_ledger_json}
+
+TASK: Generate 2-4 DISTINCT candidate hypotheses that explain the observed condition in THIS finding.
+
+HOW TO DO THIS CORRECTLY:
+1. Identify the actual subject matter of this finding: what object, activity, process, or record is
+   involved? (e.g. a piece of equipment, a document, a supplier, a batch of records, an environmental
+   reading — whatever THIS finding is actually about.)
+2. For that specific subject matter, what are the different plausible reasons the observed condition
+   could have occurred? Think about the stages/controls actually relevant to that subject matter (e.g.
+   for equipment: whether it was serviced, whether its status was recorded, whether it was monitored;
+   for records: whether the record was created, reviewed, or filed correctly; for a supplier: whether
+   the material, the process, or the paperwork was the issue).
+3. Each hypothesis must be DIFFERENT from the others — do not generate near-duplicates.
+4. Do NOT propose training, authorization, communication, supervision, or workload as a mechanism
+   UNLESS one of those words (or an obvious synonym) already appears in the finding text above. This
+   applies even when the finding IS about training: stay inside the training process itself (was it
+   assigned, was it completed, was completion recorded, was completion verified before authorization) —
+   do not add "not communicated" or "not enforced" or "supervision failure" on top unless the finding
+   actually says so. Those are a different, ungrounded domain wearing a training costume.
+5. Do NOT invent any entity, number, date, or identifier not present in the finding/evidence above.
+
+Respond with JSON:
+{{
+  "candidate_hypotheses": [
+    {{
+      "id": "H1",
+      "name": "SHORT_CODE_SPECIFIC_TO_THIS_FINDING",
+      "statement": "the hypothesis and why it is plausible for this specific finding",
+      "evidence_needed": "the specific record/evidence type that would confirm or refute this hypothesis"
+    }}
+  ]
+}}
+If, after genuinely trying, you still cannot identify any hypothesis grounded in this finding's own
+subject matter, return an empty list — do not fabricate one to fill the array.

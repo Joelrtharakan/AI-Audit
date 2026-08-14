@@ -15,6 +15,18 @@ from __future__ import annotations
 import json
 import logging
 
+from app.agent.grounding_guard import (
+    SAFE_RECURRENCE_FALLBACK,
+    SAFE_ROOT_CAUSE_FALLBACK,
+    build_source_text,
+    claims_unsupported_effectiveness,
+    clean_structured_leak,
+    detect_evidence_contradictions,
+    has_causal_language,
+    is_placeholder_leak,
+    mentions_unsupported_domain,
+    ungrounded_entities,
+)
 from app.agent.state import AgentState
 from app.config import get_settings
 from app.models.agent import (
@@ -43,6 +55,83 @@ def _has_verified_evidence(evidence_ledger: list) -> bool:
     return any(e.status == EvidenceStatus.VERIFIED for e in evidence_ledger)
 
 
+def _filter_hypotheses(raw_hypotheses: list, source_text: str, trace: list) -> list:
+    """Apply the same entity/domain/placeholder grounding filters used on the
+    main RCA response's hypotheses, factored out so the focused retry below
+    can reuse it identically."""
+    from app.models.agent import CandidateHypothesis
+
+    parsed = []
+    for ch in raw_hypotheses:
+        if isinstance(ch, dict):
+            parsed.append(CandidateHypothesis(
+                id=str(ch.get("id", "H")),
+                name=str(ch.get("name", "HYPOTHESIS")),
+                statement=clean_structured_leak(ch.get("statement", "")),
+                status="POSSIBLE",
+                evidence_needed=clean_structured_leak(ch.get("evidence_needed", "")) or "Investigation required",
+                discrimination_evidence=clean_structured_leak(ch.get("discrimination_evidence", "")) or None,
+                resolves_investigation=ch.get("resolves_investigation") or None,
+            ))
+
+    kept = []
+    for ch in parsed:
+        violations = ungrounded_entities(ch.statement, source_text)
+        if violations:
+            trace.append(AgentTraceStep.warn(
+                f"Hypothesis {ch.id} dropped — references ungrounded entity/number: {violations}"
+            ))
+            continue
+        if mentions_unsupported_domain(ch.statement, source_text):
+            trace.append(AgentTraceStep.warn(
+                f"Hypothesis {ch.id} dropped — invokes training/authorization domain not "
+                "supported by this finding"
+            ))
+            continue
+        if is_placeholder_leak(ch.statement):
+            trace.append(AgentTraceStep.warn(
+                f"Hypothesis {ch.id} dropped — echoed prompt instruction text instead of real analysis"
+            ))
+            continue
+        kept.append(ch)
+    return kept
+
+
+async def _retry_hypotheses(
+    client, finding_text: str, evidence_ledger: list, source_text: str, trace: list
+) -> list:
+    """When every hypothesis from the main RCA call gets filtered out, that's
+    usually not "this finding has no plausible cause" -- it's a weak model
+    defaulting to a generic mechanism instead of reasoning about this
+    finding's actual subject matter. A smaller, more focused retry call
+    (just hypothesis generation, nothing else) gives it a second, narrower
+    attempt rather than silently shipping an empty hypothesis list. This is
+    a retry with better-targeted instructions, not a hardcoded fallback set."""
+    settings = get_settings()
+    template = (settings.agent_prompts_dir / "rca_hypotheses_retry.txt").read_text(encoding="utf-8")
+    prompt = template.format(
+        finding_text=finding_text,
+        evidence_ledger_json=json.dumps([e.model_dump() for e in evidence_ledger], default=str),
+    )
+    try:
+        raw = await client.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            response_format_json=True,
+            max_tokens=768,
+        )
+        parsed = parse_llm_json(raw)
+        candidates = parsed.get("candidate_hypotheses", [])
+    except (LLMError, ValueError, KeyError) as exc:
+        logger.warning("Hypothesis retry call failed: %s", exc)
+        return []
+
+    filtered = _filter_hypotheses(candidates, source_text, trace)
+    if filtered:
+        trace.append(AgentTraceStep.ok(f"Hypothesis retry produced {len(filtered)} grounded hypothesis(es)"))
+    return filtered
+
+
 async def root_cause_node(state: AgentState) -> AgentState:
     """Perform root cause analysis and 5-Why over the evidence ledger."""
     trace = list(state.get("trace", []))
@@ -51,6 +140,25 @@ async def root_cause_node(state: AgentState) -> AgentState:
     extraction = state.get("extraction")
     settings = get_settings()
     client = get_llm_client()
+
+    finding_text = state["request"].finding_text
+    extra_trusted = []
+    if extraction:
+        extra_trusted.extend(extraction.stated_facts)
+        extra_trusted.extend(extraction.referenced_records)
+        extra_trusted.extend(f"{s.speaker} {s.claim}" for s in extraction.attributed_statements)
+    source_text = build_source_text(finding_text, evidence_ledger, extra_trusted)
+
+    # CONTRADICTORY EVIDENCE: detect same-subject evidence items that assert
+    # opposite polarity (e.g. "training was completed" vs "no completion
+    # record found") before RCA runs, so a conflict can never be silently
+    # resolved in favor of one side.
+    contradictions = detect_evidence_contradictions(evidence_ledger)
+    if contradictions:
+        for claim_a, claim_b in contradictions:
+            trace.append(AgentTraceStep.warn(
+                f"Evidence conflict detected: {claim_a!r} vs {claim_b!r} — cannot be resolved automatically"
+            ))
 
     system_prompt = (settings.agent_prompts_dir / "system_prompt.txt").read_text(encoding="utf-8")
     template = (settings.agent_prompts_dir / "rca.txt").read_text(encoding="utf-8")
@@ -69,13 +177,14 @@ async def root_cause_node(state: AgentState) -> AgentState:
         tools_were_available="YES" if tools_available else "NO — LQMS not configured",
     )
 
-    # Defaults if LLM fails
+    # Defaults if LLM fails — deliberately generic/entity-free so a failure never
+    # injects another case's facts into this finding's output.
     root_cause = RootCauseAnalysis(
         status="NOT_ESTABLISHED",
         category=None,
-        narrative="Leading Hypothesis: Possible failure of the training/authorization control to prevent personnel from performing a revised procedure before mandatory training completion.",
+        narrative="Root cause analysis could not be completed for this finding. Manual investigation is required.",
         evidence_status=EvidenceStatus.UNKNOWN,
-        verification_needed="Full manual investigation required to confirm underlying control failure.",
+        verification_needed="Full manual investigation required — AI root cause analysis was unavailable for this finding.",
     )
     five_why = FiveWhyAnalysis(
         steps=[],
@@ -103,15 +212,18 @@ async def root_cause_node(state: AgentState) -> AgentState:
         if status_raw not in valid_statuses:
             status_raw = "NOT_ESTABLISHED"
 
-        # Enforce: VERIFIED requires at least one VERIFIED evidence item in ledger
-        if status_raw == "VERIFIED" and not _has_verified_evidence(evidence_ledger):
+        # Enforce: VERIFIED/SUPPORTED both require at least one VERIFIED evidence
+        # item in the ledger — per rca.txt, SUPPORTED means "strongly supported by
+        # verified facts", so it cannot rest on REPORTED-only evidence either.
+        if status_raw in ("VERIFIED", "SUPPORTED") and not _has_verified_evidence(evidence_ledger):
             logger.warning(
-                "RCA claimed VERIFIED but no VERIFIED evidence in ledger — downgrading to STATED_UNVERIFIED"
+                "RCA claimed %s but no VERIFIED evidence in ledger — downgrading to STATED_UNVERIFIED",
+                status_raw,
             )
-            status_raw = "STATED_UNVERIFIED"
             trace.append(AgentTraceStep.warn(
-                "Root cause downgraded: VERIFIED claimed without VERIFIED evidence item"
+                f"Root cause downgraded: {status_raw} claimed without VERIFIED evidence item"
             ))
+            status_raw = "STATED_UNVERIFIED"
 
         category = coerce_category(rc_raw.get("category")).value if rc_raw.get("category") else None
         ev_status_str = str(rc_raw.get("evidence_status", "UNKNOWN")).upper()
@@ -123,47 +235,136 @@ async def root_cause_node(state: AgentState) -> AgentState:
             confidence_str = "LOW"
 
         raw_narrative = str(rc_raw.get("narrative", "")).strip()
+        raw_statement = str(rc_raw.get("statement", "") or "").strip()
         if not raw_narrative or "LLM error" in raw_narrative:
             raw_narrative = (
-                "Leading Hypothesis: Possible failure of the training/authorization control to prevent "
-                "personnel from performing a revised procedure before mandatory training completion. "
-                "Why plausible: Finding establishes that mandatory training was required and personnel "
-                "performed the revised procedure without recorded completion. "
-                "Status: POSSIBLE — NOT CONFIRMED."
+                "No leading hypothesis established from the available evidence for this finding. "
+                "Status: NOT_ESTABLISHED — auditor investigation required."
             )
 
-        from app.models.agent import CandidateHypothesis
-        cand_hyp_list = []
-        for ch in rc_raw.get("candidate_hypotheses", []):
-            if isinstance(ch, dict):
-                cand_hyp_list.append(CandidateHypothesis(
-                    id=str(ch.get("id", "H")),
-                    name=str(ch.get("name", "HYPOTHESIS")),
-                    statement=str(ch.get("statement", "")),
-                    status="POSSIBLE",
-                    evidence_needed=str(ch.get("evidence_needed", "Investigation required")),
-                    resolves_investigation=ch.get("resolves_investigation") or None,
-                ))
+        # CAUSAL INFERENCE GUARD: definitive causal language ("X and Y caused Z")
+        # without VERIFIED evidence must never stand as an established cause —
+        # force NOT_ESTABLISHED and neutral narrative when definitive causation is claimed.
+        verified_support = _has_verified_evidence(evidence_ledger)
+        if status_raw not in ("VERIFIED", "SUPPORTED") and not verified_support and (
+            has_causal_language(raw_narrative) or has_causal_language(raw_statement)
+        ):
+            logger.warning(
+                "RCA narrative/statement used causal language without VERIFIED evidence — "
+                "forcing NOT_ESTABLISHED."
+            )
+            trace.append(AgentTraceStep.warn(
+                "Root cause forced to NOT_ESTABLISHED: causal claim made from unverified/reported evidence"
+            ))
+            status_raw = "NOT_ESTABLISHED"
+            raw_narrative = SAFE_ROOT_CAUSE_FALLBACK
+            raw_statement = ""
 
+        # CONTRADICTORY EVIDENCE GUARD: if the ledger itself contains conflicting
+        # claims about the same subject, no status stronger than STATED_UNVERIFIED
+        # may stand, and the narrative must say so explicitly rather than silently
+        # taking one side.
+        if contradictions and status_raw in ("VERIFIED", "SUPPORTED", "STATED_UNVERIFIED"):
+            claim_a, claim_b = contradictions[0]
+            trace.append(AgentTraceStep.warn(
+                "Root cause forced to NOT_ESTABLISHED: conflicting evidence in the ledger"
+            ))
+            status_raw = "NOT_ESTABLISHED"
+            raw_narrative = (
+                f"The available evidence is conflicting and cannot currently be resolved: "
+                f"{claim_a!r} conflicts with {claim_b!r}. This requires reconciliation before "
+                f"a root cause can be established."
+            )
+            raw_statement = ""
+
+        # RECURRENCE / EFFECTIVENESS GUARD: "previous corrective action was
+        # recorded as completed" is not evidence that it was implemented,
+        # verified, or effective — those are separate, independently-evidenced
+        # claims. Strip any effectiveness/success claim the finding itself
+        # never actually makes.
+        if claims_unsupported_effectiveness(raw_narrative, finding_text) or claims_unsupported_effectiveness(raw_statement, finding_text):
+            trace.append(AgentTraceStep.warn(
+                "Root cause claimed previous-CAPA effectiveness not supported by this finding — "
+                "downgraded to completion-only"
+            ))
+            status_raw = "NOT_ESTABLISHED"
+            raw_narrative = SAFE_RECURRENCE_FALLBACK
+            raw_statement = ""
+
+        cand_hyp_list = _filter_hypotheses(rc_raw.get("candidate_hypotheses", []), source_text, trace)
+
+        # RETRY, DON'T JUST GIVE UP: an empty hypothesis list after filtering
+        # is usually not "this finding has no plausible cause" -- it's a weak
+        # model defaulting to a generic mechanism (training/communication/etc)
+        # instead of reasoning about this finding's actual subject matter.
+        # One focused retry, scoped to hypothesis generation only, before
+        # falling back to a genuinely empty list.
+        if not cand_hyp_list and status_raw != "VERIFIED":
+            cand_hyp_list = await _retry_hypotheses(client, finding_text, evidence_ledger, source_text, trace)
+
+        # No hardcoded fallback hypothesis set: if the retry also returned
+        # none, leave the list empty rather than injecting a fixed (and
+        # possibly wrong-domain) set — a fabricated hypothesis is worse than
+        # no hypothesis.
         if not cand_hyp_list:
-            cand_hyp_list = [
-                CandidateHypothesis(id="H1", name="TRAINING_ASSIGNMENT", statement="Training may not have been assigned to affected operators after procedure revision.", status="POSSIBLE", evidence_needed="Training assignment records"),
-                CandidateHypothesis(id="H2", name="TRAINING_COMPLETION", statement="Training may have been assigned but not completed by affected operators.", status="POSSIBLE", evidence_needed="Attendance/completion records"),
-                CandidateHypothesis(id="H3", name="RECORDING_FAILURE", statement="Training may have occurred but completion was not recorded in the matrix.", status="POSSIBLE", evidence_needed="Attendance evidence, competency records"),
-                CandidateHypothesis(id="H4", name="AUTHORIZATION_CONTROL", statement="Personnel may have been allowed to perform the revised procedure without training completion verification.", status="POSSIBLE", evidence_needed="Authorization/qualification records & control process"),
-            ]
+            trace.append(AgentTraceStep.warn(
+                "No candidate hypotheses returned by the model for this finding"
+            ))
 
+        # HARD EVIDENCE GATE: Set leading_hypothesis to None if no hypothesis has stronger evidence support
         leading_hyp = str(rc_raw.get("leading_hypothesis", "") or "").strip()
-        if not leading_hyp or "not established" in leading_hyp.lower() or "llm error" in leading_hyp.lower() or "not provide sufficient" in leading_hyp.lower():
-            leading_hyp = (
-                "Training completion may not have been verified before the affected "
-                "operators were permitted to perform the revised inspection procedure."
+        if status_raw == "NOT_ESTABLISHED" or not leading_hyp or "not established" in leading_hyp.lower() or "none" in leading_hyp.lower() or "null" in leading_hyp.lower():
+            leading_hyp = None
+        elif ungrounded_entities(leading_hyp, source_text):
+            trace.append(AgentTraceStep.warn("Leading hypothesis dropped — references ungrounded entity/number"))
+            leading_hyp = None
+
+        # GROUNDING GUARD on the primary narrative/statement fields: these are the
+        # highest-stakes fields (they drive the CA draft), so an ungrounded entity
+        # here forces the whole root cause back to NOT_ESTABLISHED rather than
+        # just being stripped.
+        narrative_violations = ungrounded_entities(raw_narrative, source_text)
+        statement_violations = ungrounded_entities(raw_statement, source_text)
+        if narrative_violations or statement_violations:
+            trace.append(AgentTraceStep.warn(
+                f"Root cause narrative/statement referenced ungrounded entity/number "
+                f"{narrative_violations or statement_violations} — forcing NOT_ESTABLISHED"
+            ))
+            logger.warning(
+                "RCA narrative/statement grounding violation: %s",
+                narrative_violations or statement_violations,
             )
+            status_raw = "NOT_ESTABLISHED"
+            raw_narrative = SAFE_ROOT_CAUSE_FALLBACK
+            raw_statement = ""
+            leading_hyp = None
+        elif mentions_unsupported_domain(raw_narrative, source_text) or mentions_unsupported_domain(raw_statement, source_text):
+            trace.append(AgentTraceStep.warn(
+                "Root cause narrative/statement invoked training/authorization domain not "
+                "supported by this finding — forcing NOT_ESTABLISHED"
+            ))
+            status_raw = "NOT_ESTABLISHED"
+            raw_narrative = SAFE_ROOT_CAUSE_FALLBACK
+            raw_statement = ""
+            leading_hyp = None
+        elif is_placeholder_leak(raw_narrative) or is_placeholder_leak(raw_statement):
+            trace.append(AgentTraceStep.warn(
+                "Root cause narrative/statement echoed prompt instruction text instead of real "
+                "analysis — forcing NOT_ESTABLISHED"
+            ))
+            status_raw = "NOT_ESTABLISHED"
+            raw_narrative = SAFE_ROOT_CAUSE_FALLBACK
+            raw_statement = ""
+            leading_hyp = None
 
         root_cause = RootCauseAnalysis(
             status=status_raw,  # type: ignore[arg-type]
-            category=category,
-            statement=rc_raw.get("statement") or None,
+            # A causal category is only meaningful once a cause is at least
+            # claimed — if the LLM didn't supply one (or status forced it to
+            # NOT_ESTABLISHED), say so explicitly rather than leaving a blank
+            # that could be misread as an omission.
+            category=(category if (category and status_raw != "NOT_ESTABLISHED") else "TO_BE_CONFIRMED"),
+            statement=raw_statement or None,
             leading_hypothesis=leading_hyp,
             candidate_hypotheses=cand_hyp_list,
             supporting_evidence=[str(x) for x in (rc_raw.get("supporting_evidence") or [])],
@@ -187,7 +388,7 @@ async def root_cause_node(state: AgentState) -> AgentState:
         for cf in parsed.get("contributing_factors", []):
             if not isinstance(cf, dict):
                 continue
-            desc = str(cf.get("description", ""))
+            desc = clean_structured_leak(cf.get("description", ""))
             if _looks_like_action_item(desc):
                 continue  # filter action items
             cf_status = str(cf.get("evidence_status", "INFERRED")).upper()
@@ -210,17 +411,37 @@ async def root_cause_node(state: AgentState) -> AgentState:
             valid_why_statuses = ("VERIFIED", "SUPPORTED", "REPORTED_UNVERIFIED", "INFERRED", "UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED")
             if s_status not in valid_why_statuses:
                 s_status = "UNKNOWN"
+            answer = clean_structured_leak(step.get("answer")) or None
+            # GROUNDING GUARD: an answer that references an entity/number absent
+            # from this finding's evidence cannot be trusted as-is — replace it
+            # and force the status to UNKNOWN so the evidence-bound stop below
+            # truncates the chain right here.
+            if answer:
+                violations = ungrounded_entities(str(answer), source_text)
+                if violations:
+                    trace.append(AgentTraceStep.warn(
+                        f"5-Why answer referenced ungrounded entity/number {violations} — marked UNKNOWN"
+                    ))
+                    answer = "The available evidence does not establish this — the prior answer could not be traced to this finding's evidence."
+                    s_status = "UNKNOWN"
             steps.append(FiveWhyStep(
                 question=str(step.get("question", "")),
-                answer=step.get("answer") or None,
+                answer=answer,
                 status=s_status,  # type: ignore[arg-type]
             ))
 
-        # Deterministically enforce Why 1 status as VERIFIED for explicit finding facts
-        if steps:
-            w1_ans = (steps[0].answer or "").lower()
-            if "performed" in w1_ans or "training" in w1_ans or "sop" in w1_ans or "operator" in w1_ans or len(steps[0].question) > 0:
-                steps[0].status = "VERIFIED"
+        # WHY 1 must restate an established fact from the finding/evidence ledger,
+        # per the rca.txt prompt contract — enforce VERIFIED regardless of wording.
+        if steps and (steps[0].answer or "").strip():
+            steps[0].status = "VERIFIED"
+
+        # Evidence-bound stop: truncate the chain right after the first step whose
+        # evidence status is UNKNOWN/NOT_ESTABLISHED — never force speculative
+        # steps beyond the point where evidence actually runs out.
+        for idx, step in enumerate(steps):
+            if step.status in ("UNKNOWN", "NOT_ESTABLISHED"):
+                steps = steps[: idx + 1]
+                break
 
         five_why_status_note = str(fw_raw.get("status_note", ""))
         if not five_why_status_note:

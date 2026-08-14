@@ -87,6 +87,7 @@ class CandidateHypothesis(BaseModel):
     statement: str
     status: Literal["POSSIBLE", "SUPPORTED", "REFUTED", "UNVERIFIED"] = "POSSIBLE"
     evidence_needed: str
+    discrimination_evidence: str | None = None  # what evidence would distinguish THIS hypothesis from the others
     resolves_investigation: str | None = None
 
 
@@ -121,9 +122,17 @@ class ContributingFactor(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class InvestigationQuestion(BaseModel):
+    """A structured investigation question with explicit purpose and discriminating evidence."""
+
+    question: str
+    purpose: str  # which hypothesis / unknown this resolves
+    evidence: str  # specific document/record type that would answer this
+
+
 class InvestigationPlan(BaseModel):
     areas: list[str] = []
-    questions: list[str] = []
+    questions: list[InvestigationQuestion] = []
     evidence_to_collect: list[str] = []
 
 
@@ -140,10 +149,18 @@ class CapaStatus(str, Enum):
     NO_CAPA_RECOMMENDATION_YET = "NO_CAPA_RECOMMENDATION_YET"
 
 
+class ConditionalCapaAction(BaseModel):
+    """A conditional CAPA branch: what to do IF a specific cause is confirmed."""
+
+    if_cause_confirmed: str  # the condition, e.g. "If training was never assigned by the training matrix"
+    recommended_action: str  # specific corrective action for that branch
+
+
 class CapaAnalysis(BaseModel):
     status: CapaStatus
     potential_areas: list[str] = []
     recommended_investigation: list[str] = []
+    conditional_actions: list[ConditionalCapaAction] = []  # evidence-gated action branches
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +179,15 @@ class ImpactAssessment(BaseModel):
     status: ImpactStatus
     areas: list[str] = []
     narrative: str | None = None
+    # Structured fields from the new spec — populated when the model provides them
+    affected_object: str | None = None   # the actual process/record/output impacted
+    affected_people: str | None = None   # who specifically was affected
+    affected_period: str | None = None   # stated period or "requires confirmation"
+    process_at_risk: str | None = None   # the process whose output is in question
+    relevant_change: str | None = None   # what specifically changed (Rule 18: never assumed)
+    potential_effect: str | None = None  # plausible downstream consequence
+    evidence_needed: str | None = None   # what would bound the scope
+
 
 
 # ---------------------------------------------------------------------------

@@ -9,9 +9,17 @@ from __future__ import annotations
 import json
 import logging
 
+from app.agent.grounding_guard import (
+    build_source_text,
+    claims_unsupported_effectiveness,
+    clean_structured_leak,
+    filter_list_field,
+    is_placeholder_leak,
+    mentions_unsupported_domain,
+)
 from app.agent.state import AgentState
 from app.config import get_settings
-from app.models.agent import AgentTraceStep, CapaAnalysis, CapaStatus, EvidenceStatus
+from app.models.agent import AgentTraceStep, CapaAnalysis, CapaStatus, ConditionalCapaAction, EvidenceStatus
 from app.services.llm_client import LLMError, get_llm_client
 from app.services.llm_json import parse_llm_json
 
@@ -75,8 +83,58 @@ async def capa_analysis_node(state: AgentState) -> AgentState:
         raw_capa = parsed.get("capa", {})
 
         llm_status_str = str(raw_capa.get("status", "INVESTIGATION_REQUIRED")).upper()
-        potential_areas = [str(x) for x in raw_capa.get("potential_areas", [])]
-        recommended_investigation = [str(x) for x in raw_capa.get("recommended_investigation", [])]
+        potential_areas = [a for a in (clean_structured_leak(x) for x in raw_capa.get("potential_areas", [])) if a]
+        recommended_investigation = [
+            a for a in (clean_structured_leak(x) for x in raw_capa.get("recommended_investigation", [])) if a
+        ]
+
+        # Parse conditional_actions branches
+        raw_conditional = raw_capa.get("conditional_actions", [])
+        conditional_actions: list[ConditionalCapaAction] = []
+        for ca in raw_conditional:
+            if not isinstance(ca, dict):
+                continue
+            if_cond = clean_structured_leak(ca.get("if_cause_confirmed", ""))
+            action = clean_structured_leak(ca.get("recommended_action", ""))
+            if if_cond and action and not is_placeholder_leak(if_cond) and not is_placeholder_leak(action):
+                conditional_actions.append(ConditionalCapaAction(
+                    if_cause_confirmed=if_cond,
+                    recommended_action=action,
+                ))
+
+        # GROUNDING GUARD: drop any CAPA area/investigation item that references
+        # an entity/number not present in this finding's text or evidence ledger.
+        source_text = build_source_text(
+            state["request"].finding_text, evidence_ledger,
+            [rc_narrative] if rc_narrative else [],
+        )
+        potential_areas, dropped_areas = filter_list_field(potential_areas, source_text)
+        recommended_investigation, dropped_inv = filter_list_field(recommended_investigation, source_text)
+        for item, violations in (*dropped_areas, *dropped_inv):
+            trace.append(AgentTraceStep.warn(
+                f"CAPA item dropped — referenced ungrounded entity/number {violations}"
+            ))
+
+        # RECURRENCE / EFFECTIVENESS GUARD: recorded-as-completed is not
+        # evidence of effectiveness — drop any CAPA item that claims a
+        # previous action was effective/successful when the finding itself
+        # never says so.
+        finding_text = state["request"].finding_text
+        potential_areas = [a for a in potential_areas if not claims_unsupported_effectiveness(a, finding_text)]
+        recommended_investigation = [
+            a for a in recommended_investigation if not claims_unsupported_effectiveness(a, finding_text)
+        ]
+
+        # DOMAIN GUARD: drop CAPA items invoking training/authorization when
+        # this finding never mentions those domains.
+        potential_areas = [a for a in potential_areas if not mentions_unsupported_domain(a, source_text)]
+        recommended_investigation = [
+            a for a in recommended_investigation if not mentions_unsupported_domain(a, source_text)
+        ]
+
+        # PLACEHOLDER-LEAK GUARD
+        potential_areas = [a for a in potential_areas if not is_placeholder_leak(a)]
+        recommended_investigation = [a for a in recommended_investigation if not is_placeholder_leak(a)]
 
         # Programmatic enforcement: LLM cannot override the rules
         enforced_status = _determine_capa_status_from_evidence(rc_status, evidence_ledger)
@@ -109,6 +167,7 @@ async def capa_analysis_node(state: AgentState) -> AgentState:
             status=final_status,
             potential_areas=potential_areas,
             recommended_investigation=recommended_investigation,
+            conditional_actions=conditional_actions,
         )
         trace.append(AgentTraceStep.ok(f"CAPA analyzed: {capa.status.value}"))
 
