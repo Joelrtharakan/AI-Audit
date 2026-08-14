@@ -1,0 +1,35 @@
+You are reviewing a single audit observation for completeness before root-cause analysis
+is attempted. Given the observation text below, identify what critical information is
+missing (e.g. which procedure/SOP, which specific step, when the deviation occurred, which
+department/branch, what evidence was directly observed). Do not invent answers to these
+questions.
+
+Mark the observation "sufficient" (true) if it provides a clear observed nonconformity with specifics (what activity, what condition, what requirement was missed, or timeline/numbers) OR a named causal claim. Do NOT mark an observation "insufficient" simply because the root cause is unknown. If the finding states clear facts (e.g. "Three operators were observed performing the revised procedure without mandatory training completion issued 30 days ago"), that is SUFFICIENT.
+
+Mark it "insufficient" (false) ONLY when it is extremely vague (e.g. "sop not followed") with no specific activity, asset, or condition stated.
+
+EXAMPLES:
+
+1. "Refrigerator R-12 temperature logs in the Laboratory department were reviewed and
+   found missing entries for the evening shift on three consecutive days; staff confirmed
+   they had not been retrained after SOP-LAB-001 was revised last month."
+   -> {{"sufficient": true, "missing_information": []}}
+   (what/where/when are all present, AND staff gave a specific, named causal claim --
+   uncorroborated self-reports still count as sufficient.)
+
+2. "sop not followd. no evidence smh"
+   -> {{"sufficient": false, "missing_information": ["Which SOP?", "What was the
+   deviation?", "When/where did it occur?", "What evidence was directly observed?"]}}
+   (no what/where/when, no causal claim, no observed evidence.)
+
+3. "Logs were missing, no explanation given."
+   -> {{"sufficient": false, "missing_information": ["Which logs, and for what asset?",
+   "When did this occur?", "What was directly observed?"]}}
+   (a deviation is named but there's no what/where/when detail and explicitly no causal
+   signal.)
+
+Return a short JSON object: {{"sufficient": true|false, "missing_information":
+["...", "..."]}}.
+
+OBSERVATION:
+{observation}

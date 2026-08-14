@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<!-- saved from url=(0062)http://192.168.20.94/LQMS-ISO-EQMS/Auditing/AuditCalendar.aspx -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><link href="assets/css/plusTimerEdit.css" rel="stylesheet"><link href="assets/css/fullcalendar.css" rel="stylesheet"><link href="assets/css/fullcalendar.print.css" rel="stylesheet" media="print"><link href="assets/css/bootstrap-select.min.css" rel="stylesheet">
+    <script src="assets/js/moment.min.js"></script>
+    <script src="assets/js/jquery_2.1.3.min.js"></script>
+
+    <script src="assets/js/bootstrap.min.js" type="text/javascript"></script>
+
+
+    <script src="assets/js/fullcalendar.js"></script>
+    
+    <script src="assets/js/bootstrap-select.min.js"></script>
+
+    <!-- the code from the JavaScript tab will go here -->
+
+
+    <!-- the code from the CSS tab will go here -->
+    <script type="text/javascript">
+        $(document).ready(function () {
+            BinDControlEvents();
+            //  $('#calendar').fullCalendar('refetchEvents');
+        });
+
+
+
+        function BinDControlEvents() {
+            "use strict";
+
+            var date = new Date();
+            var d = date.getDate();
+            var m = date.getMonth();
+            var y = date.getFullYear();
+
+            var hdr = {
+                left: 'title',
+                center: 'month,agendaWeek,agendaDay',
+                right: 'prev,today,next'
+            };
+
+
+
+
+            $('#calendar').fullCalendar({
+
+                //header: hdr,
+                header: {
+                    left: 'prev,next today',
+                    center: 'title',
+                    right: 'year,month,agendaWeek,agendaDay'
+                },
+                //buttonText: {
+                //    prev: '<i class="fa fa-chevron-left"></i>',
+                //    next: '<i class="fa fa-chevron-right"></i>'
+                //},
+
+                editable: true,
+                droppable: true, // this allows things to be dropped onto the calendar !!!
+
+                drop: function (date, allDay) { // this function is called when something is dropped
+
+                    // retrieve the dropped element's stored Event Object
+                    var originalEventObject = $(this).data('eventObject');
+
+                    // we need to copy it, so that multiple events don't have a reference to the same object
+                    var copiedEventObject = $.extend({}, originalEventObject);
+
+                    // assign it the date that was reported
+                    copiedEventObject.start = date;
+                    copiedEventObject.allDay = allDay;
+
+                    // render the event on the calendar
+                    // the last `true` argument determines if the event "sticks" (http://arshaw.com/fullcalendar/docs/event_rendering/renderEvent/)
+                    $('#calendar').fullCalendar('renderEvent', copiedEventObject, true);
+
+                    // is the "remove after drop" checkbox checked?
+                    if ($('#drop-remove').is(':checked')) {
+                        // if so, remove the element from the "Draggable Events" list
+                        $(this).remove();
+                    }
+
+                },
+
+                select: function (start, end, allDay) {
+                    var title = prompt('Event Title:');
+                    if (title) {
+                        calendar.fullCalendar('renderEvent', {
+                            title: title,
+                            start: start,
+                            end: end,
+                            allDay: allDay
+                        }, true // make the event "stick"
+                        );
+                    }
+                    calendar.fullCalendar('unselect');
+                },
+
+                eventRender: function (event, element, icon) {
+                    if (!event.description == "") {
+                        element.find('.fc-event-title').append("<br/><span class='ultra-light'>" + event.description +
+                            "</span>");
+                    }
+                    if (!event.icon == "") {
+                        element.find('.fc-event-title').append("<i class='air air-top-right fa " + event.icon +
+                            " '></i>");
+                    }
+                },
+
+                windowResize: function (event, ui) {
+                    $('#calendar').fullCalendar('render');
+                },
+
+                events: function (start, end, timezone, callback) {
+                    $.ajax({
+                        type: "POST",
+                        contentType: "application/json; charset=utf-8",
+                        url: "AuditHome.aspx/GetAuditCalendarDetails",
+                        data: "{'SelectValues':'" + $('#HdnSelecType').val() + "'}",
+                        dataType: "json",
+                        success: function (doc) {
+                            var events = [];
+
+                            var xmlDoc = $.parseXML(doc.d);
+                            var xml = $(xmlDoc);
+                            var customers = xml.find("Table");
+
+                            $.each(customers, function () {
+                                var customer = $(this);
+
+                                events.push({
+                                    id: $(this).find('ID').text(),
+                                    title: $(this).find('Title').text(),
+                                    start: $(this).find('FromDate').text(), // will be parsed
+                                    end: $(this).find('ToDate').text(),
+                                    color: $(this).find('Color').text(),
+                                    type: $(this).find('Type').text(),
+                                    borderColor: 'black',
+                                    allDay: true,
+
+                                });
+                            })
+
+                            callback(events);
+                        },
+                        error: function (result) {
+                            alert("Error");
+                        }
+                    })
+                },
+
+                eventClick: function (event, element) {
+                    //alert(event.type);
+                    //$('#calendar').fullCalendar('updateEvent', event);
+                    if (event.type == 'audit') {
+                        $('#myModalCalendar').modal('toggle');
+
+                        document.getElementById("DivLoading").style.display = "block";
+                        document.getElementById("AuditDetails").style.opacity = "0.3";
+                        $.ajax({
+                            type: "POST",
+                            contentType: "application/json; charset=utf-8",
+                            url: "AuditHome.aspx/GetAuditDetailsCalendar",
+                            data: "{'AuditID':'" + event.id + "','Type':'" + event.type + "'}",
+                            dataType: "json",
+                            success: function (data) {
+                                var xmlDoc = $.parseXML(data.d);
+                                var xml = $(xmlDoc);
+                                var customers = xml.find("Table0");
+
+                                $('#HdnAuditID').val(customers.find("AuditScheduleID").text());
+                                $('#lblAuditID').text(customers.find("AuditNumber").text());
+                                $('#lblAuditTitle').text(customers.find("AuditTitle").text());
+                                $('#lblAuditType').text(customers.find("AuditTypeName").text());
+                                $('#lblStandard').text(customers.find("StandardCode").text());
+                                $('#lblLeadAuditor').text(customers.find("LeadAuditor").text());
+                                $('#lblAuditPeriod').text(customers.find("period").text());
+                                $('#lblAuditStatus').text(customers.find("AuditStatus").text());
+                                $('#lblCAPAStatus').text(customers.find("CAPAStatus").text());
+                                $('#lblCAPANumber').text(customers.find("CAPANumber").text());
+
+                                var i = 1;
+                                var customers = xml.find("Table1");
+
+                                var row = $("[id*=gvAuditDetails] tr:last-child").clone(true);
+                                $("[id*=gvAuditDetails] tr").not($("[id*=gvAuditDetails] tr:first-child")).remove();
+
+                                if (customers.length == 0) {
+                                    $("[id*=gvAuditDetails]").append(row);
+                                    row = $("[id*=gvAuditDetails] tr:last-child").clone(true);
+                                } else {
+                                    $.each(customers, function () {
+                                        var customer = $(this);
+                                        $("[id*=gvAuditDetails]").append(row);
+                                        row = $("[id*=gvAuditDetails] tr:last-child").clone(true);
+
+                                        var grid = document.getElementById("gvAuditDetails");
+
+                                        //grid.rows[i].cells[0].children[1].value = $(this).find("MReviewItemsMasterID").text();
+                                        grid.rows[i].cells[0].children[0].textContent = $(this).find("ItemName").text();
+                                        grid.rows[i].cells[1].children[0].textContent = $(this).find("Location").text();
+                                        grid.rows[i].cells[2].children[0].textContent = $(this).find("Leadauditor").text();
+                                        grid.rows[i].cells[3].children[0].textContent = $(this).find("Auditee").text();
+                                        grid.rows[i].cells[4].children[0].textContent = $(this).find("PlanDate").text();
+                                        grid.rows[i].cells[5].children[0].textContent = $(this).find("ActualDate").text();
+                                        grid.rows[i].cells[6].children[0].textContent = $(this).find("StatusName").text();
+                                        grid.rows[i].cells[6].children[0].style.color = $(this).find("color").text();
+                                        grid.rows[i].cells[6].children[0].style.fontWeight = "bold";
+
+                                        i = i + 1;
+                                    });
+                                }
+                            },
+                            complete: function () {
+                                document.getElementById("DivLoading").style.display = "none";
+                                document.getElementById("AuditDetails").style.opacity = "1";
+                            },
+                            error: function (result) {
+                                alert("Error");
+                            }
+                        });
+                    }
+                    else if (event.type == 'mreview') {
+                        $('#myModalCalendarMR').modal('toggle');
+
+                        document.getElementById("DivLoadingMR").style.display = "block";
+                        document.getElementById("MRDetails").style.opacity = "0.3";
+                        $.ajax({
+                            type: "POST",
+                            contentType: "application/json; charset=utf-8",
+                            url: "AuditHome.aspx/GetAuditDetailsCalendar",
+                            data: "{'AuditID':'" + event.id + "','Type':'" + event.type + "'}",
+                            dataType: "json",
+                            success: function (data) {
+                                var xmlDoc = $.parseXML(data.d);
+                                var xml = $(xmlDoc);
+                                var customers = xml.find("Table0");
+
+                                $('#LblMRNo').text(customers.find("MReviewNo").text());
+                                $('#LblReviewTitle').text(customers.find("MReviewTitle").text());
+                                $('#LblMRType').text(customers.find("ReviewType").text());
+                                $('#LblReviewDate').text(customers.find("ReviewDate").text());
+                                $('#LblReviewPeriod').text(customers.find("FromToDates").text());
+                                $('#LblCAPAStatus').text(customers.find("CAPAStatus").text());
+                                $('#LblCAPANumber').text(customers.find("CAPANumber").text());
+
+                            },
+                            complete: function () {
+                                document.getElementById("DivLoadingMR").style.display = "none";
+                                document.getElementById("MRDetails").style.opacity = "1";
+                            },
+                            error: function (result) {
+                                alert("Error");
+                            }
+                        });
+
+                    }
+                    else {
+                        $('#DivIQCManage').modal('toggle');
+
+                        document.getElementById("DivLoadingiqc").style.display = "block";
+                        document.getElementById("DivIQCDetails").style.display = "none";
+                        $.ajax({
+                            type: "POST",
+                            contentType: "application/json; charset=utf-8",
+                            url: "AuditHome.aspx/GetAuditDetailsCalendar",
+                            data: "{'AuditID':'" + event.id + "','Type':'" + event.type + "'}",
+                            dataType: "json",
+                            success: function (data) {
+                                var xmlDoc = $.parseXML(data.d);
+                                var xml = $(xmlDoc);
+                                var customers = xml.find("Table0");
+
+
+                                document.getElementById("LblIQCNumber").textContent = customers.find("IQCNumber").text();
+                                document.getElementById("LblIQCSubject").textContent = customers.find("IQCSubject").text();
+                                document.getElementById("LblIQCType").textContent = customers.find("IQCTypeName").text();
+                                document.getElementById("LblDepartment").textContent = customers.find("Department").text();
+                                document.getElementById("LblTestName").textContent = customers.find("TestName").text();
+                                document.getElementById("LblTestMethod").textContent = customers.find("TestMethod").text();
+                                document.getElementById("LblReportNo").textContent = customers.find("ReportNo").text();
+                                document.getElementById("LblSampleNo").textContent = customers.find("SampleNo").text();
+                                document.getElementById("LblSampleDesc").textContent = customers.find("SampleDesc").text();
+                                document.getElementById("LblIQCDates").textContent = customers.find("Dates").text();
+                                document.getElementById("LblTechnicians").textContent = customers.find("Technicians").text();
+                                document.getElementById("LblIQCCAPANumber").textContent = customers.find("CAPANumber").text();
+                                document.getElementById("LblIQCCAPAStatus").textContent = customers.find("CAPAStatus").text();
+
+                                document.getElementById("DivIQCDetails").style.display = "block";
+                                document.getElementById("DivLoadingiqc").style.display = "none";
+                            },
+                            failure: function (response) {
+                                alert(response.d);
+                            },
+                            error: function (response) {
+                                alert(response.d);
+                            }
+                        })
+                    }
+
+
+
+                }
+            });
+        };
+
+        function ViewCalendarClick() {
+            var array = $('#ddlSearchType').val();
+            var Hidden = document.getElementById("HdnSelecType");
+            Hidden.value = "";
+            $.each(array, function (i) {
+                Hidden.value = array[i] + ',' + Hidden.value;
+            });
+
+            $('#calendar').fullCalendar('refetchEvents');
+        };
+    </script>
+
+<link href="assets/css/AdminLTE.css" type="text/css" rel="stylesheet"><link href="assets/css/AdminStyle.css" type="text/css" rel="stylesheet"><link href="assets/css/blue.css" type="text/css" rel="stylesheet"><link href="assets/css/bootstrap.min.css" type="text/css" rel="stylesheet"><link href="assets/css/bootstrap-3.3.2.min.css" type="text/css" rel="stylesheet"><link href="assets/css/bootstrap3-wysihtml5.min.css" type="text/css" rel="stylesheet"><link href="assets/css/bootstrap-datetimepicker.css" type="text/css" rel="stylesheet"><link href="assets/css/bootstrap-datetimepicker.min.css" type="text/css" rel="stylesheet"><link href="assets/css/bootstrap-example.css" type="text/css" rel="stylesheet"><link href="assets/css/bootstrap-multiselect.css" type="text/css" rel="stylesheet"><link href="assets/css/bootstrap-treeview.min.css" type="text/css" rel="stylesheet"><link href="assets/css/btnloading.css" type="text/css" rel="stylesheet"><link href="assets/css/CardIcons.css" type="text/css" rel="stylesheet"><link href="assets/css/dataTables.bootstrap.css" type="text/css" rel="stylesheet"><link href="assets/css/datepicker3.css" type="text/css" rel="stylesheet"><link href="assets/css/daterangepicker-bs3.css" type="text/css" rel="stylesheet"><link href="assets/css/docs.css" type="text/css" rel="stylesheet"><link href="assets/css/fileinput.css" type="text/css" rel="stylesheet"><link href="assets/css/fileinput.min.css" type="text/css" rel="stylesheet"><link href="assets/css/font-awesome.css" type="text/css" rel="stylesheet"><link href="assets/css/font-awesome.min.css" type="text/css" rel="stylesheet"><link href="assets/css/highchart.css" type="text/css" rel="stylesheet"><link href="assets/css/ionicons.css" type="text/css" rel="stylesheet"><link href="assets/css/ionicons.min.css" type="text/css" rel="stylesheet"><link href="assets/css/jquery.dataTables.css" type="text/css" rel="stylesheet"><link href="assets/css/jquery-jvectormap-1.2.2.css" type="text/css" rel="stylesheet"><link href="assets/css/minimal.css" type="text/css" rel="stylesheet"><link href="assets/css/morris.css" type="text/css" rel="stylesheet"><link href="assets/css/plus.css" type="text/css" rel="stylesheet"><link href="assets/css/plusTimer.css" type="text/css" rel="stylesheet"><link href="assets/css/plusTimerEdit.css" type="text/css" rel="stylesheet"><link href="assets/css/prettify.css" type="text/css" rel="stylesheet"><link href="assets/css/QMS-Style.css" type="text/css" rel="stylesheet"><link href="assets/css/star-rating.css" type="text/css" rel="stylesheet"><link href="assets/css/TimeLine.css" type="text/css" rel="stylesheet"><link href="assets/css/uploadify.css" type="text/css" rel="stylesheet"><link href="assets/css/wobblebar.css" type="text/css" rel="stylesheet"><title>
+
+</title></head>
+<body>
+    <div class="row-container" id="DivFullContainer" style="margin-top: -5%; min-height: 500px;">
+        <div class="row">
+            <div class="col-sm-2 col-sm-offset-3">
+                <h5>Search Type</h5>
+            </div>
+            <div class="col-sm-3">
+                <div class="btn-group bootstrap-select show-tick"><button type="button" class="btn dropdown-toggle bs-placeholder btn-default" data-toggle="dropdown" role="button" data-id="ddlSearchType" title="Nothing selected"><span class="filter-option pull-left">Nothing selected</span>&nbsp;<span class="bs-caret"><span class="caret"></span></span></button><div class="dropdown-menu open" role="combobox"><div class="bs-searchbox"><input type="text" class="form-control" autocomplete="off" role="textbox" aria-label="Search"></div><ul class="dropdown-menu inner" role="listbox" aria-expanded="false" style="overflow-y:scroll !important;"><li data-original-index="0"><a tabindex="0" class="" data-tokens="null" role="option" aria-disabled="false" aria-selected="false"><span class="text">Audit Calendar</span><span class="glyphicon glyphicon-ok check-mark"></span></a></li><li data-original-index="1"><a tabindex="0" class="" data-tokens="null" role="option" aria-disabled="false" aria-selected="false"><span class="text">Management Review Calendar</span><span class="glyphicon glyphicon-ok check-mark"></span></a></li><li data-original-index="2"><a tabindex="0" class="" data-tokens="null" role="option" aria-disabled="false" aria-selected="false"><span class="text">IQC Calendar</span><span class="glyphicon glyphicon-ok check-mark"></span></a></li></ul></div><select class="selectpicker" data-live-search="true" id="ddlSearchType" data-toggle="popover" data-content="Please Select Search Type" data-placement="right" style="width: 100%;" multiple="multiple" tabindex="-98">
+                    <option value="audit">Audit Calendar</option>
+                    <option value="mrreview">Management Review Calendar</option>
+                    <option value="iqc">IQC Calendar</option>
+                </select></div>
+            </div>
+            <div class="col-sm-3">
+                <button class="btn btn-primary" onclick="return ViewCalendarClick();">View</button>
+            </div>
+        </div>
+
+
+
+        <div class="row fc fc-ltr fc-unthemed" id="calendar" style="margin-left: 0%; width: 100%; overflow-y: hidden;"><div class="fc-toolbar"><div class="fc-left"><div class="fc-button-group"><button type="button" class="fc-prev-button fc-button fc-state-default fc-corner-left"><span class="fc-icon fc-icon-left-single-arrow"></span></button><button type="button" class="fc-next-button fc-button fc-state-default fc-corner-right"><span class="fc-icon fc-icon-right-single-arrow"></span></button></div><button type="button" class="fc-today-button fc-button fc-state-default fc-corner-left fc-corner-right">today</button></div><div class="fc-right"><div class="fc-button-group"><button type="button" class="fc-month-button fc-button fc-state-default fc-corner-left fc-state-active">month</button><button type="button" class="fc-agendaWeek-button fc-button fc-state-default">week</button><button type="button" class="fc-agendaDay-button fc-button fc-state-default fc-corner-right">day</button></div></div><div class="fc-center"><h2>&nbsp;</h2></div><div class="fc-clear"></div></div><div class="fc-view-container"><div class="fc-view fc-month-view"></div></div></div>
+    </div>
+
+    <div class="modal fade bs-example-modal-lg" id="myModalCalendar" tabindex="-1" role="dialog" aria-labelledby="myLargeModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg" style="margin-top: 0%; width: 90%;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-hidden="true">×</button>
+                    <h4 class="modal-title" id="myModalLabel">Audit Calendar</h4>
+                </div>
+                <div class="modal-body">
+                    <div id="DivLoading" class="timer-loader" style="display: block; margin-left: 30%; position: absolute;">
+                        Loading…
+                    </div>
+
+                    <div class="row-border" id="AuditDetails" style="display: block">
+                        <div class="row">
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Audit No:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblAuditID"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Audit Title:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblAuditTitle"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Audit Type:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblAuditType"></label>
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Audit Criteria:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblStandard"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Lead Auditor:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblLeadAuditor"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Audit Period:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblAuditPeriod"></label>
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Audit Status:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblAuditStatus"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">CAPA Status:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblCAPAStatus"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">CAPA Number:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="lblCAPANumber"></label>
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-sm-12">
+                                <table id="gvAuditDetails" cssclass="GridStyle" autogeneratecolumns="false" width="100%">
+	<tbody><tr>
+		<th class="header-left" scope="col">Item Name</th>
+		<th class="inline-header" scope="col">Location</th>
+		<th class="inline-header" scope="col">Auditor</th>
+		<th class="inline-header" scope="col">Auditee(s)</th>
+		<th class="inline-header" scope="col">Plan Date</th>
+		<th class="inline-header" scope="col">Actual Date</th>
+		<th class="header-right" scope="col">Status</th>
+	</tr>
+	<tr style="background-color: white;">
+		<td align="center" style="border-color: Gray; width: 5%; border-style: double;">
+                                                <label id="LblItemName" style="font-weight: normal;"></label>
+                                            </td>
+		<td align="center" style="border-color: Gray; width: 5%; border-style: double;">
+                                                <label id="LblitemLocation" style="font-weight: normal;"></label>
+                                            </td>
+		<td align="center" style="border-color: Gray; width: 5%; border-style: double;">
+                                                <label id="LblAuditor" style="font-weight: normal;"></label>
+                                            </td>
+		<td align="center" style="border-color: Gray; width: 5%; border-style: double;">
+                                                <label id="LblAuditee" style="font-weight: normal;"></label>
+                                            </td>
+		<td align="center" style="border-color: Gray; width: 5%; border-style: double;">
+                                                <label id="LblPlanDate" style="font-weight: normal;"></label>
+                                            </td>
+		<td align="center" style="border-color: Gray; width: 5%; border-style: double;">
+                                                <label id="LblActualDate" style="font-weight: normal;"></label>
+                                            </td>
+		<td align="center" style="border-color: Gray; width: 5%; border-style: double;">
+                                                <label id="LblStatus" style="font-weight: normal;"></label>
+                                            </td>
+	</tr>
+</tbody></table>
+
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade bs-example-modal-lg" id="myModalCalendarMR" tabindex="-1" role="dialog" aria-labelledby="myLargeModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg" style="margin-top: 0%; width: 90%;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-hidden="true">×</button>
+                    <h4 class="modal-title" id="H1">Management Review</h4>
+                </div>
+                <div class="modal-body">
+                    <div id="DivLoadingMR" class="timer-loader" style="display: block; margin-left: 30%; position: absolute;">
+                        Loading…
+                    </div>
+
+                    <div class="row-border" id="MRDetails" style="display: block">
+                        <div class="row">
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">MR No:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="LblMRNo"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Review Title:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="LblReviewTitle"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Review Type:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="LblMRType"></label>
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">Review Date:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="LblReviewDate"></label>
+                            </div>
+
+                            <div class="col-sm-2">
+                                <label style="font-weight: normal;">Review From - To Dates:</label>
+                            </div>
+                            <div class="col-sm-4">
+                                <label id="LblReviewPeriod"></label>
+                            </div>
+
+                            
+                        </div>
+
+                        <div class="row">
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">CAPA Status:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="LblCAPAStatus"></label>
+                            </div>
+
+                            <div class="col-sm-1">
+                                <label style="font-weight: normal;">CAPA Number:</label>
+                            </div>
+                            <div class="col-sm-3">
+                                <label id="LblCAPANumber"></label>
+                            </div>
+
+                            
+                        </div>
+
+                        
+                    </div>
+                </div>
+                
+            </div>
+        </div>
+    </div>
+
+
+    <div id="DivIQCManage" class="modal fade bs-example-modal-lg" tabindex="-1" role="dialog" aria-labelledby="myLargeModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">×</span></button>
+                    <h4 class="modal-title" id="H2" style="text-align: center">IQC Details </h4>
+                </div>
+                <div class="modal-body" style="">
+                    <div class="container-fluid" style="min-height: 200px">
+                        <div id="DivLoadingiqc" class="timer-loader" style="z-index: 1; position: absolute; margin-top: 5%; margin-left: 35%; display: block;">
+                            Loading…
+                        </div>
+                        <div class="row" id="DivIQCDetails" style="display: block;">
+                            <div class="row">
+                                <h4 class="modal-title" id="H3" style="text-align: center; text-decoration: underline;">IQC Details </h4>
+                            </div>
+
+                            <div class="row" style="margin-top: 1%;">
+                                <div class="col-sm-2">
+                                    IQC Number
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblIQCNumber"></label>
+                                </div>
+
+                                <div class="col-sm-2">
+                                    IQC Subject
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblIQCSubject"></label>
+                                </div>
+
+                                <div class="col-sm-2">
+                                    IQC Type Name
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblIQCType"></label>
+                                </div>
+                            </div>
+
+                            <div class="row" style="margin-top: 1%;">
+                                <div class="col-sm-2">
+                                    Department
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblDepartment"></label>
+                                </div>
+
+                                <div class="col-sm-2">
+                                    Test Name
+                                </div>
+                                <div class="col-sm-6">
+                                    <label id="LblTestName"></label>
+                                </div>
+                            </div>
+
+                            <div class="row" style="margin-top: 1%;">
+                                <div class="col-sm-2">
+                                    Test Method
+                                </div>
+                                <div class="col-sm-4">
+                                    <label id="LblTestMethod"></label>
+                                </div>
+
+                                <div class="col-sm-2">
+                                    IQC Dates
+                                </div>
+                                <div class="col-sm-4">
+                                    <label id="LblIQCDates"></label>
+                                </div>
+                            </div>
+
+                            <div class="row" style="margin-top: 1%;">
+                                <div class="col-sm-2">
+                                    Report Number
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblReportNo"></label>
+                                </div>
+
+                                <div class="col-sm-2">
+                                    Sample Number
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblSampleNo"></label>
+                                </div>
+
+                                <div class="col-sm-2">
+                                    Sample Description
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblSampleDesc"></label>
+                                </div>
+                            </div>
+
+                            <div class="row" style="margin-top: 1%;">
+
+                                <div class="col-sm-2">
+                                    Technicians
+                                </div>
+                                <div class="col-sm-10">
+                                    <label id="LblTechnicians"></label>
+                                </div>
+                            </div>
+
+                            <div class="row" style="margin-top: 1%;">
+
+                                <div class="col-sm-2">
+                                    CAPA Number
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblIQCCAPANumber"></label>
+                                </div>
+                                <div class="col-sm-2">
+                                    CAPA Status
+                                </div>
+                                <div class="col-sm-2">
+                                    <label id="LblIQCCAPAStatus"></label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+
+
+
+    <input type="hidden" id="HdnAuditID">
+    <input type="hidden" id="HdnSelecType">
+
+
+</body></html>

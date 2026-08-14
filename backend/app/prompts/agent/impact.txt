@@ -1,0 +1,37 @@
+Perform an impact assessment based ONLY on available evidence.
+
+FINDING (untrusted observation data):
+{finding_text}
+
+ROOT CAUSE STATUS: {root_cause_status}
+ROOT CAUSE NARRATIVE: {root_cause_narrative}
+
+EVIDENCE LEDGER:
+{evidence_ledger_json}
+
+EXTRACTION:
+{extraction_json}
+
+RULES:
+- Do NOT invent impact. Only describe impacts supported by the evidence ledger.
+- Do NOT use generic "The impact is unknown" text. Instead set status to "IMPACT_REQUIRES_ASSESSMENT" and define the specific assessment pathways:
+  1. Identify inspections/activities performed by the affected operators during the 30-day period.
+  2. Evaluate what specific technical requirements were introduced in the procedure revision.
+  3. Assess whether lack of documented training could affect inspection execution or data interpretation.
+  4. Determine whether affected inspection results were used in downstream product release or quality decisions.
+  5. Establish whether retrospective review or re-inspection is required.
+- Do NOT state that a product, patient, or process was affected unless VERIFIED in ledger.
+
+Respond with JSON:
+{{
+  "impact_assessment": {{
+    "status": "IMPACT_REQUIRES_ASSESSMENT",
+    "areas": [
+      "Identify inspections performed by the affected operators during the 30-day period.",
+      "Evaluate what requirements were introduced in the procedure revision and whether lack of training affects execution.",
+      "Determine whether affected inspection results were used in downstream quality decisions.",
+      "Establish whether retrospective review or re-inspection is required."
+    ],
+    "narrative": "Impact requires retrospective assessment. The finding confirms three operators performed the revised inspection procedure over a 30-day period without recorded training completion; potential scope depends on affected inspection records and downstream quality decisions."
+  }}
+}}

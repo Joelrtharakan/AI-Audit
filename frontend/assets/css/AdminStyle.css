@@ -1,0 +1,194 @@
+﻿.minibutton {
+    -moz-user-select: none;
+    background-color: #EEEEEE;
+    background-image: linear-gradient(#FCFCFC, #EEEEEE);
+    background-repeat: repeat-x;
+    border: 1px solid #D5D5D5;
+    border-radius: 3px;
+    color: #333333;
+    cursor: pointer;
+    display: inline-block;
+    font-size: 13px;
+    font-weight: bold;
+    padding: 5px 10px;
+    position: relative;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.9);
+    vertical-align: middle;
+    white-space: nowrap;
+    top: 0px;
+    left: 0px;
+    width: 50px;
+    height: 40px;
+}
+
+.text-box {
+    border: 1px solid #CCC;
+    font-size: 12px;
+    /*line-height: 25px;*/
+    margin: 0px;
+    height: 20px;
+    width: 250px;
+    padding-top: 0px;
+    padding-right: 0px;
+    padding-bottom: 0px;
+    padding-left: 5px;
+    font-family: verdana, Geneva, Tahoma, sans-serif;
+}
+
+.gvmenu {
+    background: #EEEEEE;
+    background-image: linear-gradient(#FCFCFC, #FCFCFC);
+    background-repeat: repeat-x;
+    border: 1px solid #D5D5D5;
+    border-radius: 3px;
+    color: #333333;
+    cursor: pointer;
+    display: inline-block;
+    font-size: 13px;
+    font-weight: bold;
+    padding: 7px 12px;
+    position: relative;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.9);
+    vertical-align: middle;
+    white-space: nowrap;
+    top: 0px;
+    left: 0px;
+    height: auto;
+    display: block;
+    width: 80%;
+}
+
+.gvmenuright {
+    margin-left: 85%;
+    /*display: none;*/
+    height: auto;
+}
+
+.gvmenuleft {
+    width: 50%;
+    height: 100%;
+    float: left;
+    display: inline-block;
+}
+/*giving style to the grid*/
+.gridstyle {
+    width: 78%;
+    margin-top: 5px;
+    -moz-border-radius: 10px;
+    -webkit-border-radius: 10px;
+    border-radius: 10px;
+    behavior: url(../img/border-radius.htc);
+    text-align: center;
+    /*border: 1px solid #CCC;*/
+    margin-bottom: 15px;
+    /*background-color: #FFFFFF;*/
+    margin-left: 11%;
+}
+
+.header-left {
+    font-size: 12px;
+    color: #FFF;
+    text-indent: 6px;
+    /*background :#3C8DBC;*/
+    background: #152845;
+    border-radius: 9px 0px 0px 0px;
+    height: 25px;
+    border: 1px solid #CCC;
+    text-align: center;
+}
+
+.inline-header {
+    font-size: 12px;
+    color: #FFF !important;
+    text-indent: 6px;
+    /*background :#3C8DBC;*/
+    background: #152845;
+    height: 25px;
+    border: 1px solid #CCC;
+    text-align: center;
+}
+
+.header-right {
+    -moz-border-radius: 0px 9px 0px 0px;
+    -webkit-border-radius: 0px 9px 0px 0px;
+    border-radius: 0px 9px 0px 0px;
+    /*background :#3C8DBC;*/
+    background: #152845;
+    font-size: 12px;
+    color: #FFF;
+    text-indent: 6px;
+    border: 1px solid #CCC;
+    text-align: center;
+}
+
+
+
+
+.alternate-row {
+    background-color: #F2F2F2;
+}
+
+.data-table {
+    background-color: #ffffff;
+    border: 1px solid #ccc;
+    border-radius: 10px;
+    margin-bottom: 15px;
+    text-align: center;
+}
+
+    .data-table td {
+        padding: 3px;
+        border-right-width: 1px;
+        border-left: 1px solid #ccc;
+        border-right-style: solid;
+        border-right-color: #CCC;
+        border-bottom: 1px solid #ccc;
+    }
+
+.inner-data-table {
+    -moz-border-radius: 0px;
+    -webkit-border-radius: 0px;
+    border-radius: 0px;
+    behavior: url(../img/border-radius.htc);
+    text-align: center;
+    margin-bottom: 0px;
+}
+
+    .inner-data-table td {
+        padding: 3px;
+        border-right-width: 0px;
+    }
+
+.tip-twitter {
+    opacity: 0.8;
+    z-index: 1000;
+    text-align: left;
+    border-radius: 4px;
+    -moz-border-radius: 4px;
+    -webkit-border-radius: 4px;
+    padding: 8px 8px;
+    max-width: 200px;
+    color: #fff;
+    background-color: #000;
+}
+
+    .tip-twitter .tip-inner {
+        font: bold 11px/14px 'Lucida Grande',sans-serif;
+    }
+
+    .tip-twitter .tip-arrow-top {
+        margin-top: -5px;
+        margin-left: -5px; /* approx. half the width to center it */
+        top: 0;
+        left: 50%;
+        width: 9px;
+        height: 5px;
+        background: url(../img/tip-twitter_arrows.gif) no-repeat;
+    }
+
+.maindiv {
+    width: 100%;
+    height: auto;
+    background: none repeat scroll 0 0 #F2F2F2;
+    border: 1px solid #ccc;
+}

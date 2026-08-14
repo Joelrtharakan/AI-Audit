@@ -1,0 +1,34 @@
+Determine the appropriate CAPA analysis status and recommendations.
+
+ROOT CAUSE STATUS: {root_cause_status}
+ROOT CAUSE CATEGORY: {root_cause_category}
+ROOT CAUSE NARRATIVE: {root_cause_narrative}
+
+EVIDENCE LEDGER:
+{evidence_ledger_json}
+
+CAPA STATUS DECISION RULES (ENFORCE STRICTLY — not just guidelines):
+- CAPA_RECOMMENDED: ONLY when root_cause_status == ESTABLISHED and VERIFIED evidence exists.
+- CAPA_DRAFT_POSSIBLE: root_cause_status == STATED_UNVERIFIED (draft can be prepared but labeled as unverified).
+- INVESTIGATION_REQUIRED: root_cause_status == NOT_ESTABLISHED or evidence is insufficient.
+- INSUFFICIENT_EVIDENCE: Critical evidence gaps prevent any meaningful recommendation.
+- NO_CAPA_RECOMMENDATION_YET: Too early in investigation.
+
+RULES:
+- Do NOT recommend CAPA_RECOMMENDED when root cause is STATED_UNVERIFIED or NOT_ESTABLISHED.
+- Potential corrective action areas are possibilities only — label them as such.
+- Recommended investigation tells the auditor what to do BEFORE a real CAPA can be established.
+- Do NOT invent specific SOPs, procedures, or policies not present in the evidence ledger.
+
+Respond with JSON:
+{{
+  "capa": {{
+    "status": "CAPA_RECOMMENDED|CAPA_DRAFT_POSSIBLE|INVESTIGATION_REQUIRED|INSUFFICIENT_EVIDENCE|NO_CAPA_RECOMMENDATION_YET",
+    "potential_areas": [
+      "Potential corrective action area (not a confirmed requirement)"
+    ],
+    "recommended_investigation": [
+      "What to investigate before a final CAPA can be established"
+    ]
+  }}
+}}

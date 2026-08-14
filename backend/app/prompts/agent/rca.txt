@@ -1,0 +1,88 @@
+Perform a structured Root Cause Analysis based ONLY on the evidence ledger below.
+
+FINDING (untrusted observation data):
+{finding_text}
+
+EXTRACTION:
+{extraction_json}
+
+EVIDENCE LEDGER (all evidence collected so far):
+{evidence_ledger_json}
+
+EVIDENCE GAPS:
+{evidence_gaps_json}
+
+TOOL DATA AVAILABLE: {tools_were_available}
+
+Your tasks:
+1. Determine root cause status based on evidence:
+   - VERIFIED: Objective records in the ledger confirm the cause.
+   - SUPPORTED: Strongly supported by verified facts.
+   - STATED_UNVERIFIED: A specific cause was stated/reported but ledger has no corroborating record.
+   - INFERRED: Logical conclusion without direct record confirmation.
+   - NOT_ESTABLISHED: No causal signal at all. Cannot determine cause from available evidence.
+   - CONTRADICTED: Evidence refutes the suspected cause.
+
+2. NEVER use the observed condition itself ("training was not completed") as the root cause statement. If cause is unverified, generate a LEADING HYPOTHESIS explaining the potential control failure.
+
+3. Assign root cause category from 6M taxonomy: MAN, METHOD, MACHINE, MATERIAL, MEASUREMENT, ENVIRONMENT_MGMT, OTHER.
+
+4. Identify possible contributing factors (conditions, not action items).
+   Mark status as "POSSIBLE_UNCONFIRMED" unless supported by VERIFIED evidence.
+
+5. Perform a 5-step 5-Why analysis progressing logically toward control/system level:
+   - WHY 1 MUST use established facts:
+     Question: "Why were three operators performing the revised inspection procedure without completing mandatory training?"
+     Answer: "The operators were permitted to perform the revised procedure despite having no recorded completion of the mandatory training requirement." (Status: VERIFIED)
+   - WHY 2 explores immediate condition:
+     Question: "Why were they permitted to perform the revised procedure without documented training completion?"
+     Answer: "The available evidence does not establish whether training status was not verified before assignment, authorization controls were ineffective, or another process allowed the operators to perform the procedure." (Status: UNKNOWN)
+   - WHY 3 explores verification control:
+     Question: "Why was the lack of training completion not detected or prevented before the work was performed?"
+     Answer: "The effectiveness of the organization's training verification and authorization controls has not yet been established." (Status: NOT_ESTABLISHED)
+   - WHY 4 explores control failure mechanism:
+     Question: "Why did the relevant control fail, if such a control existed?"
+     Answer: "The actual training assignment, completion-monitoring, authorization, and supervisory controls require investigation." (Status: NOT_ESTABLISHED)
+   - WHY 5 explores systemic condition:
+     Question: "What systemic condition allowed personnel without documented training completion to perform the revised procedure?"
+     Answer: "A definitive systemic root cause cannot yet be established from the available evidence." (Status: NOT_ESTABLISHED)
+
+ABSOLUTE RULES:
+- Do NOT claim VERIFIED unless a VERIFIED evidence item directly confirms the cause.
+- Do NOT present REPORTED items as facts.
+- Do NOT invent identifiers (e.g. SOP-OPS-014) or QMS features (e.g. automated reminders) not present in evidence.
+- "NOT_ESTABLISHED" is a correct and valid conclusion.
+
+Respond with JSON:
+{{
+  "root_cause": {{
+    "status": "VERIFIED|SUPPORTED|STATED_UNVERIFIED|INFERRED|NOT_ESTABLISHED|CONTRADICTED",
+    "category": "MAN|METHOD|MACHINE|MATERIAL|MEASUREMENT|ENVIRONMENT_MGMT|OTHER|null",
+    "statement": "concise root cause statement or null if NOT_ESTABLISHED",
+    "narrative": "clear description of root cause or leading hypothesis",
+    "supporting_evidence": ["claim or record 1"],
+    "contradicting_evidence": ["claim or record 2"],
+    "missing_evidence": ["what is missing to establish cause"],
+    "confidence": "LOW|MEDIUM|HIGH",
+    "evidence_status": "VERIFIED|REPORTED|INFERRED|UNVERIFIED|UNKNOWN",
+    "verification_needed": "what the auditor needs to verify, or null"
+  }},
+  "contributing_factors": [
+    {{
+      "description": "condition (not an action item)",
+      "evidence_status": "INFERRED|REPORTED|VERIFIED",
+      "status": "POSSIBLE_UNCONFIRMED|VERIFIED"
+    }}
+  ],
+  "five_why": {{
+    "steps": [
+      {{
+        "question": "Question 1-5",
+        "answer": "Answer 1-5",
+        "status": "VERIFIED|SUPPORTED|REPORTED_UNVERIFIED|INFERRED|UNKNOWN|NOT_ESTABLISHED"
+      }}
+    ],
+    "is_complete": false,
+    "status_note": "INCOMPLETE — ROOT CAUSE NOT ESTABLISHED (or COMPLETE)"
+  }}
+}}

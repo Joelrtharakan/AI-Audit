@@ -1,0 +1,61 @@
+EXAMPLE 1 (no causal claim at all -> NOT_ESTABLISHED)
+
+Extraction:
+{
+  "stated_facts": ["Refrigerator R-12 temperature logs had missing entries for the evening shift on three consecutive days."],
+  "attributed_statements": [],
+  "referenced_records": [],
+  "timeframe": "three consecutive days",
+  "asset_or_location": "Refrigerator R-12"
+}
+
+Classification:
+{"root_cause_status": "NOT_ESTABLISHED", "category": null, "reasoning": "No one is quoted or described as offering a reason, and no record is cited -- the extraction states only what was missing, not why."}
+
+---
+
+EXAMPLE 2 (attributed statement, named cause, no record -> SELF_REPORTED)
+
+Extraction:
+{
+  "stated_facts": ["Refrigerator R-12 temperature logs had missing entries for the evening shift on three consecutive days."],
+  "attributed_statements": [{"speaker": "staff", "claim": "had not been retrained on the revised SOP-LAB-001"}],
+  "referenced_records": [],
+  "timeframe": "three consecutive days",
+  "asset_or_location": "Refrigerator R-12"
+}
+
+Classification:
+{"root_cause_status": "SELF_REPORTED", "category": "MAN", "reasoning": "Staff specifically named a training gap as the cause, but no record (training log, revision log) is cited confirming it -- it is an admission, not corroborated evidence."}
+
+---
+
+EXAMPLE 3 (attributed statement + referenced corroborating record -> ESTABLISHED)
+
+Extraction:
+{
+  "stated_facts": ["Refrigerator R-12 temperature logs had missing entries for the evening shift on three consecutive days."],
+  "attributed_statements": [{"speaker": "staff", "claim": "had not been retrained on the revised SOP-LAB-001"}],
+  "referenced_records": ["training attendance log"],
+  "timeframe": "three consecutive days",
+  "asset_or_location": "Refrigerator R-12"
+}
+
+Classification:
+{"root_cause_status": "ESTABLISHED", "category": "MAN", "reasoning": "The training attendance log is cited as having been checked and confirms the gap -- this is corroborating evidence, not just a claim."}
+
+---
+
+EXAMPLE 4 (vague/rambling observation with a buried but real attributed claim -> SELF_REPORTED)
+
+Extraction:
+{
+  "stated_facts": ["There were some issues noticed in the lab during the walkthrough.", "A few forms seemed incomplete."],
+  "attributed_statements": [{"speaker": "the technician on duty", "claim": "mentioned in passing that the shift handover process has been rushed lately due to short staffing"}],
+  "referenced_records": [],
+  "timeframe": null,
+  "asset_or_location": null
+}
+
+Classification:
+{"root_cause_status": "SELF_REPORTED", "category": "MAN", "reasoning": "Buried in an otherwise vague observation, the technician did attribute a specific cause (rushed handover from short staffing) -- do not default to NOT_ESTABLISHED just because the rest of the text is poorly written; the extraction still captured a real, specific, attributed claim with no corroborating record."}

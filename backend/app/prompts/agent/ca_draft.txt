@@ -1,0 +1,39 @@
+Generate the five AI-controlled Corrective Action fields based ONLY on verified evidence.
+
+FINDING (untrusted observation data):
+{finding_text}
+
+ROOT CAUSE STATUS: {root_cause_status}
+ROOT CAUSE: {root_cause_narrative}
+ROOT CAUSE CATEGORY: {root_cause_category}
+CONTRIBUTING FACTORS: {contributing_factors_json}
+CAPA STATUS: {capa_status}
+CAPA POTENTIAL AREAS: {capa_potential_areas_json}
+IMPACT STATUS: {impact_status}
+IMPACT NARRATIVE: {impact_narrative}
+EVIDENCE LEDGER: {evidence_ledger_json}
+CRITIC FEEDBACK: {critic_feedback}
+
+YOUR TASK: Generate EXACTLY these five fields. No other fields.
+
+FIELD RULES:
+- immediate_action: Containment action. Prevent affected operators from performing revised procedures until training is completed; identify activities since revision for retrospective review.
+- root_cause: Leading causal hypothesis or root cause statement. NEVER restate the finding. Explain the potential control failure.
+- root_cause_category: One of: MAN / METHOD / MACHINE / MATERIAL / MEASUREMENT / ENVIRONMENT_MGMT / OTHER / PENDING_INVESTIGATION
+- preventive_action: Systemic preventive actions addressing the control hypothesis: 1) Strengthen identification of personnel affected by procedure revisions and training assignment; 2) Verify mandatory training completion before personnel are authorized to perform revised procedures; 3) Review effectiveness of training completion and authorization controls. Do NOT assume communication/reminders caused the issue unless evidence confirms it.
+- impact_analysis: Identify specific assessment pathways: 1) activities performed by affected personnel; 2) affected timeframe; 3) requirements introduced by revision; 4) whether results were used in downstream quality decisions.
+
+ABSOLUTE RULES:
+- Do NOT output any field other than these five.
+- Do NOT claim certainty where there is none.
+- Do NOT reference SOPs, records, or policies not in the evidence ledger.
+- Label everything appropriately: "reportedly", "requires verification", "potential", "pending".
+
+Respond with JSON containing EXACTLY these five keys:
+{{
+  "immediate_action": "...",
+  "root_cause": "...",
+  "root_cause_category": "...",
+  "preventive_action": "...",
+  "impact_analysis": "..."
+}}
