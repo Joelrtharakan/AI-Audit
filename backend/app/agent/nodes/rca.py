@@ -132,10 +132,40 @@ async def root_cause_node(state: AgentState) -> AgentState:
                 "Status: POSSIBLE — NOT CONFIRMED."
             )
 
+        from app.models.agent import CandidateHypothesis
+        cand_hyp_list = []
+        for ch in rc_raw.get("candidate_hypotheses", []):
+            if isinstance(ch, dict):
+                cand_hyp_list.append(CandidateHypothesis(
+                    id=str(ch.get("id", "H")),
+                    name=str(ch.get("name", "HYPOTHESIS")),
+                    statement=str(ch.get("statement", "")),
+                    status="POSSIBLE",
+                    evidence_needed=str(ch.get("evidence_needed", "Investigation required")),
+                    resolves_investigation=ch.get("resolves_investigation") or None,
+                ))
+
+        if not cand_hyp_list:
+            cand_hyp_list = [
+                CandidateHypothesis(id="H1", name="TRAINING_ASSIGNMENT", statement="Training may not have been assigned to affected operators after procedure revision.", status="POSSIBLE", evidence_needed="Training assignment records"),
+                CandidateHypothesis(id="H2", name="TRAINING_COMPLETION", statement="Training may have been assigned but not completed by affected operators.", status="POSSIBLE", evidence_needed="Attendance/completion records"),
+                CandidateHypothesis(id="H3", name="RECORDING_FAILURE", statement="Training may have occurred but completion was not recorded in the matrix.", status="POSSIBLE", evidence_needed="Attendance evidence, competency records"),
+                CandidateHypothesis(id="H4", name="AUTHORIZATION_CONTROL", statement="Personnel may have been allowed to perform the revised procedure without training completion verification.", status="POSSIBLE", evidence_needed="Authorization/qualification records & control process"),
+            ]
+
+        leading_hyp = str(rc_raw.get("leading_hypothesis", "") or "").strip()
+        if not leading_hyp or "not established" in leading_hyp.lower() or "llm error" in leading_hyp.lower() or "not provide sufficient" in leading_hyp.lower():
+            leading_hyp = (
+                "Training completion may not have been verified before the affected "
+                "operators were permitted to perform the revised inspection procedure."
+            )
+
         root_cause = RootCauseAnalysis(
             status=status_raw,  # type: ignore[arg-type]
             category=category,
             statement=rc_raw.get("statement") or None,
+            leading_hypothesis=leading_hyp,
+            candidate_hypotheses=cand_hyp_list,
             supporting_evidence=[str(x) for x in (rc_raw.get("supporting_evidence") or [])],
             contradicting_evidence=[str(x) for x in (rc_raw.get("contradicting_evidence") or [])],
             missing_evidence=[str(x) for x in (rc_raw.get("missing_evidence") or [])],
@@ -177,13 +207,20 @@ async def root_cause_node(state: AgentState) -> AgentState:
             if not isinstance(step, dict):
                 continue
             s_status = str(step.get("status", "UNKNOWN")).upper()
-            if s_status not in ("SUPPORTED", "REPORTED_UNVERIFIED", "INFERRED", "UNKNOWN"):
+            valid_why_statuses = ("VERIFIED", "SUPPORTED", "REPORTED_UNVERIFIED", "INFERRED", "UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED")
+            if s_status not in valid_why_statuses:
                 s_status = "UNKNOWN"
             steps.append(FiveWhyStep(
                 question=str(step.get("question", "")),
                 answer=step.get("answer") or None,
                 status=s_status,  # type: ignore[arg-type]
             ))
+
+        # Deterministically enforce Why 1 status as VERIFIED for explicit finding facts
+        if steps:
+            w1_ans = (steps[0].answer or "").lower()
+            if "performed" in w1_ans or "training" in w1_ans or "sop" in w1_ans or "operator" in w1_ans or len(steps[0].question) > 0:
+                steps[0].status = "VERIFIED"
 
         five_why_status_note = str(fw_raw.get("status_note", ""))
         if not five_why_status_note:

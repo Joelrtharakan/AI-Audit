@@ -56,6 +56,27 @@ def test_empty_dict_accepted():
     assert result == {}
 
 
+def test_no_raw_dict_or_json_in_form_fields():
+    """Ensure form prefill fields never contain python dict syntax or raw json stringifications."""
+    from app.agent.nodes.ca_draft_generator import ca_draft_generator_node
+    # Test dictionary cleaner string sanitization logic directly
+    raw_dict_str = "{'description': 'Strengthen identification of personnel', 'status': 'IMPLEMENT'}"
+    from app.agent.permissions import build_ca_draft
+    draft = build_ca_draft({
+        "immediate_action": "Prevent affected personnel...",
+        "root_cause": "Root cause not established.",
+        "root_cause_category": "MANAGEMENT / SYSTEM",
+        "preventive_action": raw_dict_str,
+        "impact_analysis": "Retrospective assessment required."
+    })
+    for val in (draft.immediate_action, draft.root_cause, draft.root_cause_category, draft.preventive_action, draft.impact_analysis):
+        assert "{'" not in val
+        assert "'description':" not in val
+        assert "'status':" not in val
+        assert "[object Object]" not in val
+        assert "undefined" not in val
+
+
 def test_each_forbidden_field_individually_rejected():
     from app.agent.permissions import validate_ai_output_fields
 

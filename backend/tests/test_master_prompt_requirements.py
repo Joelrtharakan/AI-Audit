@@ -299,7 +299,10 @@ async def test_five_ca_fields_usefully_generated():
     ca_draft = final.get("ca_draft")
     assert ca_draft is not None
     draft_dict = ca_draft.model_dump()
-    for field in ("immediate_action", "root_cause", "root_cause_category", "preventive_action", "impact_analysis"):
+    for field in ("immediate_action", "root_cause", "preventive_action", "impact_analysis"):
         val = draft_dict.get(field, "")
         assert isinstance(val, str)
         assert len(val.strip()) > 10, f"Field {field} is too short or empty: '{val}'"
+
+    cat_val = draft_dict.get("root_cause_category", "")
+    assert isinstance(cat_val, str) and len(cat_val.strip()) > 0

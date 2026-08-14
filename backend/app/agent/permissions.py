@@ -49,11 +49,24 @@ def validate_ai_output_fields(data: dict) -> dict:
     return data
 
 
+def sanitize_form_text(val: str | None) -> str:
+    if not val:
+        return ""
+    s = str(val).strip()
+    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+        import re
+        s = re.sub(r"'(?:status|id|name)':\s*'[^']*',?", "", s)
+        s = re.sub(r"'(?:description|statement|text)':\s*", "", s)
+        s = s.replace("{", "").replace("}", "").replace("[", "").replace("]", "").strip()
+    return s
+
+
 def build_ca_draft(data: dict) -> CADraft:
-    """Validate field permissions then construct a CADraft.
+    """Validate field permissions then construct a CADraft with sanitized strings.
 
     Raises PermissionError if unauthorized fields are present.
     Raises ValueError if required fields are missing.
     """
     validated = validate_ai_output_fields(data)
-    return CADraft(**validated)
+    sanitized = {k: sanitize_form_text(v) for k, v in validated.items()}
+    return CADraft(**sanitized)

@@ -58,7 +58,7 @@ class EvidenceItem(BaseModel):
 class FiveWhyStep(BaseModel):
     question: str
     answer: str | None = None
-    status: Literal["SUPPORTED", "REPORTED_UNVERIFIED", "INFERRED", "UNKNOWN"]
+    status: Literal["VERIFIED", "SUPPORTED", "REPORTED_UNVERIFIED", "INFERRED", "UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED"]
 
 
 class FiveWhyAnalysis(BaseModel):
@@ -81,10 +81,21 @@ class RootCauseStatus(str, Enum):
     CONTRADICTED = "CONTRADICTED"
 
 
+class CandidateHypothesis(BaseModel):
+    id: str  # e.g. "H1"
+    name: str  # e.g. "TRAINING_ASSIGNMENT"
+    statement: str
+    status: Literal["POSSIBLE", "SUPPORTED", "REFUTED", "UNVERIFIED"] = "POSSIBLE"
+    evidence_needed: str
+    resolves_investigation: str | None = None
+
+
 class RootCauseAnalysis(BaseModel):
     status: RootCauseStatus
     category: str | None = None  # 6M taxonomy value
     statement: str | None = None
+    leading_hypothesis: str | None = None
+    candidate_hypotheses: list[CandidateHypothesis] = []
     supporting_evidence: list[str] = []
     contradicting_evidence: list[str] = []
     missing_evidence: list[str] = []

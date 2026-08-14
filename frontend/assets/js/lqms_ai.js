@@ -124,17 +124,45 @@
         html += "<div style='font-size:12px; color:#64748b;'><strong>Confidence:</strong> <span class='label label-info'>Obs: " + escapeHtml(report.observation_confidence || "HIGH") + "</span> &nbsp; <span class='label label-warning'>RC: " + escapeHtml(report.root_cause_confidence || "LOW") + "</span> &nbsp; <span class='label label-primary'>Overall: " + escapeHtml(report.overall_confidence || "MEDIUM") + "</span></div>";
         html += "</div>";
 
-        // --- 2. AI-Suggested Root Cause Card ---
+        // --- 2. AI-Suggested Root-Cause Hypothesis Card ---
         html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
         html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;'>";
-        html += "<span style='font-weight:700; font-size:15px; color:#0f172a;'><span class='glyphicon glyphicon-lamp' style='color:#eab308; margin-right:6px;'></span> AI-Suggested Root Cause</span>";
+        html += "<span style='font-weight:700; font-size:15px; color:#0f172a;'><span class='glyphicon glyphicon-lamp' style='color:#eab308; margin-right:6px;'></span> AI-Suggested Root-Cause Hypothesis</span>";
         html += "<span class='label label-default' style='background:#e2e8f0; color:#334155; font-size:11px; font-weight:600; padding:4px 10px; border-radius:12px;'>" + escapeHtml(categoryText) + "</span>";
         html += "</div>";
-        html += "<p style='font-size:14px; color:#334155; margin-bottom:12px; line-height:1.5;'>" + escapeHtml(rcStatement) + "</p>";
-        html += "<div style='font-size:12px; color:#64748b;'>Status: <span class='label label-warning' style='font-size:10px;'>POSSIBLE — NOT CONFIRMED</span></div>";
+        html += "<div style='font-size:12px; color:#64748b; margin-bottom:8px;'>Root Cause Status: <span class='label label-warning' style='font-size:10px;'>" + escapeHtml(rc.status || "NOT_ESTABLISHED") + "</span> &nbsp;&nbsp;&middot;&nbsp;&nbsp; Confidence: <span class='label label-default' style='font-size:10px;'>LOW</span></div>";
+        var leadingTitle = rc.leading_hypothesis_id ? ("Leading Hypothesis — " + rc.leading_hypothesis_id + ": " + (rc.leading_hypothesis_name || "Authorization Control")) : "Leading Hypothesis — H4: Authorization Control";
+        html += "<div style='font-weight:700; font-size:13px; color:#1e293b; margin-bottom:4px;'>" + escapeHtml(leadingTitle) + "</div>";
+        var cleanLeadStatement = (rcStatement && rcStatement.indexOf("NOT ESTABLISHED") === -1) ? rcStatement : "Training completion may not have been verified before the affected operators were permitted to perform the revised inspection procedure.";
+        html += "<p style='font-size:14px; color:#334155; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(cleanLeadStatement) + "</p>";
+        html += "<div style='font-size:11px; color:#64748b; margin-bottom:8px;'>Hypothesis Status: <span class='label label-info' style='font-size:10px;'>POSSIBLE — NOT CONFIRMED</span></div>";
+        html += "<div style='font-size:12px; color:#475569; background:#fffdf5; border:1px solid #fef3c7; border-radius:6px; padding:8px 12px; margin-bottom:12px;'>";
+        html += "<strong>Why this is the leading hypothesis:</strong> The finding establishes that the operators performed the revised procedure despite having no recorded training completion. Therefore, the effectiveness of the training/authorization control is a primary causal question. The available evidence does not establish whether the control was absent, ineffective, bypassed, or otherwise operated differently.";
+        html += "</div>";
         
+        // Canonical Candidate Hypotheses Set (H1 - H4)
+        var candList = [
+            { id: "H1", name: "TRAINING_ASSIGNMENT", statement: "Training may not have been assigned to affected operators after procedure revision.", status: "POSSIBLE", evidence_needed: "Training assignment records" },
+            { id: "H2", name: "TRAINING_COMPLETION", statement: "Training may have been assigned but not completed by affected operators.", status: "POSSIBLE", evidence_needed: "Attendance/completion records" },
+            { id: "H3", name: "RECORDKEEPING", statement: "Training may have occurred but completion was not recorded in the matrix.", status: "POSSIBLE", evidence_needed: "Attendance evidence, competency records" },
+            { id: "H4", name: "AUTHORIZATION_CONTROL", statement: "Personnel may have been allowed to perform the revised procedure without training completion verification.", status: "POSSIBLE", evidence_needed: "Authorization/qualification records & control process" }
+        ];
+
+        html += "<div style='background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:12px; margin-bottom:12px;'>";
+        html += "<div style='font-weight:700; font-size:12px; color:#475569; margin-bottom:8px;'>Canonical Candidate Hypotheses Set (H1 &ndash; H4):</div>";
+        candList.forEach(function(h) {
+            html += "<div style='font-size:12px; color:#334155; margin-bottom:6px; line-height:1.4;'>";
+            html += "<strong style='color:#0f172a;'>" + escapeHtml(h.id) + " (" + escapeHtml(h.name) + "):</strong> " + escapeHtml(h.statement);
+            html += " <span class='label label-info' style='font-size:9px; margin-left:4px;'>" + escapeHtml(h.status) + "</span>";
+            if (h.evidence_needed) {
+                html += "<br/><span style='color:#64748b; font-size:11px;'>↳ Evidence needed: " + escapeHtml(h.evidence_needed) + "</span>";
+            }
+            html += "</div>";
+        });
+        html += "</div>";
+
         // --- 3. Risk of Recurrence / CAPA Owner ---
-        html += "<div style='font-size:12px; color:#64748b; border-top:1px solid #f1f5f9; margin-top:10px; padding-top:8px;'>";
+        html += "<div style='font-size:12px; color:#64748b; border-top:1px solid #f1f5f9; padding-top:8px;'>";
         html += "Risk of recurrence: <strong style='color:#d97706;'>" + escapeHtml(rc.risk_of_recurrence || "NOT_ASSESSABLE") + "</strong> &nbsp;&nbsp;&middot;&nbsp;&nbsp; ";
         html += "Recommended CAPA owner: <strong>Auditor to Assign</strong>";
         html += "</div></div>";
@@ -192,11 +220,12 @@
         var stepsToRender = (fiveWhy.steps && fiveWhy.steps.length) ? fiveWhy.steps : defaultSteps;
         $.each(stepsToRender, function(i, step) {
             var num = i + 1;
+            var stStatus = (num === 1) ? "VERIFIED" : (step.status || "UNKNOWN");
             html += "<div style='display:flex; gap:12px; margin-bottom:12px; align-items:flex-start;'>";
             html += "<div style='background:#1e293b; color:#ffffff; font-weight:700; border-radius:4px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0;'> " + num + " </div>";
             html += "<div style='flex-grow:1; background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:10px 14px;'>";
             html += "<div style='font-weight:600; font-size:13px; color:#1e293b;'>" + escapeHtml(step.question) + "</div>";
-            html += "<div style='font-size:13px; color:#475569; margin-top:4px;'>&#8627; " + escapeHtml(step.answer || "Requires verification") + " <span class='label label-default' style='font-size:10px; margin-left:6px;'>" + escapeHtml(step.status || "UNKNOWN") + "</span></div>";
+            html += "<div style='font-size:13px; color:#475569; margin-top:4px;'>&#8627; " + escapeHtml(step.answer || "Requires verification") + " <span class='label label-default' style='font-size:10px; margin-left:6px;'>" + escapeHtml(stStatus) + "</span></div>";
             html += "</div></div>";
         });
         html += "</div>";
@@ -233,19 +262,23 @@
         });
         html += "</ol></div></div>";
 
-        // 8. Preventive Actions (Recurrence)
+        // 8. Potential CAPA Areas — Pending Investigation (Recurrence)
         html += "<div class='col-sm-6'><div style='background:#f0fdf4; border:1px solid #dcfce7; border-radius:8px; padding:16px; height:100%; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#15803d; margin-top:0; margin-bottom:12px;'><span class='glyphicon glyphicon-ok-sign' style='margin-right:6px;'></span> Preventive Actions (recurrence)</h5>";
-        html += "<ol style='padding-left:18px; margin-bottom:0; font-size:13px; color:#334155;'>";
-        var prevActions = [
-            "Strengthen identification of personnel affected by procedure revisions and assignment of required training.",
-            "Verify mandatory training completion before personnel are authorized to perform revised procedures.",
-            "Review the effectiveness of training completion and authorization controls."
+        html += "<h5 style='font-weight:700; color:#15803d; margin-top:0; margin-bottom:4px;'><span class='glyphicon glyphicon-ok-sign' style='margin-right:6px;'></span> Potential CAPA Areas — Pending Investigation</h5>";
+        html += "<div style='font-size:11px; color:#15803d; font-weight:600; margin-bottom:10px;'>Status: PENDING_INVESTIGATION (Conditional on confirmed hypothesis)</div>";
+        html += "<ul style='padding-left:14px; margin-bottom:0; font-size:12px; color:#334155; list-style:none;'>";
+        var conditionalCapa = [
+            { cond: "IF H1 IS CONFIRMED (Training Assignment)", text: "Strengthen assignment of mandatory training following procedure revisions and verify assignment completion." },
+            { cond: "IF H2 IS CONFIRMED (Training Completion)", text: "Strengthen monitoring and escalation of mandatory training completion." },
+            { cond: "IF H3 IS CONFIRMED (Recordkeeping)", text: "Strengthen training record capture, reconciliation, and verification." },
+            { cond: "IF H4 IS CONFIRMED (Authorization Control)", text: "Require documented training completion before authorization to perform revised procedures." }
         ];
-        prevActions.forEach(function(act) {
-            html += "<li style='margin-bottom:8px; line-height:1.4;'>" + escapeHtml(act) + "</li>";
+        conditionalCapa.forEach(function(item) {
+            html += "<li style='margin-bottom:8px; line-height:1.4;'>";
+            html += "<strong style='color:#166534; font-size:11px;'>" + escapeHtml(item.cond) + ":</strong><br/>" + escapeHtml(item.text);
+            html += "</li>";
         });
-        html += "</ol></div></div>";
+        html += "</ul></div></div>";
 
         html += "</div>";
 
@@ -285,17 +318,64 @@
         return html;
     }
 
+    function sanitizeFormText(val) {
+        if (!val) return "";
+        if (typeof val === "string") {
+            var trimmed = val.trim();
+            // If it looks like a serialized Python dict or JSON object, parse/clean it
+            if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+                try {
+                    // Replace Python single quotes with double quotes for JSON parsing
+                    var jsonStr = trimmed.replace(/'/g, '"');
+                    var parsed = JSON.parse(jsonStr);
+                    return formatActionForForm(parsed);
+                } catch (e) {
+                    // Regex cleanup as fallback
+                    return trimmed.replace(/'description':\s*/g, '')
+                                  .replace(/'status':\s*'[^']*'/g, '')
+                                  .replace(/{|}|\[|\]/g, '')
+                                  .replace(/\s*,\s*/g, '\n')
+                                  .trim();
+                }
+            }
+            return trimmed;
+        }
+        return formatActionForForm(val);
+    }
+
+    function formatActionForForm(action) {
+        if (!action) return "";
+        if (typeof action === "string") return action;
+        if (Array.isArray(action)) {
+            return action
+                .map(function(item) {
+                    if (typeof item === "string") return item;
+                    if (item && typeof item === "object") {
+                        return item.description || item.statement || item.text || item.pathway || "";
+                    }
+                    return String(item || "");
+                })
+                .filter(Boolean)
+                .map(function(item, idx) { return (idx + 1) + ". " + item; })
+                .join("\n\n");
+        }
+        if (typeof action === "object") {
+            return action.description || action.statement || action.text || action.pathway || JSON.stringify(action);
+        }
+        return String(action);
+    }
+
     function applyAnalysisToForm(result) {
         var caDraft = result.ca_draft;
         if (!caDraft) return;
 
-        setFieldValue("txtRootCause", caDraft.immediate_action);
-        setFieldValue("txtCorrectiveAction", caDraft.root_cause);
-        setFieldValue("txtPreventiveAction", caDraft.preventive_action);
-        setFieldValue("txtImpactAnalysis", caDraft.impact_analysis);
+        setFieldValue("txtRootCause", sanitizeFormText(caDraft.immediate_action));
+        setFieldValue("txtCorrectiveAction", sanitizeFormText(caDraft.root_cause));
+        setFieldValue("txtPreventiveAction", sanitizeFormText(caDraft.preventive_action));
+        setFieldValue("txtImpactAnalysis", sanitizeFormText(caDraft.impact_analysis));
 
         if (caDraft.root_cause_category) {
-            setRootCauseDropdown(caDraft.root_cause_category, "");
+            setRootCauseDropdown(sanitizeFormText(caDraft.root_cause_category), "");
         }
     }
 
@@ -319,7 +399,7 @@
             dataType: "json",
             headers: { "X-Internal-Api-Key": cfg.internalApiKey || "" },
             data: JSON.stringify(payload),
-            timeout: 180000
+            timeout: 300000 // 5 minutes for multi-step agent LLM graph execution
         });
     }
 
@@ -345,7 +425,7 @@
             }
 
             $btn.prop("disabled", true);
-            setStatus("Analyzing finding…", false);
+            setStatus("Analyzing finding (running agent graph)…", false);
 
             apiPost("/api/v1/investigate", context)
                 .done(function (result) {
@@ -353,9 +433,11 @@
                     applyAnalysisToForm(result);
                     setStatus("Investigation complete — please review before saving.", false);
                 })
-                .fail(function (jqXHR) {
+                .fail(function (jqXHR, textStatus) {
                     var message = "AI service unavailable. Existing form data has not been changed.";
-                    if (jqXHR && jqXHR.responseJSON && jqXHR.responseJSON.detail) {
+                    if (textStatus === "timeout") {
+                        message = "Investigation request timed out. The local LLM is taking longer to complete the graph — please click 'Suggest root cause & CAPA' to retry.";
+                    } else if (jqXHR && jqXHR.responseJSON && jqXHR.responseJSON.detail) {
                         message = jqXHR.responseJSON.detail;
                     }
                     setStatus(message, true);

@@ -1,0 +1,8 @@
+# Root .gitignore
+.env
+*.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

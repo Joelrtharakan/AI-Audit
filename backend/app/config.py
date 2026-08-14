@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     agent_max_iterations: int = 10
     agent_max_tool_calls: int = 15
     agent_tool_timeout_seconds: float = 10.0
-    agent_overall_timeout_seconds: float = 120.0
+    agent_overall_timeout_seconds: float = 240.0
     agent_max_critic_iterations: int = 2
 
     @property

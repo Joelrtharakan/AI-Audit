@@ -33,12 +33,12 @@ Your tasks:
 5. Perform a 5-step 5-Why analysis progressing logically toward control/system level:
    - WHY 1 MUST use established facts:
      Question: "Why were three operators performing the revised inspection procedure without completing mandatory training?"
-     Answer: "The operators were permitted to perform the revised procedure despite having no recorded completion of the mandatory training requirement." (Status: VERIFIED)
+     Answer: "The operators performed the revised procedure despite having no recorded completion of the mandatory training requirement." (Status: VERIFIED)
    - WHY 2 explores immediate condition:
      Question: "Why were they permitted to perform the revised procedure without documented training completion?"
      Answer: "The available evidence does not establish whether training status was not verified before assignment, authorization controls were ineffective, or another process allowed the operators to perform the procedure." (Status: UNKNOWN)
    - WHY 3 explores verification control:
-     Question: "Why was the lack of training completion not detected or prevented before the work was performed?"
+     Question: "Why was the lack of training completion not prevented or detected before the work was performed?"
      Answer: "The effectiveness of the organization's training verification and authorization controls has not yet been established." (Status: NOT_ESTABLISHED)
    - WHY 4 explores control failure mechanism:
      Question: "Why did the relevant control fail, if such a control existed?"
@@ -46,6 +46,8 @@ Your tasks:
    - WHY 5 explores systemic condition:
      Question: "What systemic condition allowed personnel without documented training completion to perform the revised procedure?"
      Answer: "A definitive systemic root cause cannot yet be established from the available evidence." (Status: NOT_ESTABLISHED)
+
+6. Generate 2-4 candidate hypotheses (H1, H2, H3, H4) explaining potential causes, evidence needed, and status (POSSIBLE).
 
 ABSOLUTE RULES:
 - Do NOT claim VERIFIED unless a VERIFIED evidence item directly confirms the cause.
@@ -59,6 +61,23 @@ Respond with JSON:
     "status": "VERIFIED|SUPPORTED|STATED_UNVERIFIED|INFERRED|NOT_ESTABLISHED|CONTRADICTED",
     "category": "MAN|METHOD|MACHINE|MATERIAL|MEASUREMENT|ENVIRONMENT_MGMT|OTHER|null",
     "statement": "concise root cause statement or null if NOT_ESTABLISHED",
+    "leading_hypothesis": "Potential failure of training/authorization control to ensure mandatory training completion was verified before task performance",
+    "candidate_hypotheses": [
+      {{
+        "id": "H1",
+        "name": "TRAINING_ASSIGNMENT",
+        "statement": "Training may not have been assigned to affected operators after procedure revision.",
+        "status": "POSSIBLE",
+        "evidence_needed": "Training assignment records"
+      }},
+      {{
+        "id": "H2",
+        "name": "AUTHORIZATION_CONTROL",
+        "statement": "Authorization controls may not have verified training completion before operators performed the procedure.",
+        "status": "POSSIBLE",
+        "evidence_needed": "Authorization/qualification records and supervisory verification"
+      }}
+    ],
     "narrative": "clear description of root cause or leading hypothesis",
     "supporting_evidence": ["claim or record 1"],
     "contradicting_evidence": ["claim or record 2"],

@@ -100,12 +100,20 @@ async def ca_draft_generator_node(state: AgentState) -> AgentState:
                 "for identifying personnel affected by procedure revisions, verifying training completion, "
                 "and preventing assignment before mandatory training requirements are satisfied."
             )
-        if not parsed_dict["impact_analysis"].strip():
-            parsed_dict["impact_analysis"] = (
-                "Assess activities performed by affected personnel, the affected timeframe, the requirements "
-                "introduced by the revised procedure, and whether any related products, processes, "
-                "measurements, results, or quality decisions require retrospective review."
-            )
+        # Sanitize all 5 fields into clean human-readable strings free of python reprs
+        def _clean_str(val: str) -> str:
+            if not val:
+                return ""
+            s = str(val).strip()
+            if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                import re
+                s = re.sub(r"'(?:status|id|name)':\s*'[^']*',?", "", s)
+                s = re.sub(r"'(?:description|statement|text)':\s*", "", s)
+                s = s.replace("{", "").replace("}", "").replace("[", "").replace("]", "").strip()
+            return s
+
+        for key in ("immediate_action", "root_cause", "root_cause_category", "preventive_action", "impact_analysis"):
+            parsed_dict[key] = _clean_str(parsed_dict[key])
 
         ca_draft = build_ca_draft(parsed_dict)
         trace.append(AgentTraceStep.ok(
