@@ -365,7 +365,7 @@ instead of eyeballing individual responses.
 
 ```bash
 # Run against whichever provider the backend currently has configured:
-python scripts/run_golden_eval.py --base-url http://localhost:8000 --api-key devkey123
+python scripts/run_golden_eval.py --base-url http://localhost:8000 --api-key "$INTERNAL_API_KEY"
 
 # Run against both providers and diff the reports side by side (starts Ollama and the
 # backend itself, with each provider in turn):

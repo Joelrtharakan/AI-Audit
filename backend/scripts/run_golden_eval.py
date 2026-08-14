@@ -10,7 +10,7 @@ independent of the accuracy number.
 Usage:
     python scripts/run_golden_eval.py \\
         --base-url http://localhost:8000 \\
-        --api-key devkey123 \\
+        --api-key "$INTERNAL_API_KEY" \\
         --threshold 0.85
 
 Exit code is non-zero if accuracy falls below --threshold OR any case produces
@@ -188,7 +188,7 @@ def print_report(results: list[dict], threshold: float) -> tuple[float, bool]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://localhost:8000")
-    parser.add_argument("--api-key", default="devkey123")
+    parser.add_argument("--api-key", default="")
     parser.add_argument("--golden-set", type=Path, default=DEFAULT_GOLDEN_SET)
     parser.add_argument("--threshold", type=float, default=0.85, help="Minimum accuracy to exit 0 (default 0.85).")
     parser.add_argument("--timeout", type=float, default=60.0, help="Per-request timeout in seconds.")
