@@ -34,6 +34,50 @@ class EvidenceStatus(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class CanonicalFindingState(BaseModel):
+    """The single canonical intermediate representation extracted from raw finding text (Section 1).
+
+    All downstream nodes (RCA, 5-Why, Investigation, CAPA, Impact) MUST consume this state
+    rather than independently re-interpreting the raw finding.
+    """
+    raw_finding: str
+    observed_deviation: str
+    # The condition asserted about the affected object (e.g. "not completed",
+    # "missing", "incomplete") — kept separate from affected_objects so the
+    # subject and the deviation asserted about it are never conflated into
+    # one opaque string.
+    deviation_condition: str = "UNKNOWN"
+    affected_objects: list[str] = []
+    affected_people: list[str] = []
+    affected_departments: list[str] = []
+    affected_equipment: list[str] = []
+    affected_records: list[str] = []
+    affected_period: str = "UNKNOWN"
+    # The person/role identified as responsible/involved, if the finding names one
+    # (e.g. "the responsible technician") — distinct from affected_people (who was
+    # impacted) since an actor may be neither affected nor a department.
+    actor: str | None = None
+    # Layer 2 of the causal chain (Layer 1 is observed_deviation): the
+    # action-level explanation of HOW the deviation happened, when the
+    # finding/evidence directly states one (e.g. "the check was missed",
+    # distinct from the observation "the log was incomplete"). Null if no
+    # claim in the finding states a mechanism at this level of specificity.
+    immediate_mechanism: str | None = None
+    # VERIFIED (from a stated fact) | REPORTED (from an attributed
+    # statement) | UNKNOWN (no mechanism-level claim found).
+    immediate_mechanism_status: str = "UNKNOWN"
+    process: str = "UNKNOWN"
+    procedure: str = "UNKNOWN"
+    requirement: str = "UNKNOWN"
+    facts: list[str] = []
+    reported_statements: list[str] = []
+    inferred_statements: list[str] = []
+    unknowns: list[str] = []
+    contradictions: list[str] = []
+    prompt_injection_detected: bool = False
+
+
+
 class EvidenceItem(BaseModel):
     """A single piece of evidence in the evidence ledger.
 
@@ -58,7 +102,8 @@ class EvidenceItem(BaseModel):
 class FiveWhyStep(BaseModel):
     question: str
     answer: str | None = None
-    status: Literal["VERIFIED", "SUPPORTED", "REPORTED_UNVERIFIED", "INFERRED", "UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED"]
+    status: Literal["VERIFIED", "SUPPORTED", "REPORTED", "REPORTED_STATEMENT", "REPORTED_UNVERIFIED", "INFERRED", "UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED"]
+
 
 
 class FiveWhyAnalysis(BaseModel):
@@ -88,7 +133,18 @@ class CandidateHypothesis(BaseModel):
     status: Literal["POSSIBLE", "SUPPORTED", "REFUTED", "UNVERIFIED"] = "POSSIBLE"
     evidence_needed: str
     discrimination_evidence: str | None = None  # what evidence would distinguish THIS hypothesis from the others
+    relevance_rank: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"  # Section 7 evidence relevance ranking
     resolves_investigation: str | None = None
+    # Why this hypothesis is plausible for THIS finding specifically — distinct
+    # from `statement` (the claim itself) so plausibility reasoning isn't lost.
+    rationale: str | None = None
+    # Facts from the evidence ledger that argue against this hypothesis, if any.
+    evidence_against: str | None = None
+    # What specific result would CONFIRM this hypothesis.
+    confirms_if: str | None = None
+    # What specific result would REFUTE this hypothesis.
+    refutes_if: str | None = None
+
 
 
 class RootCauseAnalysis(BaseModel):
@@ -114,7 +170,13 @@ class RootCauseAnalysis(BaseModel):
 class ContributingFactor(BaseModel):
     description: str
     evidence_status: EvidenceStatus = EvidenceStatus.INFERRED
-    status: Literal["POSSIBLE_UNCONFIRMED", "VERIFIED"] = "POSSIBLE_UNCONFIRMED"
+    status: Literal["POSSIBLE_UNCONFIRMED", "VERIFIED", "REJECTED"] = "POSSIBLE_UNCONFIRMED"
+    # Why this factor is plausible for this finding, and what would confirm it —
+    # optional so existing callers that only set `description` still validate.
+    rationale: str | None = None
+    evidence_required: str | None = None
+    # Populated only when status=="REJECTED": what contradicts it.
+    evidence_against: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +216,11 @@ class ConditionalCapaAction(BaseModel):
 
     if_cause_confirmed: str  # the condition, e.g. "If training was never assigned by the training matrix"
     recommended_action: str  # specific corrective action for that branch
+    # Optional structured fields (populated where the synthesis provides
+    # them) distinguishing what KIND of action this is, so a systemic action
+    # is never mistaken for an already-confirmed corrective action.
+    action_type: Literal["IMMEDIATE_CORRECTION", "CONTAINMENT", "CORRECTIVE_ACTION", "SYSTEMIC_ACTION"] | None = None
+    verification_method: str | None = None  # how effectiveness of this action would be verified
 
 
 class CapaAnalysis(BaseModel):
@@ -187,6 +254,13 @@ class ImpactAssessment(BaseModel):
     relevant_change: str | None = None   # what specifically changed (Rule 18: never assumed)
     potential_effect: str | None = None  # plausible downstream consequence
     evidence_needed: str | None = None   # what would bound the scope
+    # Per-field EXPLICIT/INFERRED/UNKNOWN classification (keyed by field name:
+    # "affected_object", "affected_period", "process_at_risk",
+    # "relevant_change", "potential_effect"), computed deterministically by
+    # app.agent.analytical_validator.compute_impact_field_basis — never
+    # asserted by the LLM itself, since a model can't be trusted to grade
+    # its own certainty.
+    field_basis: dict[str, str] = {}
 
 
 
@@ -222,6 +296,17 @@ class InvestigationReport(BaseModel):
     evidence_gaps: list[EvidenceGap] = []
     evidence: list[EvidenceItem] = []
     human_review_required: bool = True  # always True -- enforced here, not just prompted
+    # "LLM" = normal causal synthesis ran; "DEGRADED" = the LLM call failed
+    # and a deterministic, evidence-conservative fallback produced this
+    # report instead. Must never be silently indistinguishable from a
+    # normal result.
+    analysis_mode: Literal["LLM", "DEGRADED"] = "LLM"
+    # Provider-router metadata (infrastructure only, no analytical meaning):
+    # which provider actually answered, whether Groq -> OpenRouter -> Gemini
+    # failover was needed, and the full attempt order.
+    provider_used: str | None = None
+    fallback_used: bool = False
+    provider_attempts: list[str] = []
 
     @field_validator("human_review_required")
     @classmethod

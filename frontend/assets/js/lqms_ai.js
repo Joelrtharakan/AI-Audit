@@ -131,135 +131,231 @@
         var fiveWhy = report.five_why || {};
 
         var categoryText = rc.category ? rc.category : "TO_BE_CONFIRMED";
+        var isDegraded = report.analysis_mode === "DEGRADED";
 
-        var html = "<div style='font-family: inherit; color: #1e293b; background: #f8fafc; border-radius: 8px; padding: 18px;'>";
+        var html = "<div style='font-family: \"Inter\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif; color: #1e293b; background: linear-gradient(145deg, #f8fafc 0%, #f1f5f9 50%, #e2e8f0 100%); border-radius: 20px; padding: 28px; box-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.08), 0 0 0 1px #cbd5e1; margin-top: 15px; margin-bottom: 25px;'>";
 
-        // --- 1. Observation Quality / Confidence Top Bar ---
-        html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; background:#ffffff; border:1px solid #e2e8f0; border-radius:6px; padding:10px 14px;'>";
-        html += "<div style='font-size:13px; font-weight:600; color:#0f172a;'>Observation Quality: <span class='label label-success'>" + escapeHtml(report.observation_quality || "SUFFICIENT") + "</span></div>";
-        html += "<div style='font-size:12px; color:#64748b;'><strong>Confidence:</strong> <span class='label label-info'>Obs: " + escapeHtml(report.observation_confidence || "HIGH") + "</span> &nbsp; <span class='label label-warning'>RC: " + escapeHtml(report.root_cause_confidence || "LOW") + "</span> &nbsp; <span class='label label-primary'>Overall: " + escapeHtml(report.overall_confidence || "MEDIUM") + "</span></div>";
+        // --- Header Banner ---
+        html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; padding-bottom:20px; border-bottom:1px solid #cbd5e1;'>";
+        html += "<div>";
+        html += "<h3 style='margin:0; font-size:20px; font-weight:800; color:#0f172a; letter-spacing:-0.5px;'>AI Finding Investigation Analysis</h3>";
+        html += "<div style='font-size:13px; color:#475569; margin-top:3px; font-weight:500;'>Autonomous Root Cause, Causal Inference & Audit Verification Engine</div>";
         html += "</div>";
+
+        // Mode Pill & Provider Info
+        html += "<div style='display:flex; align-items:center; gap:10px;'>";
+        if (isDegraded) {
+            html += "<span style='background:#fef2f2; color:#dc2626; border:1px solid #fecaca; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
+            html += "<span style='width:8px; height:8px; border-radius:50%; background:#dc2626; display:inline-block; box-shadow:0 0 8px #dc2626;'></span> DEGRADED MODE (DETERMINISTIC FALLBACK)";
+            html += "</span>";
+        } else {
+            html += "<span style='background:#ecfdf5; color:#059669; border:1px solid #a7f3d0; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
+            html += "<span style='width:8px; height:8px; border-radius:50%; background:#10b981; display:inline-block; box-shadow:0 0 8px #10b981;'></span> DEEP LLM SYNTHESIS ACTIVE";
+            html += "</span>";
+        }
+        if (report.provider_used) {
+            html += "<span style='background:#ffffff; color:#334155; border:1px solid #cbd5e1; font-size:11px; padding:7px 14px; border-radius:30px; font-weight:600; letter-spacing:0.3px; box-shadow:0 2px 4px rgba(0,0,0,0.03);'>";
+            html += "Provider: <strong style='color:#0284c7;'>" + escapeHtml(report.provider_used.toUpperCase()) + "</strong>";
+            if (report.fallback_used) html += " <span style='color:#b45309;'>(Fallback)</span>";
+            html += "</span>";
+        }
+        html += "</div>";
+        html += "</div>";
+
+        // --- 1. Top Metrics Bar ---
+        html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap:14px; margin-bottom:24px;'>";
+        
+        // Quality Metric Card
+        var qColor = (report.observation_quality === "SUFFICIENT") ? "#059669" : "#d97706";
+        var qBg = (report.observation_quality === "SUFFICIENT") ? "#ecfdf5" : "#fffbe6";
+        var qBorder = (report.observation_quality === "SUFFICIENT") ? "#a7f3d0" : "#ffe58f";
+        html += "<div style='background:#ffffff; border:1px solid #cbd5e1; border-radius:14px; padding:16px 18px; box-shadow:0 2px 6px rgba(15,23,42,0.04);'>";
+        html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>Observation Quality</div>";
+        html += "<div style='margin-top:8px;'>";
+        html += "<span style='background:" + qBg + "; color:" + qColor + "; border:1px solid " + qBorder + "; font-size:13px; font-weight:800; padding:4px 12px; border-radius:8px; text-transform:uppercase; letter-spacing:0.5px;'>";
+        html += escapeHtml(report.observation_quality || "SUFFICIENT");
+        html += "</span>";
+        html += "</div>";
+        html += "</div>";
+
+        // Confidence Metric Card
+        html += "<div style='background:#ffffff; border:1px solid #cbd5e1; border-radius:14px; padding:16px 18px; box-shadow:0 2px 6px rgba(15,23,42,0.04);'>";
+        html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>Analysis Confidence</div>";
+        html += "<div style='display:flex; gap:6px; margin-top:8px;'>";
+        html += "<span style='background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; font-size:10px; font-weight:700; padding:4px 8px; border-radius:6px;'>Obs: " + escapeHtml(report.observation_confidence || "HIGH") + "</span>";
+        html += "<span style='background:#fffbe6; color:#b45309; border:1px solid #fde68a; font-size:10px; font-weight:700; padding:4px 8px; border-radius:6px;'>RC: " + escapeHtml(report.root_cause_confidence || "LOW") + "</span>";
+        html += "<span style='background:#faf5ff; color:#7e22ce; border:1px solid #e9d5ff; font-size:10px; font-weight:700; padding:4px 8px; border-radius:6px;'>Overall: " + escapeHtml(report.overall_confidence || "MEDIUM") + "</span>";
+        html += "</div>";
+        html += "</div>";
+
+        // Root Cause Category Card
+        html += "<div style='background:#ffffff; border:1px solid #cbd5e1; border-radius:14px; padding:16px 18px; box-shadow:0 2px 6px rgba(15,23,42,0.04);'>";
+        html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>6M Root Cause Taxonomy</div>";
+        html += "<div style='font-size:16px; font-weight:800; color:#0284c7; margin-top:6px; letter-spacing:-0.2px;'>";
+        html += escapeHtml(categoryText);
+        html += "</div>";
+        html += "</div>";
+
+        // Root Cause Status Card
+        var rcStatColor = (rc.status === "VERIFIED" || rc.status === "SUPPORTED") ? "#059669" : "#d97706";
+        var rcStatBg = (rc.status === "VERIFIED" || rc.status === "SUPPORTED") ? "#ecfdf5" : "#fffbe6";
+        var rcStatBorder = (rc.status === "VERIFIED" || rc.status === "SUPPORTED") ? "#a7f3d0" : "#ffe58f";
+        html += "<div style='background:#ffffff; border:1px solid #cbd5e1; border-radius:14px; padding:16px 18px; box-shadow:0 2px 6px rgba(15,23,42,0.04);'>";
+        html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>Root Cause Status</div>";
+        html += "<div style='margin-top:8px;'>";
+        html += "<span style='background:" + rcStatBg + "; color:" + rcStatColor + "; border:1px solid " + rcStatBorder + "; font-size:12px; font-weight:800; padding:4px 10px; border-radius:8px; text-transform:uppercase; letter-spacing:0.5px;'>";
+        html += escapeHtml(rc.status || "NOT_ESTABLISHED");
+        html += "</span>";
+        html += "</div>";
+        html += "</div>";
+
+        html += "</div>"; // End metrics grid
+
+        // --- Main Content Modules Container ---
+        html += "<div style='display:flex; flex-direction:column; gap:20px;'>";
 
         // --- 2. AI-Suggested Root-Cause Hypothesis Card ---
-        html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;'>";
-        html += "<span style='font-weight:700; font-size:15px; color:#0f172a;'><span class='glyphicon glyphicon-lamp' style='color:#eab308; margin-right:6px;'></span> AI-Suggested Root-Cause Hypothesis</span>";
-        html += "<span class='label label-default' style='background:#e2e8f0; color:#334155; font-size:11px; font-weight:600; padding:4px 10px; border-radius:12px;'>" + escapeHtml(categoryText) + "</span>";
+        html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
+        html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
+        html += "<span style='font-weight:800; font-size:16px; color:#0f172a; letter-spacing:-0.2px;'>Root Cause Hypotheses & Causal Analysis</span>";
+        html += "<span style='background:#f0f9ff; color:#0284c7; font-size:11px; font-weight:700; padding:5px 14px; border-radius:20px; border:1px solid #bae6fd; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(categoryText) + "</span>";
         html += "</div>";
-        html += "<div style='font-size:12px; color:#64748b; margin-bottom:8px;'>Root Cause Status: <span class='label label-warning' style='font-size:10px;'>" + escapeHtml(rc.status || "NOT_ESTABLISHED") + "</span> &nbsp;&nbsp;&middot;&nbsp;&nbsp; Confidence: <span class='label label-default' style='font-size:10px;'>LOW</span></div>";
+
         var candList = rc.candidate_hypotheses || [];
 
         if (rc.leading_hypothesis && rc.status !== "NOT_ESTABLISHED") {
-            html += "<div style='font-weight:700; font-size:13px; color:#1e293b; margin-bottom:4px;'>Leading Hypothesis</div>";
-            html += "<p style='font-size:14px; color:#334155; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(rc.leading_hypothesis) + "</p>";
-            html += "<div style='font-size:11px; color:#64748b; margin-bottom:12px;'>Hypothesis Status: <span class='label label-info' style='font-size:10px;'>POSSIBLE — NOT CONFIRMED</span></div>";
+            html += "<div style='background:linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); border:1px solid #a7f3d0; border-radius:12px; padding:16px 18px; margin-bottom:16px; box-shadow:0 2px 4px rgba(16,185,129,0.05);'>";
+            html += "<div style='font-weight:800; font-size:12px; color:#047857; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:6px; display:flex; align-items:center; gap:6px;'><span class='glyphicon glyphicon-ok-sign'></span> Leading Hypothesis</div>";
+            html += "<p style='font-size:14px; font-weight:600; color:#065f46; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(rc.leading_hypothesis) + "</p>";
+            html += "<div style='font-size:11px; color:#059669; font-weight:600;'>Status: <span style='background:#ffffff; color:#047857; padding:2px 8px; border-radius:6px; border:1px solid #a7f3d0;'>POSSIBLE — REQUIRES VERIFICATION</span></div>";
+            html += "</div>";
         } else if (candList.length) {
-            html += "<div style='font-weight:700; font-size:13px; color:#1e293b; margin-bottom:4px;'>Candidate Root-Cause Hypotheses:</div>";
-            html += "<p style='font-size:13px; color:#475569; margin-bottom:12px; font-style:italic;'>No leading hypothesis established from the available evidence. The following competing causal hypotheses require investigation:</p>";
+            html += "<div style='background:#fffbe6; border:1px solid #ffe58f; border-radius:10px; padding:12px 16px; margin-bottom:16px; display:flex; align-items:center; gap:10px;'>";
+            html += "<span class='glyphicon glyphicon-info-sign' style='color:#d97706; font-size:16px;'></span>";
+            html += "<p style='font-size:13px; color:#855900; margin:0; font-weight:600;'>No single leading hypothesis is established from current evidence. Competing hypotheses requiring auditor investigation:</p>";
+            html += "</div>";
         } else {
-            html += "<p style='font-size:13px; color:#475569; margin-bottom:12px; font-style:italic;'>No leading hypothesis established from the available evidence, and no candidate hypotheses were generated for this finding. Auditor investigation is required.</p>";
+            html += "<p style='font-size:13px; color:#64748b; margin-bottom:16px; font-style:italic;'>No leading hypothesis established from the available evidence. Auditor investigation is required.</p>";
         }
 
         if (candList.length) {
-            html += "<div style='background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:12px; margin-bottom:12px;'>";
-            html += "<div style='font-weight:700; font-size:12px; color:#475569; margin-bottom:8px;'>Candidate Hypotheses:</div>";
+            html += "<div style='display:flex; flex-direction:column; gap:12px; margin-bottom:16px;'>";
             candList.forEach(function(h) {
-                html += "<div style='font-size:12px; color:#334155; margin-bottom:10px; line-height:1.4; background:#fff; border:1px solid #e2e8f0; border-radius:5px; padding:8px 10px;'>";
-                html += "<strong style='color:#0f172a;'>" + safeEsc(h.id) + " (" + safeEsc(h.name) + "):</strong> " + safeEsc(h.statement);
-                html += " <span class='label label-info' style='font-size:9px; margin-left:4px;'>" + safeEsc(h.status) + "</span>";
+                html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:5px solid #3b82f6; border-radius:10px; padding:14px 18px; transition:all 0.2s;'>";
+                html += "<div style='display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;'>";
+                html += "<strong style='color:#0f172a; font-size:14px; font-weight:700; line-height:1.4;'>" + safeEsc(h.id) + " (" + safeEsc(h.name) + "): <span style='font-weight:500; color:#334155;'>" + safeEsc(h.statement) + "</span></strong>";
+                html += "<span style='background:#eff6ff; color:#1d4ed8; border:1px solid #dbeafe; font-size:10px; font-weight:800; padding:3px 10px; border-radius:14px; text-transform:uppercase; letter-spacing:0.5px; flex-shrink:0; margin-left:12px;'>" + safeEsc(h.status) + "</span>";
+                html += "</div>";
                 if (h.evidence_needed) {
-                    html += "<br/><span style='color:#64748b; font-size:11px;'>↳ Evidence needed: " + safeEsc(h.evidence_needed) + "</span>";
+                    html += "<div style='font-size:12px; color:#475569; margin-top:6px; background:#ffffff; padding:8px 12px; border-radius:6px; border:1px solid #f1f5f9;'><span style='color:#2563eb; font-weight:700;'>↳ Evidence needed:</span> " + safeEsc(h.evidence_needed) + "</div>";
                 }
                 if (h.discrimination_evidence) {
-                    html += "<br/><span style='color:#7c3aed; font-size:11px;'>↳ Distinguishes from others: " + safeEsc(h.discrimination_evidence) + "</span>";
+                    html += "<div style='font-size:12px; color:#6b21a8; margin-top:4px; background:#faf5ff; padding:8px 12px; border-radius:6px; border:1px solid #f3e8ff;'><span style='font-weight:700; color:#7e22ce;'>↳ Discrimination criterion:</span> " + safeEsc(h.discrimination_evidence) + "</div>";
                 }
                 html += "</div>";
             });
             html += "</div>";
         }
 
-        // --- 3. Risk of Recurrence / CAPA Owner ---
-        html += "<div style='font-size:12px; color:#64748b; border-top:1px solid #f1f5f9; padding-top:8px;'>";
-        html += "Risk of recurrence: <strong style='color:#d97706;'>" + escapeHtml(rc.risk_of_recurrence || "NOT_ASSESSABLE") + "</strong> &nbsp;&nbsp;&middot;&nbsp;&nbsp; ";
-        html += "Recommended CAPA owner: <strong>Auditor to Assign</strong>";
-        html += "</div></div>";
-
-        // --- 4. Investigation Section (built from the actual investigation plan
-        // and candidate hypotheses returned for THIS finding — never a fixed list) ---
-        html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:12px;'>Investigation Areas</h5>";
-        var invQuestions = (inv.questions && inv.questions.length) ? inv.questions : [];
-        var invEvidence = (inv.evidence_to_collect && inv.evidence_to_collect.length) ? inv.evidence_to_collect : [];
-        if (invQuestions.length) {
-            html += "<ul style='padding-left:0; list-style:none; font-size:13px; color:#334155; margin-bottom:14px;'>";
-            invQuestions.forEach(function(q, idx) {
-                html += "<li style='margin-bottom:10px; background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:10px 12px;'>";
-                // Handle new structured {question, purpose, evidence} format
-                if (q && typeof q === 'object') {
-                    html += "<div style='font-weight:600; color:#0f172a; margin-bottom:4px;'>" + escapeHtml(q.question || '') + "</div>";
-                    if (q.purpose && q.purpose !== 'not specified') {
-                        html += "<div style='font-size:11px; color:#6366f1; margin-bottom:3px;'>↳ Resolves: " + escapeHtml(q.purpose) + "</div>";
-                    }
-                    if (q.evidence && q.evidence !== 'not specified') {
-                        html += "<div style='font-size:11px; color:#64748b;'>↳ Evidence needed: " + escapeHtml(q.evidence) + "</div>";
-                    }
-                } else {
-                    // Legacy plain string fallback
-                    html += escapeHtml(q);
-                    if (invEvidence[idx]) {
-                        html += "<br/><span style='color:#64748b; font-size:11px;'>↳ Evidence: " + escapeHtml(invEvidence[idx]) + "</span>";
-                    }
-                }
-                html += "</li>";
-            });
-            html += "</ul>";
-        } else {
-            html += "<p style='font-size:13px; color:#475569; font-style:italic; margin-bottom:14px;'>No investigation questions were generated for this finding.</p>";
-        }
-        if (invEvidence.length > invQuestions.length) {
-            html += "<div style='font-size:12px; color:#64748b;'><strong>Additional evidence to collect:</strong> " + escapeHtml(invEvidence.slice(invQuestions.length).join("; ")) + "</div>";
-        }
+        // Risk of Recurrence Footer
+        html += "<div style='display:flex; justify-content:space-between; align-items:center; background:#f8fafc; border:1px solid #e2e8f0; padding:12px 18px; border-radius:10px; font-size:13px;'>";
+        html += "<div><span style='color:#64748b; font-weight:500;'>Risk of Recurrence:</span> <strong style='color:#d97706; font-weight:800; margin-left:4px;'>" + escapeHtml(rc.risk_of_recurrence || "NOT_ASSESSABLE") + "</strong></div>";
+        html += "<div><span style='color:#64748b; font-weight:500;'>Recommended CAPA Owner:</span> <strong style='color:#0f172a; font-weight:700; margin-left:4px;'>Auditor to Assign</strong></div>";
+        html += "</div>";
         html += "</div>";
 
-        // --- 5. 5-Why Root Cause Chain (rendered only from what the backend actually
-        // returned for THIS finding — no fabricated steps) ---
-        html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:14px;'>5-Why Root Cause Chain <span style='font-size:12px; font-weight:normal; color:#64748b;'>(" + escapeHtml(fiveWhy.status_note || (fiveWhy.is_complete ? "COMPLETE" : "INCOMPLETE")) + ")</span></h5>";
-        var stepsToRender = (fiveWhy.steps && fiveWhy.steps.length) ? fiveWhy.steps : [];
-        if (stepsToRender.length) {
-            $.each(stepsToRender, function(i, step) {
-                var num = i + 1;
-                var stStatus = (num === 1) ? "VERIFIED" : (step.status || "UNKNOWN");
-                html += "<div style='display:flex; gap:12px; margin-bottom:12px; align-items:flex-start;'>";
-                html += "<div style='background:#1e293b; color:#ffffff; font-weight:700; border-radius:4px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0;'> " + num + " </div>";
-                html += "<div style='flex-grow:1; background:#f8fafc; border:1px solid #f1f5f9; border-radius:6px; padding:10px 14px;'>";
-                html += "<div style='font-weight:600; font-size:13px; color:#1e293b;'>" + escapeHtml(step.question) + "</div>";
-                html += "<div style='font-size:13px; color:#475569; margin-top:4px;'>&#8627; " + escapeHtml(step.answer || "Requires verification") + " <span class='label label-default' style='font-size:10px; margin-left:6px;'>" + escapeHtml(stStatus) + "</span></div>";
-                html += "</div></div>";
+        // --- 3. Investigation Areas & Questions Card ---
+        html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
+        html += "<div style='margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
+        html += "<h5 style='font-weight:800; font-size:16px; color:#0f172a; margin:0; letter-spacing:-0.2px;'>Targeted Audit Investigation Plan</h5>";
+        html += "</div>";
+
+        var invQuestions = (inv.questions && inv.questions.length) ? inv.questions : [];
+        var invEvidence = (inv.evidence_to_collect && inv.evidence_to_collect.length) ? inv.evidence_to_collect : [];
+        
+        if (invQuestions.length) {
+            html += "<div style='display:flex; flex-direction:column; gap:12px; margin-bottom:16px;'>";
+            invQuestions.forEach(function(q, idx) {
+                html += "<div style='background:#faf5ff; border:1px solid #f3e8ff; border-left:4px solid #9333ea; border-radius:10px; padding:14px 16px;'>";
+                if (q && typeof q === 'object') {
+                    html += "<div style='font-weight:700; font-size:14px; color:#4c1d95; margin-bottom:6px; line-height:1.4;'>" + (idx + 1) + ". " + escapeHtml(q.question || '') + "</div>";
+                    if (q.purpose && q.purpose !== 'not specified') {
+                        html += "<div style='font-size:12px; color:#6b21a8; margin-bottom:4px; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f3e8ff;'>↳ <strong style='font-weight:700; color:#7e22ce;'>Resolves:</strong> " + escapeHtml(q.purpose) + "</div>";
+                    }
+                    if (q.evidence && q.evidence !== 'not specified') {
+                        html += "<div style='font-size:12px; color:#475569; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f1f5f9;'>↳ <strong style='font-weight:700; color:#334155;'>Evidence required:</strong> " + escapeHtml(q.evidence) + "</div>";
+                    }
+                } else {
+                    html += "<div style='font-weight:700; font-size:14px; color:#4c1d95;'>" + (idx + 1) + ". " + escapeHtml(q) + "</div>";
+                    if (invEvidence[idx]) {
+                        html += "<div style='font-size:12px; color:#475569; margin-top:4px;'>↳ <strong>Evidence:</strong> " + escapeHtml(invEvidence[idx]) + "</div>";
+                    }
+                }
+                html += "</div>";
             });
+            html += "</div>";
         } else {
-            html += "<p style='font-size:13px; color:#475569; font-style:italic;'>No 5-Why chain was generated for this finding.</p>";
+            html += "<p style='font-size:13px; color:#64748b; font-style:italic; margin-bottom:16px;'>No specific investigation questions generated.</p>";
         }
-        if (rc.status === "NOT_ESTABLISHED") {
-            html += "<div style='font-size:12px; font-weight:600; color:#b45309; background:#fffdf5; border:1px solid #fef3c7; border-radius:6px; padding:8px 12px; margin-top:8px;'>";
-            html += "5-Why Status: INCOMPLETE &mdash; additional evidence required.";
+
+        if (invEvidence.length > invQuestions.length) {
+            html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px; font-size:12px; color:#475569;'>";
+            html += "<strong style='color:#0f172a;'>Additional Evidence Artifacts to Collect:</strong> " + escapeHtml(invEvidence.slice(invQuestions.length).join("; "));
             html += "</div>";
         }
         html += "</div>";
 
-        // --- 6. Contributing Factors ---
-        html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:12px;'>Contributing Factors</h5>";
-        html += "<p style='font-size:13px; color:#64748b; font-style:italic; margin-bottom:0;'>Additional contributing factors are not established from the available evidence.</p>";
+        // --- 4. 5-Why Root Cause Chain Card ---
+        html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
+        html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
+        html += "<h5 style='font-weight:800; font-size:16px; color:#0f172a; margin:0; letter-spacing:-0.2px;'>5-Why Non-Circular Causal Chain</h5>";
+        html += "<span style='font-size:11px; font-weight:800; background:#f1f5f9; color:#334155; padding:5px 12px; border-radius:20px; border:1px solid #e2e8f0; letter-spacing:0.5px;'>" + escapeHtml(fiveWhy.status_note || (fiveWhy.is_complete ? "COMPLETE" : "INCOMPLETE")) + "</span>";
         html += "</div>";
 
-        // --- 7 & 8. Action Cards (Side-by-Side: Corrective Actions vs Preventive Actions) ---
-        html += "<div class='row' style='margin-bottom:16px;'>";
+        var stepsToRender = (fiveWhy.steps && fiveWhy.steps.length) ? fiveWhy.steps : [];
+        if (stepsToRender.length) {
+            html += "<div style='display:flex; flex-direction:column; gap:14px;'>";
+            $.each(stepsToRender, function(i, step) {
+                var num = i + 1;
+                var stStatus = (num === 1) ? "VERIFIED" : (step.status || "UNKNOWN");
+                var badgeBg = (stStatus === "VERIFIED") ? "#dcfce7" : (stStatus === "REPORTED" ? "#fef3c7" : "#f1f5f9");
+                var badgeTxt = (stStatus === "VERIFIED") ? "#15803d" : (stStatus === "REPORTED" ? "#b45309" : "#475569");
+                var badgeBorder = (stStatus === "VERIFIED") ? "#bbf7d0" : (stStatus === "REPORTED" ? "#fde68a" : "#e2e8f0");
 
-        // 7. Corrective Actions (Immediate) — from the CA draft's immediate_action
-        // field for this finding, falling back to CAPA's recommended_investigation.
-        html += "<div class='col-sm-6'><div style='background:#fffdf5; border:1px solid #fef3c7; border-radius:8px; padding:16px; height:100%; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#b45309; margin-top:0; margin-bottom:12px;'><span class='glyphicon glyphicon-shield' style='margin-right:6px;'></span> Corrective Actions (immediate)</h5>";
+                html += "<div style='display:flex; gap:16px; align-items:stretch;'>";
+                html += "<div style='display:flex; flex-direction:column; align-items:center;'>";
+                html += "<div style='background:linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color:#ffffff; font-weight:800; border-radius:50%; width:34px; height:34px; display:flex; align-items:center; justify-content:center; font-size:14px; box-shadow:0 4px 10px rgba(15,23,42,0.25); flex-shrink:0;'> " + num + " </div>";
+                if (num < stepsToRender.length) html += "<div style='width:2px; flex-grow:1; background:#cbd5e1; margin-top:6px; margin-bottom:2px;'></div>";
+                html += "</div>";
+                html += "<div style='flex-grow:1; background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:14px 18px;'>";
+                html += "<div style='font-weight:700; font-size:14px; color:#0f172a; line-height:1.4;'>" + escapeHtml(step.question) + "</div>";
+                html += "<div style='font-size:13px; color:#334155; margin-top:8px; display:flex; align-items:center; justify-content:space-between; background:#ffffff; padding:10px 14px; border-radius:8px; border:1px solid #f1f5f9;'>";
+                html += "<span style='font-weight:500;'>↳ " + escapeHtml(step.answer || "Requires verification") + "</span>";
+                html += "<span style='background:" + badgeBg + "; color:" + badgeTxt + "; border:1px solid " + badgeBorder + "; font-size:10px; font-weight:800; padding:3px 10px; border-radius:12px; flex-shrink:0; margin-left:12px; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(stStatus) + "</span>";
+                html += "</div>";
+                html += "</div></div>";
+            });
+            html += "</div>";
+        } else {
+            html += "<p style='font-size:13px; color:#64748b; font-style:italic;'>No 5-Why chain generated for this finding.</p>";
+        }
+
+        if (rc.status === "NOT_ESTABLISHED") {
+            html += "<div style='font-size:12px; font-weight:700; color:#b45309; background:#fffbe6; border:1px solid #ffe58f; border-radius:10px; padding:12px 16px; margin-top:16px; display:flex; align-items:center; gap:10px;'>";
+            html += "<span class='glyphicon glyphicon-info-sign' style='font-size:16px;'></span> 5-Why Chain Status: INCOMPLETE — Chain safely stopped at evidence boundary to prevent circular reasoning.";
+            html += "</div>";
+        }
+        html += "</div>";
+
+        // --- 5. Side-by-Side Action Cards (Immediate Actions vs Potential CAPA) ---
+        html += "<div class='row' style='margin-bottom:0;'>";
+
+        // Immediate Corrective Actions
+        html += "<div class='col-sm-6' style='margin-bottom:20px;'><div style='background:linear-gradient(180deg, #fffdf5 0%, #ffffff 100%); border:1px solid #fef3c7; border-radius:16px; padding:20px 22px; height:100%; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.05);'>";
+        html += "<div style='margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid #fef3c7;'>";
+        html += "<h5 style='font-weight:800; color:#b45309; margin:0; font-size:16px; letter-spacing:-0.2px;'>Immediate Corrective Actions</h5>";
+        html += "</div>";
+        
         var immActions = [];
         if (caDraft && caDraft.immediate_action) {
             immActions = String(caDraft.immediate_action).split(/\n+/).filter(Boolean);
@@ -269,57 +365,70 @@
         if (immActions.length) {
             html += "<ol style='padding-left:18px; margin-bottom:0; font-size:13px; color:#334155;'>";
             immActions.forEach(function(act) {
-                html += "<li style='margin-bottom:8px; line-height:1.4;'>" + escapeHtml(act) + "</li>";
+                html += "<li style='margin-bottom:10px; line-height:1.5; font-weight:500;'>" + escapeHtml(act) + "</li>";
             });
             html += "</ol>";
         } else {
-            html += "<p style='font-size:13px; color:#475569; font-style:italic; margin-bottom:0;'>No immediate corrective action was generated for this finding.</p>";
+            html += "<p style='font-size:13px; color:#64748b; font-style:italic; margin:0;'>No immediate action generated.</p>";
         }
         html += "</div></div>";
 
-        // 8. Potential CAPA Areas — Pending Investigation (Recurrence)
-        html += "<div class='col-sm-6'><div style='background:#f0fdf4; border:1px solid #dcfce7; border-radius:8px; padding:16px; height:100%; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#15803d; margin-top:0; margin-bottom:4px;'><span class='glyphicon glyphicon-ok-sign' style='margin-right:6px;'></span> Potential CAPA Areas</h5>";
-        html += "<div style='font-size:11px; color:#15803d; font-weight:600; margin-bottom:10px;'>Status: " + escapeHtml(capa.status || "INVESTIGATION_REQUIRED") + "</div>";
+        // Potential CAPA Scope
+        html += "<div class='col-sm-6' style='margin-bottom:20px;'><div style='background:linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%); border:1px solid #dcfce7; border-radius:16px; padding:20px 22px; height:100%; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.05);'>";
+        html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid #dcfce7;'>";
+        html += "<h5 style='font-weight:800; color:#15803d; margin:0; font-size:16px; letter-spacing:-0.2px;'>Potential CAPA Scope</h5>";
+        html += "<span style='font-size:10px; font-weight:800; background:#dcfce7; color:#15803d; padding:4px 10px; border-radius:12px; border:1px solid #bbf7d0; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(capa.status || "INVESTIGATION_REQUIRED") + "</span>";
+        html += "</div>";
+
         var potentialAreas = capa.potential_areas || [];
         if (potentialAreas.length) {
-            html += "<ul style='padding-left:14px; margin-bottom:0; font-size:12px; color:#334155; list-style:none;'>";
+            html += "<ul style='padding-left:0; list-style:none; margin-bottom:0; font-size:13px; color:#334155;'>";
             potentialAreas.forEach(function(text) {
-                html += "<li style='margin-bottom:8px; line-height:1.4;'>" + escapeHtml(text) + "</li>";
+                html += "<li style='margin-bottom:10px; display:flex; align-items:flex-start; gap:8px; font-weight:500;'>";
+                html += "<span style='color:#22c55e; font-weight:800;'>✔</span> <span>" + escapeHtml(text) + "</span>";
+                html += "</li>";
             });
             html += "</ul>";
         } else {
-            html += "<p style='font-size:12px; color:#475569; font-style:italic; margin-bottom:0;'>No potential CAPA areas identified pending investigation.</p>";
+            html += "<p style='font-size:13px; color:#64748b; font-style:italic; margin:0;'>No CAPA areas identified pending investigation.</p>";
         }
         html += "</div></div>";
 
-        html += "</div>";
+        html += "</div>"; // End row
 
-        // --- 8b. Conditional CAPA Actions (IF cause confirmed → THEN action) ---
+        // --- 6. Conditional CAPA Actions ---
         var conditionalActions = capa.conditional_actions || [];
         if (conditionalActions.length) {
-            html += "<div style='background:#f0f9ff; border:1px solid #bae6fd; border-radius:8px; padding:14px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-            html += "<h5 style='font-weight:700; color:#0369a1; margin-top:0; margin-bottom:8px;'><span class='glyphicon glyphicon-random' style='margin-right:6px;'></span>Conditional CAPA — Pending Investigation</h5>";
-            html += "<div style='font-size:11px; color:#0369a1; margin-bottom:10px;'>These actions apply only if the stated cause is confirmed during investigation.</div>";
+            html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
+            html += "<div style='margin-bottom:6px;'>";
+            html += "<h5 style='font-weight:800; color:#0369a1; margin:0; font-size:16px; letter-spacing:-0.2px;'>Conditional CAPA Action Branches</h5>";
+            html += "</div>";
+            html += "<div style='font-size:12px; color:#64748b; margin-bottom:14px; font-weight:500;'>These systemic actions are conditionally recommended pending confirmation during auditor investigation:</div>";
+            
+            html += "<div style='display:flex; flex-direction:column; gap:12px;'>";
             conditionalActions.forEach(function(ca_action) {
                 var ifText = safeStr(ca_action.if_cause_confirmed);
                 var thenText = safeStr(ca_action.recommended_action);
                 if (!ifText && !thenText) return;
-                html += "<div style='background:#fff; border:1px solid #e0f2fe; border-radius:5px; padding:8px 12px; margin-bottom:8px; font-size:12px;'>";
-                html += "<div style='color:#0369a1; font-weight:600; margin-bottom:3px;'>IF: " + escapeHtml(ifText) + "</div>";
-                html += "<div style='color:#334155;'>→ THEN: " + escapeHtml(thenText) + "</div>";
+                html += "<div style='background:#f0f9ff; border:1px solid #bae6fd; border-left:5px solid #0284c7; border-radius:10px; padding:14px 16px;'>";
+                html += "<div style='color:#0369a1; font-weight:800; font-size:12px; margin-bottom:6px; letter-spacing:0.3px;'>IF CONFIRMED: " + escapeHtml(ifText) + "</div>";
+                html += "<div style='color:#0f172a; font-size:13px; font-weight:500;'>→ <strong style='font-weight:700; color:#0369a1;'>THEN ACTION:</strong> " + escapeHtml(thenText) + "</div>";
                 html += "</div>";
             });
-            html += "</div>";
+            html += "</div></div>";
         }
 
-        // --- 9. Impact Assessment (structured per Rule 17) ---
-        html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:16px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>";
-        html += "<h5 style='font-weight:700; color:#0f172a; margin-top:0; margin-bottom:8px;'>Impact Assessment <span class='label label-default' style='font-size:11px; margin-left:6px;'>" + safeEsc(impact.status || "REQUIRES_ASSESSMENT") + "</span></h5>";
+        // --- 7. Impact Assessment Card ---
+        html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
+        html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
+        html += "<h5 style='font-weight:800; font-size:16px; color:#0f172a; margin:0; letter-spacing:-0.2px;'>Risk & Impact Assessment</h5>";
+        html += "<span style='font-size:11px; font-weight:800; background:#fef2f2; color:#dc2626; border:1px solid #fecaca; padding:5px 12px; border-radius:20px; text-transform:uppercase; letter-spacing:0.5px;'>" + safeEsc(impact.status || "REQUIRES_ASSESSMENT") + "</span>";
+        html += "</div>";
+
         if (impact.narrative) {
-            html += "<p style='font-size:13px; color:#334155; margin-bottom:10px;'>" + safeEsc(impact.narrative) + "</p>";
+            html += "<p style='font-size:13px; color:#334155; margin-bottom:16px; line-height:1.6; background:#f8fafc; padding:12px 16px; border-radius:10px; border:1px solid #f1f5f9; font-weight:500;'>" + safeEsc(impact.narrative) + "</p>";
         }
-        // Render structured impact fields as a compact table when available
+
         var impactFields = [
             { label: "Affected Object", val: impact.affected_object },
             { label: "Affected People", val: impact.affected_people },
@@ -329,40 +438,38 @@
             { label: "Potential Effect", val: impact.potential_effect },
             { label: "Evidence Needed", val: impact.evidence_needed }
         ].filter(function(f) { return f.val && safeStr(f.val); });
+
         if (impactFields.length) {
-            html += "<table style='width:100%; font-size:12px; border-collapse:collapse; margin-bottom:8px;'>";
+            html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px;'>";
             impactFields.forEach(function(f) {
-                html += "<tr>";
-                html += "<td style='font-weight:600; color:#475569; width:130px; padding:4px 8px 4px 0; vertical-align:top;'>" + escapeHtml(f.label) + ":</td>";
-                html += "<td style='color:#334155; padding:4px 0;'>" + safeEsc(f.val) + "</td>";
-                html += "</tr>";
+                html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px;'>";
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;'>" + escapeHtml(f.label) + "</div>";
+                html += "<div style='font-size:13px; color:#0f172a; font-weight:600;'>" + safeEsc(f.val) + "</div>";
+                html += "</div>";
             });
-            html += "</table>";
-        }
-        // Fallback: show areas list if no structured fields
-        if (!impactFields.length) {
-            var impactAreas = impact.areas || [];
-            if (impactAreas.length) {
-                html += "<div style='font-weight:600; font-size:12px; color:#475569; margin-bottom:6px;'>Potential impact pathway:</div>";
-                html += "<ul style='padding-left:18px; font-size:13px; color:#334155; margin-bottom:0;'>";
-                impactAreas.forEach(function(p) { html += "<li style='margin-bottom:4px;'>" + safeEsc(p) + "</li>"; });
-                html += "</ul>";
-            } else if (!impact.narrative) {
-                html += "<p style='font-size:13px; color:#475569; font-style:italic; margin-bottom:0;'>No impact assessment was generated for this finding.</p>";
-            }
+            html += "</div>";
         }
         html += "</div>";
 
-        // --- 10. AI CA Draft Suggestions (5 Writable Fields) ---
+        // --- 8. AI Form Pre-fill Applied Notice ---
         if (caDraft) {
-            html += "<div style='background:#f8fafc; border:1px dashed #cbd5e1; border-radius:8px; padding:14px; margin-bottom:16px;'>";
-            html += "<div style='font-weight:700; font-size:13px; color:#334155; margin-bottom:6px;'><span class='glyphicon glyphicon-pencil' style='margin-right:4px;'></span> AI Form Pre-fill Applied (5 Writable Fields)</div>";
-            html += "<div style='font-size:12px; color:#64748b;'>Form fields below have been populated with AI recommendations. Auditor review is required before saving.</div>";
+            html += "<div style='background:linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border:1px solid #bfdbfe; border-radius:14px; padding:16px 20px; display:flex; justify-content:space-between; align-items:center; box-shadow:0 4px 12px rgba(37,99,235,0.08);'>";
+            html += "<div style='display:flex; align-items:center; gap:12px;'>";
+            html += "<div style='background:#ffffff; border-radius:50%; width:32px; height:32px; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,0.05);'>";
+            html += "<span class='glyphicon glyphicon-check' style='color:#2563eb; font-size:16px;'></span>";
+            html += "</div>";
+            html += "<div>";
+            html += "<div style='font-weight:800; font-size:14px; color:#1e40af;'>5 Form Fields Pre-filled by AI</div>";
+            html += "<div style='font-size:12px; color:#1e3a8a; font-weight:500;'>Immediate Action, Root Cause, Category, Preventive Action, & Impact populated below.</div>";
+            html += "</div>";
+            html += "</div>";
+            html += "<span style='font-size:11px; font-weight:800; color:#2563eb; background:#ffffff; padding:6px 14px; border-radius:20px; box-shadow:0 2px 4px rgba(0,0,0,0.05); border:1px solid #bfdbfe; text-transform:uppercase; letter-spacing:0.5px;'>Auditor Review Required</span>";
             html += "</div>";
         }
 
-        html += "<div style='text-align:center; font-size:11px; font-weight:600; color:#94a3b8; margin-top:16px; letter-spacing:0.5px;'>AI-GENERATED &mdash; HUMAN AUDITOR REVIEW REQUIRED</div>";
-        html += "</div>";
+        html += "</div>"; // End main content modules container
+        html += "<div style='text-align:center; font-size:11px; font-weight:800; color:#64748b; margin-top:20px; letter-spacing:1.5px;'>AI-GENERATED FINDING ANALYSIS &bull; HUMAN AUDITOR REVIEW REQUIRED</div>";
+        html += "</div>"; // End main container
 
         return html;
     }

@@ -150,7 +150,9 @@ async def record_evidence_node(state: AgentState) -> AgentState:
             f"Evidence recorded from {current_tool}: {new_items} items"
         ))
 
-    except (LLMError, ValueError, KeyError) as exc:
+    except Exception as exc:
+        # Broad catch: any LLM-path failure must degrade to a logged
+        # evidence gap rather than crash the graph mid-investigation.
         logger.warning("Evidence recorder failed for %s: %s", current_tool, exc)
         trace.append(AgentTraceStep.warn(f"Evidence recorder failed for {current_tool} — gap noted"))
         errors.append(f"Evidence recorder error ({current_tool}): {exc}")

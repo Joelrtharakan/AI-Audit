@@ -1,0 +1,948 @@
+{
+  "overall_score": 84.5,
+  "dimension_averages": {
+    "fact_preservation": 100.0,
+    "observation_quality": 4.0,
+    "root_cause_discipline": 100.0,
+    "evidence_boundary": 100.0,
+    "hypothesis_quality": 70.0,
+    "evidence_recommendations": 71.0,
+    "capa_discipline": 100.0,
+    "impact_assessment": 100.0,
+    "consistency": 100.0
+  },
+  "readiness_gate": {
+    "passed": false,
+    "reasons": [
+      "Overall score 84.5 below threshold 90.0"
+    ]
+  },
+  "findings": [
+    {
+      "finding_id": "F001",
+      "total_score": 77.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 0.0,
+        "evidence_recommendations": 75.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 4,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The active procedure version for the an operator may not reflect the required operational steps.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_REVISION_GAP: The active procedure version for the an operator may not reflect the required operational steps."
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The required operational sequence for the an operator may not have been executed as defined.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_ADHERENCE_GAP: The required operational sequence for the an operator may not have been executed as defined."
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'SOP-CLN-004 copy'",
+          "expected": "Investigation plan should recommend evidence matching 'SOP-CLN-004 copy'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        }
+      ]
+    },
+    {
+      "finding_id": "F002",
+      "total_score": 92.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 25.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 3,
+      "failures": [
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'SOP-LAB-012 copy'",
+          "expected": "Investigation plan should recommend evidence matching 'SOP-LAB-012 copy'.",
+          "actual": ""
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'holding time validation data'",
+          "expected": "Investigation plan should recommend evidence matching 'holding time validation data'.",
+          "actual": ""
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'testing logs'",
+          "expected": "Investigation plan should recommend evidence matching 'testing logs'.",
+          "actual": ""
+        }
+      ]
+    },
+    {
+      "finding_id": "F003",
+      "total_score": 80.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 0.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 3,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The active procedure version for the an outdated printout of sop-qa-008 rev 2 may not reflect the required operational steps.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_REVISION_GAP: The active procedure version for the an outdated printout of sop-qa-008 rev 2 may not reflect the required operational steps."
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The required operational sequence for the an outdated printout of sop-qa-008 rev 2 may not have been executed as defined.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_ADHERENCE_GAP: The required operational sequence for the an outdated printout of sop-qa-008 rev 2 may not have been executed as defined."
+        }
+      ]
+    },
+    {
+      "finding_id": "F004",
+      "total_score": 87.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 75.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 2,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'BMR-2026-08 header template'",
+          "expected": "Investigation plan should recommend evidence matching 'BMR-2026-08 header template'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F005",
+      "total_score": 75.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 0.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 5,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The active procedure version for the record/process item may not reflect the required operational steps.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_REVISION_GAP: The active procedure version for the record/process item may not reflect the required operational steps."
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The required operational sequence for the record/process item may not have been executed as defined.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_ADHERENCE_GAP: The required operational sequence for the record/process item may not have been executed as defined."
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'SOP-ENG-002 copy'",
+          "expected": "Investigation plan should recommend evidence matching 'SOP-ENG-002 copy'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'engineering change order'",
+          "expected": "Investigation plan should recommend evidence matching 'engineering change order'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        }
+      ]
+    },
+    {
+      "finding_id": "F006",
+      "total_score": 90.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 1,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        }
+      ]
+    },
+    {
+      "finding_id": "F007",
+      "total_score": 90.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 1,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        }
+      ]
+    },
+    {
+      "finding_id": "F008",
+      "total_score": 90.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 1,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        }
+      ]
+    },
+    {
+      "finding_id": "F009",
+      "total_score": 85.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 50.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 2,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The calibration or maintenance status for the record/process item may not be verified or within active service window.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "EQUIPMENT_CALIBRATION_GAP: The calibration or maintenance status for the record/process item may not be verified or within active service window."
+        }
+      ]
+    },
+    {
+      "finding_id": "F010",
+      "total_score": 85.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 3,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'physical sensor spec sheet'",
+          "expected": "Investigation plan should recommend evidence matching 'physical sensor spec sheet'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'room temperature sensor printout'",
+          "expected": "Investigation plan should recommend evidence matching 'room temperature sensor printout'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F011",
+      "total_score": 82.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 25.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 4,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'bill of lading'",
+          "expected": "Investigation plan should recommend evidence matching 'bill of lading'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'purchase order'",
+          "expected": "Investigation plan should recommend evidence matching 'purchase order'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'physical warehouse count'",
+          "expected": "Investigation plan should recommend evidence matching 'physical warehouse count'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F012",
+      "total_score": 75.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 0.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 5,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The active procedure version for the operator j.d. may not reflect the required operational steps.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_REVISION_GAP: The active procedure version for the operator j.d. may not reflect the required operational steps."
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The required operational sequence for the operator j.d. may not have been executed as defined.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_ADHERENCE_GAP: The required operational sequence for the operator j.d. may not have been executed as defined."
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'HR training matrix'",
+          "expected": "Investigation plan should recommend evidence matching 'HR training matrix'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'SOP-PRD-022 attendance sheet'",
+          "expected": "Investigation plan should recommend evidence matching 'SOP-PRD-022 attendance sheet'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        }
+      ]
+    },
+    {
+      "finding_id": "F013",
+      "total_score": 75.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 0.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 5,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The active procedure version for the training sign-off sheets for sop-lab-040 may not reflect the required operational steps.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_REVISION_GAP: The active procedure version for the training sign-off sheets for sop-lab-040 may not reflect the required operational steps."
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The required operational sequence for the training sign-off sheets for sop-lab-040 may not have been executed as defined.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_ADHERENCE_GAP: The required operational sequence for the training sign-off sheets for sop-lab-040 may not have been executed as defined."
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'training sign-off sheets'",
+          "expected": "Investigation plan should recommend evidence matching 'training sign-off sheets'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'competency evaluation forms'",
+          "expected": "Investigation plan should recommend evidence matching 'competency evaluation forms'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        }
+      ]
+    },
+    {
+      "finding_id": "F014",
+      "total_score": 85.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 3,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'rinsing logbook'",
+          "expected": "Investigation plan should recommend evidence matching 'rinsing logbook'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'SOP tank volume spec'",
+          "expected": "Investigation plan should recommend evidence matching 'SOP tank volume spec'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F015",
+      "total_score": 85.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 3,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'TRN-AUT-03 draft document'",
+          "expected": "Investigation plan should recommend evidence matching 'TRN-AUT-03 draft document'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'autoclave qualification protocol'",
+          "expected": "Investigation plan should recommend evidence matching 'autoclave qualification protocol'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F016",
+      "total_score": 85.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 50.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 2,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The calibration or maintenance status for the pressure gauge pg-104 on nitrogen line b may not be verified or within active service window.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "EQUIPMENT_CALIBRATION_GAP: The calibration or maintenance status for the pressure gauge pg-104 on nitrogen line b may not be verified or within active service window."
+        }
+      ]
+    },
+    {
+      "finding_id": "F017",
+      "total_score": 85.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 3,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'Autoclave #1 trend printout'",
+          "expected": "Investigation plan should recommend evidence matching 'Autoclave #1 trend printout'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'maintenance service report'",
+          "expected": "Investigation plan should recommend evidence matching 'maintenance service report'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F018",
+      "total_score": 87.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 75.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 2,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'work order PM-HVAC-2026-04'",
+          "expected": "Investigation plan should recommend evidence matching 'work order PM-HVAC-2026-04'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F019",
+      "total_score": 85.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 3,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'logbook page'",
+          "expected": "Investigation plan should recommend evidence matching 'logbook page'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'pump start event timestamp'",
+          "expected": "Investigation plan should recommend evidence matching 'pump start event timestamp'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F020",
+      "total_score": 87.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 75.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 2,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'solution analytical test'",
+          "expected": "Investigation plan should recommend evidence matching 'solution analytical test'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F021",
+      "total_score": 87.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 75.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 2,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'seal integrity test reports'",
+          "expected": "Investigation plan should recommend evidence matching 'seal integrity test reports'.",
+          "actual": "execution logs, equipment records, operator activity logs independent contemporaneous records, supervisory verification, system audit trail execution "
+        }
+      ]
+    },
+    {
+      "finding_id": "F022",
+      "total_score": 90.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 1,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        }
+      ]
+    },
+    {
+      "finding_id": "F023",
+      "total_score": 90.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 1,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        }
+      ]
+    },
+    {
+      "finding_id": "F024",
+      "total_score": 75.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 0.0,
+        "evidence_recommendations": 50.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 5,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The active procedure version for the sop-prod-010 may not reflect the required operational steps.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_REVISION_GAP: The active procedure version for the sop-prod-010 may not reflect the required operational steps."
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The required operational sequence for the sop-prod-010 may not have been executed as defined.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "PROCEDURE_ADHERENCE_GAP: The required operational sequence for the sop-prod-010 may not have been executed as defined."
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'SOP-PROD-010 copy'",
+          "expected": "Investigation plan should recommend evidence matching 'SOP-PROD-010 copy'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'raw material COAs'",
+          "expected": "Investigation plan should recommend evidence matching 'raw material COAs'.",
+          "actual": "document control index, approved sop, revision history operational logs, supervisory verification, process audit records document control index, appro"
+        }
+      ]
+    },
+    {
+      "finding_id": "F025",
+      "total_score": 85.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 0.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 50.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0
+      },
+      "failures_count": 2,
+      "failures": [
+        {
+          "code": "OBSERVATION_MISCLASSIFICATION",
+          "severity": "MEDIUM",
+          "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT.",
+          "expected": "Observation quality should be SUFFICIENT.",
+          "actual": "ObservationQualityStatus.SUFFICIENT"
+        },
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The calibration or maintenance status for the operator m.k. may not be verified or within active service window.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "EQUIPMENT_CALIBRATION_GAP: The calibration or maintenance status for the operator m.k. may not be verified or within active service window."
+        }
+      ]
+    }
+  ]
+}

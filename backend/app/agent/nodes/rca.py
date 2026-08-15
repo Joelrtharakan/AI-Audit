@@ -15,6 +15,17 @@ from __future__ import annotations
 import json
 import logging
 
+from app.agent.causal_guard import (
+    MechanismInfo,
+    extract_immediate_mechanism,
+    hypothesis_contradicts_mechanism,
+    is_circular_why_answer,
+    is_generic_non_analysis_filler,
+    mechanism_already_names_generic_hypothesis,
+    question_reopens_mechanism,
+    repeats_previous_why_answer,
+    restates_observation,
+)
 from app.agent.grounding_guard import (
     SAFE_RECURRENCE_FALLBACK,
     SAFE_ROOT_CAUSE_FALLBACK,
@@ -55,23 +66,32 @@ def _has_verified_evidence(evidence_ledger: list) -> bool:
     return any(e.status == EvidenceStatus.VERIFIED for e in evidence_ledger)
 
 
-def _filter_hypotheses(raw_hypotheses: list, source_text: str, trace: list) -> list:
+def _filter_hypotheses(
+    raw_hypotheses: list, source_text: str, trace: list, mechanism: MechanismInfo | None = None
+) -> list:
     """Apply the same entity/domain/placeholder grounding filters used on the
     main RCA response's hypotheses, factored out so the focused retry below
     can reuse it identically."""
     from app.models.agent import CandidateHypothesis
 
+    mechanism = mechanism or MechanismInfo()
+    valid_hyp_statuses = {"POSSIBLE", "SUPPORTED", "REFUTED", "UNVERIFIED"}
     parsed = []
     for ch in raw_hypotheses:
         if isinstance(ch, dict):
+            status_raw = str(ch.get("status", "POSSIBLE")).upper()
             parsed.append(CandidateHypothesis(
                 id=str(ch.get("id", "H")),
                 name=str(ch.get("name", "HYPOTHESIS")),
                 statement=clean_structured_leak(ch.get("statement", "")),
-                status="POSSIBLE",
+                status=status_raw if status_raw in valid_hyp_statuses else "POSSIBLE",
                 evidence_needed=clean_structured_leak(ch.get("evidence_needed", "")) or "Investigation required",
                 discrimination_evidence=clean_structured_leak(ch.get("discrimination_evidence", "")) or None,
                 resolves_investigation=ch.get("resolves_investigation") or None,
+                rationale=clean_structured_leak(ch.get("rationale")) or None,
+                evidence_against=clean_structured_leak(ch.get("evidence_against")) or None,
+                confirms_if=clean_structured_leak(ch.get("confirms_if")) or None,
+                refutes_if=clean_structured_leak(ch.get("refutes_if")) or None,
             ))
 
     kept = []
@@ -82,15 +102,35 @@ def _filter_hypotheses(raw_hypotheses: list, source_text: str, trace: list) -> l
                 f"Hypothesis {ch.id} dropped — references ungrounded entity/number: {violations}"
             ))
             continue
-        if mentions_unsupported_domain(ch.statement, source_text):
+        if mentions_unsupported_domain(ch.statement, source_text) or mentions_unsupported_domain(ch.name, source_text):
             trace.append(AgentTraceStep.warn(
-                f"Hypothesis {ch.id} dropped — invokes training/authorization domain not "
+                f"Hypothesis {ch.id} dropped — invokes unsupported domain not "
                 "supported by this finding"
             ))
             continue
+
         if is_placeholder_leak(ch.statement):
             trace.append(AgentTraceStep.warn(
                 f"Hypothesis {ch.id} dropped — echoed prompt instruction text instead of real analysis"
+            ))
+            continue
+
+        if hypothesis_contradicts_mechanism(ch.statement, mechanism):
+            trace.append(AgentTraceStep.warn(
+                f"Hypothesis {ch.id} dropped — contradicts the established mechanism "
+                f"({mechanism.statement!r})"
+            ))
+            continue
+
+        if mechanism_already_names_generic_hypothesis(ch.statement, mechanism):
+            trace.append(AgentTraceStep.warn(
+                f"Hypothesis {ch.id} dropped — restates the already-established mechanism as an "
+                "open possibility instead of reasoning about its cause"
+            ))
+            continue
+        if ch.status == "REFUTED":
+            trace.append(AgentTraceStep.warn(
+                f"Hypothesis {ch.id} dropped — directly contradicted by evidence in the ledger"
             ))
             continue
         kept.append(ch)
@@ -98,7 +138,8 @@ def _filter_hypotheses(raw_hypotheses: list, source_text: str, trace: list) -> l
 
 
 async def _retry_hypotheses(
-    client, finding_text: str, evidence_ledger: list, source_text: str, trace: list
+    client, finding_text: str, evidence_ledger: list, source_text: str, trace: list,
+    mechanism: MechanismInfo | None = None,
 ) -> list:
     """When every hypothesis from the main RCA call gets filtered out, that's
     usually not "this finding has no plausible cause" -- it's a weak model
@@ -126,7 +167,7 @@ async def _retry_hypotheses(
         logger.warning("Hypothesis retry call failed: %s", exc)
         return []
 
-    filtered = _filter_hypotheses(candidates, source_text, trace)
+    filtered = _filter_hypotheses(candidates, source_text, trace, mechanism)
     if filtered:
         trace.append(AgentTraceStep.ok(f"Hypothesis retry produced {len(filtered)} grounded hypothesis(es)"))
     return filtered
@@ -148,6 +189,22 @@ async def root_cause_node(state: AgentState) -> AgentState:
         extra_trusted.extend(extraction.referenced_records)
         extra_trusted.extend(f"{s.speaker} {s.claim}" for s in extraction.attributed_statements)
     source_text = build_source_text(finding_text, evidence_ledger, extra_trusted)
+
+    # Immediate mechanism (Layer 2): prefer the canonical state's already-
+    # computed mechanism when available, else derive it directly from the
+    # evidence ledger — self-contained so this node works standalone too.
+    canonical = state.get("canonical_finding_state")
+    if canonical and canonical.immediate_mechanism:
+        mechanism = MechanismInfo(
+            statement=canonical.immediate_mechanism,
+            status=canonical.immediate_mechanism_status,
+        )
+        from app.agent.causal_guard import classify_mechanism_polarity
+        mechanism.polarity = classify_mechanism_polarity(canonical.immediate_mechanism)
+    else:
+        reported = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
+        verified = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
+        mechanism = extract_immediate_mechanism(reported, verified)
 
     # CONTRADICTORY EVIDENCE: detect same-subject evidence items that assert
     # opposite polarity (e.g. "training was completed" vs "no completion
@@ -291,7 +348,7 @@ async def root_cause_node(state: AgentState) -> AgentState:
             raw_narrative = SAFE_RECURRENCE_FALLBACK
             raw_statement = ""
 
-        cand_hyp_list = _filter_hypotheses(rc_raw.get("candidate_hypotheses", []), source_text, trace)
+        cand_hyp_list = _filter_hypotheses(rc_raw.get("candidate_hypotheses", []), source_text, trace, mechanism)
 
         # RETRY, DON'T JUST GIVE UP: an empty hypothesis list after filtering
         # is usually not "this finding has no plausible cause" -- it's a weak
@@ -300,7 +357,7 @@ async def root_cause_node(state: AgentState) -> AgentState:
         # One focused retry, scoped to hypothesis generation only, before
         # falling back to a genuinely empty list.
         if not cand_hyp_list and status_raw != "VERIFIED":
-            cand_hyp_list = await _retry_hypotheses(client, finding_text, evidence_ledger, source_text, trace)
+            cand_hyp_list = await _retry_hypotheses(client, finding_text, evidence_ledger, source_text, trace, mechanism)
 
         # No hardcoded fallback hypothesis set: if the retry also returned
         # none, leave the list empty rather than injecting a fixed (and
@@ -391,6 +448,8 @@ async def root_cause_node(state: AgentState) -> AgentState:
             desc = clean_structured_leak(cf.get("description", ""))
             if _looks_like_action_item(desc):
                 continue  # filter action items
+            if is_generic_non_analysis_filler(desc):
+                continue  # boilerplate "not established" non-answer, not analysis
             cf_status = str(cf.get("evidence_status", "INFERRED")).upper()
             if cf_status not in {s.value for s in EvidenceStatus}:
                 cf_status = "INFERRED"
@@ -411,7 +470,20 @@ async def root_cause_node(state: AgentState) -> AgentState:
             valid_why_statuses = ("VERIFIED", "SUPPORTED", "REPORTED_UNVERIFIED", "INFERRED", "UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED")
             if s_status not in valid_why_statuses:
                 s_status = "UNKNOWN"
+            question = str(step.get("question", ""))
             answer = clean_structured_leak(step.get("answer")) or None
+
+            # MECHANISM-REOPENING GUARD: a question that re-litigates whether
+            # the already-established mechanism occurred (opposite polarity,
+            # e.g. asking about documentation once non-performance is
+            # confirmed) reopens a resolved distinction — truncate here.
+            if question_reopens_mechanism(question, mechanism):
+                trace.append(AgentTraceStep.warn(
+                    f"5-Why step {len(steps) + 1} question reopened the already-established "
+                    f"mechanism ({mechanism.statement!r}) — truncating chain here"
+                ))
+                break
+
             # GROUNDING GUARD: an answer that references an entity/number absent
             # from this finding's evidence cannot be trusted as-is — replace it
             # and force the status to UNKNOWN so the evidence-bound stop below
@@ -424,8 +496,29 @@ async def root_cause_node(state: AgentState) -> AgentState:
                     ))
                     answer = "The available evidence does not establish this — the prior answer could not be traced to this finding's evidence."
                     s_status = "UNKNOWN"
+                elif is_circular_why_answer(question, answer):
+                    trace.append(AgentTraceStep.warn(
+                        f"5-Why step {len(steps) + 1} answer restated its own question instead of "
+                        "explaining it — marked UNKNOWN"
+                    ))
+                    answer = "The available evidence does not establish this — the prior answer could not be traced to a distinct causal explanation."
+                    s_status = "UNKNOWN"
+                elif steps and repeats_previous_why_answer(steps[-1].answer, answer):
+                    trace.append(AgentTraceStep.warn(
+                        f"5-Why step {len(steps) + 1} repeated the previous step's answer instead of "
+                        "advancing — marked UNKNOWN"
+                    ))
+                    answer = "The available evidence does not establish a further cause beyond the preceding step."
+                    s_status = "UNKNOWN"
+                elif len(steps) >= 1 and canonical and canonical.observed_deviation and restates_observation(answer, canonical.observed_deviation):
+                    trace.append(AgentTraceStep.warn(
+                        f"5-Why step {len(steps) + 1} answer merely restated the original observation "
+                        "instead of explaining it — marked UNKNOWN"
+                    ))
+                    answer = "The available evidence does not establish a cause beyond the observation itself."
+                    s_status = "UNKNOWN"
             steps.append(FiveWhyStep(
-                question=str(step.get("question", "")),
+                question=question,
                 answer=answer,
                 status=s_status,  # type: ignore[arg-type]
             ))

@@ -1,0 +1,246 @@
+{
+  "overall_score": 99.0,
+  "dimension_averages": {
+    "fact_preservation": 100.0,
+    "observation_quality": 100.0,
+    "root_cause_discipline": 100.0,
+    "evidence_boundary": 100.0,
+    "hypothesis_quality": 95.0,
+    "evidence_recommendations": 95.0,
+    "capa_discipline": 100.0,
+    "impact_assessment": 100.0,
+    "consistency": 100.0,
+    "5why_causal_coherence": 100.0,
+    "unsupported_specificity": 100.0,
+    "causal_leap_detection": 100.0
+  },
+  "readiness_gate": {
+    "passed": true,
+    "reasons": []
+  },
+  "findings": [
+    {
+      "finding_id": "ADV001",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "ADV002",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "ADV003",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "ADV004",
+      "total_score": 97.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 75.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 1,
+      "failures": [
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'audit trail'",
+          "expected": "Investigation plan should recommend evidence matching 'audit trail'.",
+          "actual": "one label printout asset verification log, physical inspection record one label printout asset verification log, physical inspection record one label "
+        }
+      ]
+    },
+    {
+      "finding_id": "ADV005",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "ADV006",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "ADV007",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "ADV008",
+      "total_score": 92.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 50.0,
+        "evidence_recommendations": 75.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 2,
+      "failures": [
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The calibration or maintenance status for affected item may not be verified or within active service window.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "EQUIPMENT_CALIBRATION_GAP: The calibration or maintenance status for affected item may not be verified or within active service window."
+        },
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'audit trail'",
+          "expected": "Investigation plan should recommend evidence matching 'audit trail'.",
+          "actual": "affected item calibration certificate, maintenance log, service record affected item calibration certificate, maintenance log, service record affected"
+        }
+      ]
+    },
+    {
+      "finding_id": "ADV009",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "ADV010",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    }
+  ]
+}

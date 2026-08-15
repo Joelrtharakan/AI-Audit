@@ -12,7 +12,7 @@ import logging
 import re
 
 from app.agent.state import AgentState
-from app.models.agent import AgentTraceStep, EvidenceStatus
+from app.models.agent import AgentTraceStep, CandidateHypothesis, EvidenceStatus, RootCauseStatus
 
 logger = logging.getLogger(__name__)
 
@@ -57,21 +57,63 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: stripped unmentioned identifier '{sop}'"
                 ))
-        # Cleanup any accidental double words like "the the procedure revision revision" or "procedure revision revision"
-        text = re.sub(r"\bthe\s+the\b", "the", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bprocedure\s+revision\s+revision\b", "procedure revision", text, flags=re.IGNORECASE)
-        # Remove unevidenced temporal duration claims ("performed procedure over a 30-day period")
-        if "over a 30-day period" in text.lower() or "for 30 days" in text.lower():
-            text = re.sub(
-                r"\b(over\s+a\s+30-day\s+period|for\s+30\s+days)\b",
-                "since the SOP revision was issued 30 days ago",
-                text,
-                flags=re.IGNORECASE,
-            )
-            trace.append(AgentTraceStep.warn(
-                "Final Evidence Verification: corrected unsupported 30-day duration claim"
-            ))
+        # Section 6: If finding text does NOT state a revision, strip hallucinated "revision" claims
+        if "revision" not in finding_text.lower() and "revised" not in finding_text.lower() and "updated" not in finding_text.lower():
+            text = re.sub(r"\b(procedure\s+revision|recent\s+revision|after\s+the\s+revision)\b", "procedure requirement", text, flags=re.IGNORECASE)
+
+        # Section 12 & 16: Strip ungrounded patient safety / product safety / customer / recall / quarantine claims unless explicit
+        if "patient" not in finding_text.lower():
+            text = re.sub(r"\b(patient\s+safety|patient\s+impact|affecting\s+patient[s]?)\b", "data integrity and process compliance", text, flags=re.IGNORECASE)
+        if "customer" not in finding_text.lower() and "client" not in finding_text.lower():
+            text = re.sub(r"\b(customer\s+impact|affecting\s+customer[s]?|client\s+impact)\b", "internal quality process compliance", text, flags=re.IGNORECASE)
+        if "product" not in finding_text.lower() and "batch" not in finding_text.lower() and "sample" not in finding_text.lower():
+            text = re.sub(r"\b(product\s+quality|product\s+safety|compromised\s+product)\b", "process documentation compliance", text, flags=re.IGNORECASE)
+
+        # Section 10 & 14 & 15: Strip ungrounded severe actions (recall, quarantine, equipment/operator restriction)
+        if "recall" not in finding_text.lower():
+            text = re.sub(r"\b(product\s+recall|recall\s+affected\s+batch)\b", "assess affected records", text, flags=re.IGNORECASE)
+        if "quarantine" not in finding_text.lower():
+            text = re.sub(r"\b(quarantine\s+affected\s+batch|quarantine\s+product[s]?)\b", "assess scope of affected records", text, flags=re.IGNORECASE)
+        if "restrict" not in finding_text.lower() and "stop" not in finding_text.lower() and "halt" not in finding_text.lower():
+            text = re.sub(r"\b(restrict\s+[\w-]+|stop\s+production|halt\s+operations)\b", "verify compliance and complete required records", text, flags=re.IGNORECASE)
+
+
+        # Section 10: If training is completely unmentioned in finding and ledger, strip ungrounded training CAPA
+        if "train" not in finding_text.lower() and "retrain" not in finding_text.lower():
+            text = re.sub(r"\b(provide\s+additional\s+training|retrain\s+staff|retrain\s+operator|training\s+program)\b", "verify checklist usability and execution controls", text, flags=re.IGNORECASE)
+
+        # Section 11 & 12: Strip ungrounded population expansion ("other operators", "all personnel") unless finding supports it
+        if "other operators" not in finding_text.lower() and "all staff" not in finding_text.lower() and "multiple operators" not in finding_text.lower():
+            text = re.sub(r"\b(other\s+operators|all\s+operators|all\s+personnel|broader\s+population)\b", "the specific personnel identified in the finding", text, flags=re.IGNORECASE)
+
+        # Section 14: Strip ungrounded competency/qualification claims if not mentioned in finding
+        if "competenc" not in finding_text.lower() and "qualification" not in finding_text.lower() and "qualifi" not in finding_text.lower():
+            text = re.sub(r"\b(competency\s+assessment|operator\s+qualification|qualification\s+status)\b", "training record reconciliation", text, flags=re.IGNORECASE)
+
+        # Section 17 & Part 15: Replace generic filler phrases with specific case-grounded wording
+        text = re.sub(r"\bcontain\s+items\s+as\s+necessary\b", "assess and contain affected execution records", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bprimary\s+execution\s+and\s+verification\s+records\b", "specific execution logs and supervisory sign-off records", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bdownstream\s+process\s+requiring\s+verification\b", "subsequent operational steps dependent on the nonconformity", text, flags=re.IGNORECASE)
+        text = re.sub(r"\btimeframe\s+stated\s+in\s+finding\s+or\s+requires\s+confirmation\b", "the period noted in the finding", text, flags=re.IGNORECASE)
+
+        # Part 4 & 6: Clean full-finding verbatim sentence repetitions inside template phrases ("records for 'During the audit...'")
+        clean_finding = finding_text.strip()
+        if len(clean_finding) > 15:
+            pattern = re.escape(clean_finding)
+            text = re.sub(r"(['\"`])(?:during\s+the\s+audit[,\s]*)?" + pattern + r"\1", "the nonconformity", text, flags=re.IGNORECASE)
+            text = re.sub(r"for\s+['\"`][^'\"]*during\s+the\s+audit[^'\"]*['\"`]", "for the observed nonconformity", text, flags=re.IGNORECASE)
+            text = re.sub(r"for\s+['\"`][^'\"]*['\"`]", "for the observed nonconformity", text, flags=re.IGNORECASE)
+
         return text
+
+
+
+
+
+
+
+
+
 
     # Clean Root Cause Analysis
     rc = state.get("root_cause")
@@ -89,12 +131,24 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             iq.evidence = _clean_text(iq.evidence) or iq.evidence
         inv.areas = [_clean_text(a) or a for a in inv.areas]
 
-    # Clean 5-Why
+    # Clean 5-Why — independent of whether an investigation_plan exists (a
+    # finding that skipped tool-based investigation can still have a
+    # populated five_why from core_synthesis).
     fw = state.get("five_why")
     if fw and fw.steps:
+        valid_fw_steps = []
         for step in fw.steps:
-            step.question = _clean_text(step.question) or step.question
+            q_text = _clean_text(step.question) or step.question
+            from app.agent.causal_guard import is_reporting_why_question
+            if is_reporting_why_question(q_text):
+                trace.append(AgentTraceStep.warn(
+                    "Final Evidence Verification: stripped 5-Why step asking about reporting behavior"
+                ))
+                continue
+            step.question = q_text
             step.answer = _clean_text(step.answer)
+            valid_fw_steps.append(step)
+        fw.steps = valid_fw_steps
 
     # Clean CA Draft
     ca = state.get("ca_draft")
@@ -168,15 +222,209 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             for ev in report.evidence:
                 ev.claim = _clean_text(ev.claim) or ev.claim
 
-    has_docs = _has_verified_document_evidence(evidence_ledger)
-    if not has_docs and rc and rc.narrative:
-        if _UNGROUNDED_RULES_RE.search(rc.narrative):
-            rc.narrative = _UNGROUNDED_RULES_RE.sub("[specific requirement pending document review]", rc.narrative)
+    # Section 4 & 22 Consistency Validator Check:
+    # If investigation questions exist but candidate hypotheses are empty, generate matching candidate hypotheses dynamically
+    if rc and inv and inv.questions and not rc.candidate_hypotheses:
+        for iq in inv.questions:
+            q_lower = iq.question.lower()
+            if "training" in q_lower or "retraining" in q_lower:
+                rc.candidate_hypotheses.append(CandidateHypothesis(
+                    id=f"H{len(rc.candidate_hypotheses)+1}",
+                    name="TRAINING_IMPLEMENTATION",
+                    statement="Required retraining may not have been completed or assigned following procedure requirement.",
+                    status="POSSIBLE",
+                    evidence_needed="Training assignment and completion records",
+                    relevance_rank="HIGH",
+                ))
+            elif "checklist" in q_lower or "usability" in q_lower or "clear" in q_lower:
+                rc.candidate_hypotheses.append(CandidateHypothesis(
+                    id=f"H{len(rc.candidate_hypotheses)+1}",
+                    name="CHECKLIST_USABILITY",
+                    statement="The checklist or procedure requirement may not have been clear or usable at the point of execution.",
+                    status="POSSIBLE",
+                    evidence_needed="Checklist version, workstation setup, and workflow review",
+                    relevance_rank="HIGH",
+                ))
+            elif "interruption" in q_lower or "workload" in q_lower or "condition" in q_lower:
+                rc.candidate_hypotheses.append(CandidateHypothesis(
+                    id=f"H{len(rc.candidate_hypotheses)+1}",
+                    name="HUMAN_PERFORMANCE_CONDITIONS",
+                    statement="Task execution conditions such as competing tasks or interruptions may have contributed to omission.",
+                    status="POSSIBLE",
+                    evidence_needed="Shift records and workflow observation",
+                    relevance_rank="MEDIUM",
+                ))
+            else:
+                rc.candidate_hypotheses.append(CandidateHypothesis(
+                    id=f"H{len(rc.candidate_hypotheses)+1}",
+                    name="PROCESS_EXECUTION_GAP",
+                    statement="A gap in process execution or completion verification allowed the omission to occur.",
+                    status="POSSIBLE",
+                    evidence_needed="Execution and verification logs",
+                    relevance_rank="MEDIUM",
+                ))
             trace.append(AgentTraceStep.warn(
-                "Final Evidence Verification: stripped ungrounded company policy claim"
+                f"Consistency Validator: dynamically derived candidate hypothesis H{len(rc.candidate_hypotheses)} from investigation question"
             ))
 
-    trace.append(AgentTraceStep.ok("Final evidence verification completed"))
+
+    # Sync report object components with cleaned state components so UI renderer receives identical clean data
+    if report:
+        report.root_cause = rc
+        report.investigation = inv
+        report.five_why = fw
+        report.capa = capa
+        report.impact_assessment = impact
+
+    # Deterministic semantic consistency check (Section: SEMANTIC CONSISTENCY
+    # VALIDATOR): confirms the canonical finding subject actually survived
+    # into the final analysis, and that impact's affected_object didn't
+    # regress to a placeholder or introduce an entity absent from the finding.
+    from app.agent.semantic_validator import validate_semantic_consistency
+    canonical = state.get("canonical_finding_state")
+    consistency_warnings = validate_semantic_consistency(canonical, {**state, "root_cause": rc, "five_why": fw, "impact_assessment": impact})
+    for warning in consistency_warnings:
+        trace.append(AgentTraceStep.warn(warning))
+
+    # Extract immediate mechanism for invariant filter check
+    from app.agent.causal_guard import MechanismInfo, extract_immediate_mechanism, hypothesis_contradicts_mechanism, mechanism_already_names_generic_hypothesis
+    canonical = state.get("canonical_finding_state")
+    if canonical and canonical.immediate_mechanism:
+        mechanism = MechanismInfo(
+            statement=canonical.immediate_mechanism,
+            status=canonical.immediate_mechanism_status,
+        )
+        from app.agent.causal_guard import classify_mechanism_polarity
+        mechanism.polarity = classify_mechanism_polarity(canonical.immediate_mechanism)
+    else:
+        reported = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
+        verified = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
+        mechanism = extract_immediate_mechanism(reported, verified)
+
+    verified_facts = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
+
+    # Invariant enforcement: ensure rejected hypotheses (from causal guard, critic, or grounding guard) do not appear in final output
+    if rc and rc.candidate_hypotheses:
+        from app.agent.causal_guard import hypothesis_contradicts_verified_completion
+        filtered_final_hyps = []
+        for h in rc.candidate_hypotheses:
+            if h.status == "REFUTED":
+                trace.append(AgentTraceStep.warn(
+                    f"Final Evidence Verification: removed hypothesis {h.id} because status was REFUTED"
+                ))
+                continue
+            if mechanism and mechanism.statement:
+                if hypothesis_contradicts_mechanism(h.statement, mechanism):
+                    trace.append(AgentTraceStep.warn(
+                        f"Final Evidence Verification: removed hypothesis {h.id} — contradicts mechanism"
+                    ))
+                    continue
+                if mechanism_already_names_generic_hypothesis(h.statement, mechanism):
+                    trace.append(AgentTraceStep.warn(
+                        f"Final Evidence Verification: removed hypothesis {h.id} — restates mechanism"
+                    ))
+                    continue
+            if hypothesis_contradicts_verified_completion(h.statement, verified_facts):
+                trace.append(AgentTraceStep.warn(
+                    f"Final Evidence Verification: removed hypothesis {h.id} — contradicts a VERIFIED "
+                    "fact that the thing it claims is deficient was actually completed"
+                ))
+                continue
+            filtered_final_hyps.append(h)
+        rc.candidate_hypotheses = filtered_final_hyps
+
+        # Re-derive leading_hypothesis now that hypotheses may have changed
+        # above -- same deterministic rule used in core_synthesis, so a
+        # hypothesis removed here can't leave a stale leading_hypothesis
+        # pointing at nothing.
+        from app.agent.analytical_validator import leading_hypothesis_confidence, select_leading_hypothesis
+        new_leading = select_leading_hypothesis(rc.candidate_hypotheses)
+        if new_leading != getattr(rc, "leading_hypothesis", None) and hasattr(rc, "leading_hypothesis"):
+            rc.leading_hypothesis = new_leading
+            if new_leading:
+                rc.confidence = leading_hypothesis_confidence(rc.candidate_hypotheses, new_leading)
+
+    # ---------------------------------------------------------------------
+    # ANALYTICAL VALIDATION FIREWALL (structural, deterministic; never
+    # invents content -- repairs structure, downgrades unsupported
+    # certainty, or removes unlinked content).
+    # ---------------------------------------------------------------------
+    from app.agent.analytical_validator import (
+        compute_analytical_quality,
+        five_why_skips_available_mechanism,
+        repair_five_why_with_mechanism,
+        validate_capa_causal_linkage,
+        validate_root_cause_state,
+    )
+
+    # Root-cause certainty monotonicity: an ESTABLISHED-like status requires
+    # actual VERIFIED evidence, never just a reported/inferred claim.
+    if rc:
+        for warning in validate_root_cause_state(rc, mechanism):
+            trace.append(AgentTraceStep.warn(warning))
+
+    # 5-Why must not skip an explicitly available causal fact: if the
+    # finding/evidence establishes a mechanism but no Why-step reflects it,
+    # insert it using the mechanism's own already-extracted text (never a
+    # fabricated explanation) rather than silently pass through a chain
+    # that stopped one level too early.
+    if fw and mechanism and mechanism.statement:
+        if five_why_skips_available_mechanism(fw.steps, mechanism):
+            observed = canonical.observed_deviation if canonical else None
+            repaired_steps = repair_five_why_with_mechanism(fw.steps, mechanism, observed)
+            if repaired_steps != fw.steps:
+                trace.append(AgentTraceStep.warn(
+                    "Analytical Validator: 5-Why chain skipped an explicitly available causal "
+                    "mechanism — inserted it as an additional step"
+                ))
+                fw.steps = repaired_steps
+
+    # Contributing factor established/potential/rejected split: a factor
+    # that structurally contradicts the mechanism or a VERIFIED completion
+    # fact (same detectors used on hypotheses) is REJECTED and dropped from
+    # the surviving list, never silently left in as though unconfirmed.
+    from app.agent.analytical_validator import classify_contributing_factors_full
+    if cfs:
+        established_cfs, potential_cfs, rejected_cfs = classify_contributing_factors_full(cfs, mechanism, verified_facts)
+        for f in rejected_cfs:
+            trace.append(AgentTraceStep.warn(
+                f"Analytical Validator: contributing factor rejected — contradicts evidence: {f.description!r}"
+            ))
+        cfs = established_cfs + potential_cfs
+        if report:
+            report.contributing_factors = cfs
+
+    # CAPA causal linkage: a conditional action that doesn't trace back to
+    # any live hypothesis is an orphaned claim, not evidence-grounded CAPA.
+    if capa:
+        for warning in validate_capa_causal_linkage(capa, rc.candidate_hypotheses if rc else []):
+            trace.append(AgentTraceStep.warn(warning))
+
+    # Impact field EXPLICIT/INFERRED/UNKNOWN classification -- deterministic,
+    # computed here (not asserted by the LLM) from the already-finalized
+    # (cleaned/grounded) impact content.
+    from app.agent.analytical_validator import compute_impact_field_basis
+    if impact:
+        impact.field_basis = compute_impact_field_basis(impact, finding_text)
+
+    # Internal quality signal only -- logged for observability, never
+    # exposed to the report as a numeric confidence claim.
+    quality = compute_analytical_quality(rc, fw, cfs, capa, mechanism)
+    trace.append(AgentTraceStep.ok(f"Analytical quality signals: {quality}"))
+
+    # Consolidated causal-graph audit (Observation -> Mechanism -> Hypothesis
+    # -> Evidence -> Root Cause -> Corrective Action -> Effectiveness Check).
+    # Logged only -- every repairable violation was already handled by the
+    # more specific checks above; anything still flagged here is a residual
+    # weak edge worth an auditor's attention, not something to fabricate a
+    # fix for.
+    from app.agent.analytical_validator import validate_causal_graph
+    for violation in validate_causal_graph(rc, fw, capa, mechanism):
+        trace.append(AgentTraceStep.warn(f"Causal Graph Audit: {violation}"))
+
+    trace.append(AgentTraceStep.ok("Final evidence verification and consistency validation completed"))
+
+
 
     return {
         **state,
@@ -186,6 +434,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         "ca_draft": ca,
         "capa_analysis": capa,
         "impact_assessment": impact,
+        "contributing_factors": cfs,
         "report": report,
         "trace": trace,
         "errors": errors,

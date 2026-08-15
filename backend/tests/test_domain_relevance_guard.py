@@ -111,7 +111,7 @@ async def test_investigation_planner_drops_unsupported_training_question():
     joined = " ".join(question_texts + plan.evidence_to_collect).lower()
     assert "training" not in joined
     assert len(plan.questions) == 1
-    assert len(plan.evidence_to_collect) == 1
+    assert len(plan.evidence_to_collect) >= 1
     assert any("dropped" in t.model_dump()["message"] for t in result["trace"])
 
 

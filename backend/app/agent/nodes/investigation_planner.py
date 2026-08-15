@@ -186,6 +186,13 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
                     f"Investigation question has no matching evidence item: {iq.question!r}"
                 ))
 
+        # Section 8: Ensure plan.questions is NEVER empty
+        if not plan.questions:
+            from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+            _, fallback_plan = build_deterministic_investigation_plan(request.finding_text, state.get("evidence_ledger", []))
+            plan = fallback_plan
+            trace.append(AgentTraceStep.warn("Investigation Planner: generated fallback questions and evidence plan"))
+
         if needs_investigation and planned_tools:
             trace.append(AgentTraceStep.ok(
                 f"Investigation plan created: {len(planned_tools)} tools planned"
@@ -195,11 +202,13 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
                 "No LQMS tool investigation needed — proceeding to analysis"
             ))
 
-    except (LLMError, ValueError, KeyError) as exc:
+    except (LLMError, ValueError, KeyError, Exception) as exc:
         logger.warning("Investigation planner failed: %s", exc)
-        trace.append(AgentTraceStep.warn(f"Investigation planner failed — skipping tool phase: {exc}"))
+        trace.append(AgentTraceStep.warn(f"Investigation planner failed — using fallback plan: {exc}"))
         errors.append(f"Planner error: {exc}")
         needs_investigation = False
+        from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+        _, plan = build_deterministic_investigation_plan(request.finding_text, state.get("evidence_ledger", []))
 
     return {
         **state,
@@ -211,3 +220,4 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
         "trace": trace,
         "errors": errors,
     }
+

@@ -508,3 +508,50 @@ def test_recurrence_detection_and_effectiveness_claim_helpers():
     assert not claims_unsupported_effectiveness("The action was recorded as completed.", recurrence_finding)
     # Never triggers outside a recurrence context
     assert not claims_unsupported_effectiveness("The action was effective.", non_recurrence_finding)
+
+
+def test_system_label_words_not_flagged_as_ungrounded_entities():
+    """DEGRADED-mode narrative text uses app-generated administrative labels
+    (DEGRADED MODE, CAPA, LLM) that are not case-specific claims about the
+    finding -- the entity-grounding heuristic (all-caps token => possible
+    fabricated identifier) must not treat this system vocabulary as a
+    fabricated entity, or degraded-mode labeling gets silently stripped from
+    every report."""
+    from app.agent.grounding_guard import build_source_text, ungrounded_entities
+
+    source_text = build_source_text("The required activity was not completed.", [])
+    degraded_narrative = (
+        "DEGRADED MODE — LLM-based CAPA analysis was unavailable; "
+        "verify the causal hypotheses above through manual investigation."
+    )
+    assert ungrounded_entities(degraded_narrative, source_text) == []
+
+    # A genuine fabricated identifier must still be caught.
+    assert "QC-REF-99" in ungrounded_entities(
+        "The QC-REF-99 sensor was implicated.", source_text
+    )
+
+
+def test_shouting_case_evidence_boundary_phrase_not_flagged():
+    """Regression: 'NOT ESTABLISHED FROM AVAILABLE EVIDENCE' is this
+    system's own shouting-case boundary marker used in degraded-mode 5-Why
+    answers -- every word in it is a common English word, not a fabricated
+    identifier, and must survive the grounding sweep in report_generator.py
+    (this is the exact phrase that regressed to
+    'Could not be validated against this finding's evidence')."""
+    from app.agent.grounding_guard import build_source_text, ungrounded_entities
+
+    source_text = build_source_text(
+        "The daily equipment inspection checklist was not completed for three consecutive days.",
+        [],
+    )
+    boundary_text = (
+        "NOT ESTABLISHED FROM AVAILABLE EVIDENCE — DEGRADED MODE, "
+        "LLM-based causal analysis was unavailable."
+    )
+    assert ungrounded_entities(boundary_text, source_text) == []
+
+    # Real short acronyms remain identifier-shaped and still get checked.
+    assert "SOP-OPERATIONS-014" in ungrounded_entities(
+        "SOP-OPERATIONS-014 mandates the check.", source_text
+    )

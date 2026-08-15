@@ -39,6 +39,15 @@ C. EVIDENTIARY LIMITS: Do not infer systemic failures if evidence only proves pr
 D. NARRATIVE QUALITY: 2-4 sentences: (1) Verified condition, (2) Named mechanism(s), (3) Known
    unknowns, (4) What evidence would discriminate between competing hypotheses.
 E. RECURRENCE: A previous CAPA recorded as completed is NOT evidence of effectiveness.
+F. DIRECT MECHANISM EVIDENCE: If a REPORTED statement in the evidence ledger directly confirms
+   HOW the deviation occurred (e.g. a person confirms the required activity was not performed, was
+   skipped, or was missed), that mechanism is SUPPORTED — do not treat it as equally uncertain
+   alongside a competing mechanism the evidence contradicts (e.g. "activity happened but was not
+   documented" is NOT equally plausible once a direct statement says the activity did not happen).
+   Keep the supported mechanism, drop/deprioritize hypotheses the evidence contradicts, and move the
+   open question one layer deeper: WHY did the confirmed mechanism occur? That deeper "why" is very
+   likely still NOT_ESTABLISHED — direct evidence of the mechanism is not evidence of its root cause.
+   Do not skip from mechanism straight to a root cause the evidence doesn't support.
 
 ============================================================
 YOUR TASKS
@@ -125,7 +134,7 @@ it is NOT example prose and must NEVER appear verbatim in your response:
         "id": "H1",
         "name": "<<short code for this finding's hypothesis, e.g. TRAINING_ASSIGNMENT_FAILURE>>",
         "statement": "<<the hypothesis AND why it is plausible for this specific finding, using only entities named in this finding>>",
-        "status": "POSSIBLE",
+        "status": "<<POSSIBLE by default; SUPPORTED if a direct evidence-ledger statement confirms this mechanism; REFUTED if a direct statement contradicts it>>",
         "evidence_needed": "<<the specific record/evidence type that would confirm or refute this hypothesis>>",
         "discrimination_evidence": "<<the specific record/evidence that would distinguish THIS hypothesis from the other hypotheses — what would be uniquely true here but not for the competing hypotheses>>"
       }}

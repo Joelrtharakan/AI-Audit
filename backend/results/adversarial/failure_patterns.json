@@ -1,0 +1,26 @@
+{
+  "MISSING_EVIDENCE_REQUIREMENT": {
+    "count": 2,
+    "severity": "MEDIUM",
+    "examples": [
+      {
+        "finding_id": "ADV004",
+        "explanation": "Recommended evidence missed key item: 'audit trail'"
+      },
+      {
+        "finding_id": "ADV008",
+        "explanation": "Recommended evidence missed key item: 'audit trail'"
+      }
+    ]
+  },
+  "IRRELEVANT_HYPOTHESIS": {
+    "count": 1,
+    "severity": "MEDIUM",
+    "examples": [
+      {
+        "finding_id": "ADV008",
+        "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The calibration or maintenance status for affected item may not be verified or within active service window.'"
+      }
+    ]
+  }
+}

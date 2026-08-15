@@ -1,31 +1,17 @@
-"""Thin client for a local Ollama server's NATIVE /api/chat endpoint (not the
-OpenAI-compat /v1/chat/completions layer). Mirrors OpenRouterClient's
-interface exactly (same method signature, same retry/backoff pattern) so
-finding_analysis_service.py's get_llm_client() factory can hand either one to
-the rest of the pipeline without any provider-specific branching downstream.
+"""Production Ollama Client for LQMS Audit Investigation Engine.
 
-Uses the native endpoint specifically for "think": false -- hybrid-reasoning
-models (e.g. qwen3) emit a large hidden reasoning trace by default that (a)
-only the OpenAI-compat layer's "think" field silently ignores, and (b) counts
-against the same token budget as the actual JSON content, risking truncated/
-empty output on the long prompts this pipeline sends. The native endpoint
-honors "think": false and drops the reasoning trace entirely -- verified via
-direct API test: OpenAI-compat endpoint burned ~300 completion tokens on a
-trivial prompt even with "think": false in the payload (ignored), while the
-native endpoint with the same flag used 6. Harmless no-op for non-thinking
-models (e.g. qwen2.5) -- verified directly, not assumed.
-
-No API key: Ollama is a local, unauthenticated server. This is intentionally
-for fast local dev iteration, not production -- see README section 6b.
+Handles native Ollama API communication with configurable model selection,
+thinking mode controls, context size, keep-alive, metrics logging, and fast failure.
 """
 
-import logging
+from __future__ import annotations
 
+import logging
+import time
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import get_settings
-from app.services.llm_client import LLMError, LLMRateLimitedError
+from app.services.llm_client import LLMClient, LLMError, LLMNetworkError, LLMTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +20,43 @@ class OllamaError(LLMError):
     pass
 
 
-class OllamaRateLimitedError(OllamaError, LLMRateLimitedError):
-    pass
+class OllamaClient(LLMClient):
+    def __init__(self, timeout_seconds: float | None = None) -> None:
+        settings = get_settings()
+        self._settings = settings
+        self._timeout = timeout_seconds or settings.ollama_timeout_seconds
 
+    def _get_native_url(self, endpoint: str) -> str:
+        base = self._settings.ollama_base_url.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        return f"{base}/{endpoint.lstrip('/')}"
 
-class OllamaClient:
-    def __init__(self, timeout_seconds: float = 120.0) -> None:
-        self._settings = get_settings()
-        self._timeout = timeout_seconds
+    async def check_health(self) -> dict[str, bool | str]:
+        """Check server reachability and model availability."""
+        url = self._get_native_url("/api/tags")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    models = [m.get("name") for m in resp.json().get("models", [])]
+                    target_model = self._settings.ollama_model
+                    is_available = target_model in models or any(m.startswith(target_model) for m in models)
+                    return {
+                        "available": True,
+                        "model": target_model,
+                        "model_installed": is_available,
+                        "installed_models": models,
+                    }
+        except Exception as exc:
+            logger.warning("Ollama health check failed: %s", exc)
+        return {
+            "available": False,
+            "model": self._settings.ollama_model,
+            "model_installed": False,
+            "installed_models": [],
+        }
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type(OllamaRateLimitedError),
-    )
     async def chat_completion(
         self,
         messages: list[dict[str, str]],
@@ -57,14 +65,12 @@ class OllamaClient:
         max_tokens: int | None = None,
     ) -> str:
         settings = self._settings
-        # settings.ollama_base_url is the OpenAI-compat base (".../v1"); the
-        # native endpoint lives one level up at ".../api/chat".
-        base = settings.ollama_base_url
-        if base.endswith("/v1"):
-            base = base[: -len("/v1")]
-        native_url = f"{base}/api/chat"
+        url = self._get_native_url("/api/chat")
 
-        options: dict = {"temperature": temperature}
+        options: dict = {
+            "temperature": temperature if temperature is not None else settings.ollama_temperature,
+            "num_ctx": settings.ollama_num_ctx,
+        }
         if max_tokens is not None:
             options["num_predict"] = max_tokens
 
@@ -72,39 +78,53 @@ class OllamaClient:
             "model": settings.ollama_model,
             "messages": messages,
             "stream": False,
-            "think": False,
+            "think": settings.ollama_thinking,
+            "keep_alive": settings.ollama_keep_alive,
             "options": options,
         }
         if response_format_json:
             payload["format"] = "json"
 
+        t_start = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 resp = await client.post(
-                    native_url,
+                    url,
                     headers={"Content-Type": "application/json"},
                     json=payload,
                 )
         except httpx.TimeoutException as exc:
-            raise OllamaError("Ollama request timed out.") from exc
+            elapsed_ms = int((time.monotonic() - t_start) * 1000)
+            logger.error("provider=ollama model=%s event=timeout elapsed_ms=%d", settings.ollama_model, elapsed_ms)
+            raise LLMTimeoutError(f"Ollama request timed out after {self._timeout}s.") from exc
         except httpx.HTTPError as exc:
-            raise OllamaError(
-                f"Ollama request failed: {exc}. Is `ollama serve` running at "
-                f"{settings.ollama_base_url}?"
-            ) from exc
+            elapsed_ms = int((time.monotonic() - t_start) * 1000)
+            logger.error("provider=ollama model=%s event=network_error elapsed_ms=%d err=%s", settings.ollama_model, elapsed_ms, exc)
+            raise LLMNetworkError(f"Ollama connection failed: {exc}. Is Ollama running at {settings.ollama_base_url}?") from exc
 
-        if resp.status_code == 429:
-            # Ollama itself doesn't rate-limit, but a proxy in front of it might --
-            # handled the same way as OpenRouter for a uniform retry story.
-            logger.warning("Ollama rate limited (429); will retry with backoff.")
-            raise OllamaRateLimitedError("Rate limited by Ollama.")
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
 
         if resp.status_code >= 400:
-            logger.error("Ollama error %s", resp.status_code)
-            raise OllamaError(f"Ollama returned status {resp.status_code}.")
+            logger.error("provider=ollama model=%s event=http_error status=%d elapsed_ms=%d", settings.ollama_model, resp.status_code, elapsed_ms)
+            raise OllamaError(f"Ollama returned HTTP {resp.status_code}: {resp.text}")
 
         data = resp.json()
+        eval_count = data.get("eval_count", 0)
+        eval_duration = data.get("eval_duration", 0)
+        tokens_per_sec = round((eval_count / (eval_duration / 1e9)), 2) if eval_duration > 0 else 0.0
+
+        logger.info(
+            "provider=ollama model=%s elapsed_ms=%d tokens_generated=%d tokens_per_second=%.2f success=true",
+            settings.ollama_model,
+            elapsed_ms,
+            eval_count,
+            tokens_per_sec,
+        )
+
         try:
-            return data["message"]["content"]
+            content = data["message"]["content"]
+            if not content or not content.strip():
+                raise OllamaError("Ollama returned empty completion content.")
+            return content
         except (KeyError, TypeError) as exc:
-            raise OllamaError("Unexpected Ollama response shape.") from exc
+            raise OllamaError(f"Unexpected Ollama response structure: {data}") from exc

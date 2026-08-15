@@ -63,7 +63,12 @@ SAFE_ROOT_CAUSE_FALLBACK = (
 # hypothesis that the operator "miscommunicated the calibration status to
 # the auditor". "communicat"/"supervis"/"workload" are exactly as prone to
 # this as "train"/"authoriz" were.
-_DOMAIN_TRIGGER_STEMS = ("train", "authoriz", "competenc", "communicat", "supervis", "workload")
+_DOMAIN_TRIGGER_STEMS = (
+    "train", "authoriz", "competenc", "communicat", "supervis", "workload",
+    "policy", "sop", "procedure", "management", "careless", "human error",
+    "resource", "staffing", "maintenance"
+)
+
 
 
 # ---------------------------------------------------------------------------
@@ -95,19 +100,26 @@ _PLACEHOLDER_LEAK_FRAGMENTS = (
 )
 
 
-def is_placeholder_leak(text: str | None) -> bool:
+def is_placeholder_leak(text: str | None, finding_text: str | None = None) -> bool:
     """True if `text` reproduces one of the agent's own prompt-instruction
     fragments verbatim/near-verbatim instead of real, case-specific content,
-    OR literally contains the "<<...>>" placeholder-marker syntax itself
-    (observed in production: a model filled in the angle brackets' content
-    but kept the brackets, e.g. "<<the weighing balance was used...>>" —
-    real analysis text can never legitimately contain "<<" or ">>")."""
+    OR literally contains the "<<...>>" placeholder-marker syntax itself,
+    OR embeds the full finding text verbatim inside placeholder template phrases."""
     if not text:
         return False
     if "<<" in text or ">>" in text:
         return True
     lowered = text.lower()
-    return any(fragment in lowered for fragment in _PLACEHOLDER_LEAK_FRAGMENTS)
+    if any(fragment in lowered for fragment in _PLACEHOLDER_LEAK_FRAGMENTS):
+        return True
+    if finding_text and len(finding_text.strip()) > 15:
+        norm_finding = finding_text.strip().lower()
+        if norm_finding in lowered and len(lowered) > len(norm_finding) + 5:
+            # Check for patterns like "records for '<FULL FINDING>'", "process for '<FULL FINDING>'"
+            if any(prefix in lowered for prefix in ("for '", "for \"", "for `", "records for", "process for", "activity for")):
+                return True
+    return False
+
 
 
 _DICT_KEY_STRIP_RE = re.compile(r"'(?:[a-zA-Z_][a-zA-Z0-9_]*)':\s*")
@@ -115,13 +127,6 @@ _DICT_QUOTE_STRIP_RE = re.compile(r"[{}\[\]']")
 
 
 def clean_structured_leak(value) -> str:
-    """A weak model asked for a plain-string list item can return a nested
-    dict/object instead (observed in production: impact areas came back as
-    "{'affected_object': 'cold-room monitoring system', ...}"). Rather than
-    `str(value)`-ing a Python dict repr straight into the auditor-facing
-    output, extract readable text from it: join dict values, join list items,
-    and strip Python-repr punctuation from whatever's left. Always returns a
-    plain string — never a data structure."""
     if isinstance(value, dict):
         parts = [clean_structured_leak(v) for v in value.values()]
         return "; ".join(p for p in parts if p)
@@ -131,12 +136,21 @@ def clean_structured_leak(value) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
     text = str(value) if value is not None else ""
+
+    # Strip verbatim template prefixes like "Execution records for '...' " or "Operational process for '...' "
+    text = re.sub(r"^(Execution|Operational|Primary)\s+(records|process|activity|steps)\s+for\s+['\"`].*?['\"`]\s*", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\bfor\s+['\"`][^'\"]*during\s+the\s+audit[^'\"]*['\"`]", "for the observed nonconformity", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bfor\s+['\"`][^'\"]*was\s+found[^'\"]*['\"`]", "for the observed nonconformity", text, flags=re.IGNORECASE)
+
     stripped = text.strip()
     if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
         stripped = _DICT_KEY_STRIP_RE.sub("", stripped)
         stripped = _DICT_QUOTE_STRIP_RE.sub("", stripped)
         stripped = re.sub(r"\s*,\s*", "; ", stripped).strip("; ").strip()
-    return stripped
+        return stripped
+
+    return text
+
 
 
 def mentions_unsupported_domain(text: str, source_text: str) -> bool:
@@ -147,10 +161,29 @@ def mentions_unsupported_domain(text: str, source_text: str) -> bool:
         return False
     lowered_text = text.lower()
     lowered_source = source_text.lower()
+
+    synonyms = {
+        "procedure": ["sop", "instruction", "bmr", "protocol", "sequence", "method", "policy"],
+        "sop": ["procedure", "instruction", "bmr", "protocol", "sequence"],
+        "policy": ["procedure", "sop", "requirement", "standard"],
+        "train": ["competenc", "analyst", "operator", "instruction", "qualif"],
+        "competenc": ["train", "qualification", "evaluat", "matrix"],
+        "maintenanc": ["calibrat", "service", "work order", "pm-", "sensor"],
+    }
+
     for stem in _DOMAIN_TRIGGER_STEMS:
-        if stem in lowered_text and stem not in lowered_source:
+        if stem in lowered_text:
+            # Check direct stem match in source
+            if stem in lowered_source:
+                continue
+            # Check domain synonym matches in source
+            domain_syns = synonyms.get(stem, [])
+            if any(syn in lowered_source for syn in domain_syns):
+                continue
             return True
+
     return False
+
 
 
 def build_source_text(
@@ -171,14 +204,63 @@ def build_source_text(
     return " ".join(parts)
 
 
+# App-generated system/administrative vocabulary (never a finding-specific
+# claim) that would otherwise false-positive against the all-uppercase
+# identifier heuristic below -- e.g. "DEGRADED MODE" in a degraded-mode
+# narrative isn't a fabricated entity, it's this system labeling its own
+# analysis quality. Deliberately small and generic, not case-specific.
+_SYSTEM_LABEL_WORDS = {"DEGRADED", "MODE", "LLM", "CAPA"}
+
+# Ordinary short English function words that legitimately appear in ALL
+# CAPS when this system writes its own shouting-case status language (e.g.
+# "NOT ESTABLISHED FROM AVAILABLE EVIDENCE") -- general linguistic
+# infrastructure, not domain vocabulary, kept local to this heuristic
+# rather than reusing text_grounding._STOPWORDS so a change here can't
+# silently affect extraction/grounding-validator behavior elsewhere.
+_COMMON_SHORT_WORDS = {
+    "FROM", "WITH", "INTO", "ONTO", "OVER", "UNDER", "THAT", "THIS", "WHEN",
+    "WHERE", "WHICH", "WHAT", "WHO", "WHY", "HOW", "NOT", "FOR", "AND", "THE",
+    "ARE", "WAS", "WERE", "HAS", "HAVE", "HAD", "DID", "DOES", "CAN", "MAY",
+    "MUST", "WILL", "SHALL", "THAN", "THEN", "ONLY", "STILL", "YET",
+}
+
+
 def _looks_like_identifier(token: str) -> bool:
     """Filters out ordinary sentence-initial hyphenated words ("Out-of-range",
     "Workstation-level") that _ENTITY_RE's hyphen pattern also matches. A real
     identifier (SOP-OPS-014, R-12, LIMS-QA) either contains a digit or is
     entirely uppercase once hyphens/slashes are removed — ordinary English
-    compound words are neither."""
+    compound words are neither.
+
+    A token with a digit or a hyphen/slash separator is identifier-shaped at
+    any length (QC-REF-02, SOP-OPERATIONS-014) UNLESS every hyphen/slash
+    segment is itself system-label/common-word vocabulary (e.g. "LLM-based"
+    is not a fabricated identifier). A token that is ALL CAPS with no
+    digit/separator is only identifier-shaped when SHORT and not a common
+    function word: genuine acronyms/IDs matched this way (SOP, QC, LIMS,
+    BMR, WFI) are a handful of characters. A long all-caps word is far more
+    likely to be this system's own shouting-case status language (e.g.
+    "ESTABLISHED", "AVAILABLE", "EVIDENCE") than a fabricated identifier --
+    flagging those strips the system's own degraded-mode/uncertainty
+    labeling out of the report."""
+    if token.upper() in _SYSTEM_LABEL_WORDS or token.upper() in _COMMON_SHORT_WORDS:
+        return False
+
+    segments = re.split(r"[-/]", token)
+    if len(segments) > 1 and all(
+        seg.upper() in _SYSTEM_LABEL_WORDS or seg.upper() in _COMMON_SHORT_WORDS or not seg.isupper()
+        for seg in segments
+    ):
+        # Every segment is either trusted vocabulary or not itself
+        # all-caps (an ordinary word like "based") -- not identifier-shaped
+        # unless it also carries a digit, which the check below still catches.
+        if not any(c.isdigit() for c in token):
+            return False
+
     stripped = token.replace("-", "").replace("/", "")
-    return any(c.isdigit() for c in token) or stripped.isupper()
+    if any(c.isdigit() for c in token) or "-" in token or "/" in token:
+        return True
+    return stripped.isupper() and len(stripped) <= 6
 
 
 def ungrounded_entities(text: str, source_text: str) -> list[str]:

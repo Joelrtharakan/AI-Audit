@@ -7,17 +7,33 @@ Graph structure:
     → [should_investigate?]
        YES → execute_tool → record_evidence → [more_tools?]
               YES → execute_tool (loop)
-              NO  → root_cause_analysis
-       NO  → root_cause_analysis
-    → impact_assessment
-    → capa_analysis
+              NO  → core_synthesis
+       NO  → core_synthesis
     → critic
     → [critic_decision?]
        SEND_BACK + iterations_left → execute_tool (re-investigate)
        APPROVED or MAX_ITERATIONS → generate_report
     → generate_report
-    → generate_ca_draft
+    → final_evidence_verification
     → END
+
+core_synthesis is the SOLE authoritative implementation of RCA, 5-Why,
+contributing factors, impact assessment, CAPA, and CA-draft generation --
+it replaced the older serial root_cause_node / impact_assessment_node /
+capa_analysis_node / ca_draft_generator_node one-LLM-call-per-stage nodes in
+a single consolidated call. Those older node modules still exist (and are
+still exercised directly by some unit tests as isolated-guard tests) but are
+NOT part of the live graph and must not be re-registered here without
+retiring core_synthesis first -- having two independent implementations of
+the same reasoning both live would silently diverge.
+
+final_evidence_verification runs LAST (after generate_report, not before):
+it is the analytical validation firewall -- grounding sweep, causal
+consistency checks, and app/agent/analytical_validator.py's structural
+invariants (root-cause certainty monotonicity, 5-Why mechanism-skip repair,
+CAPA causal linkage, leading-hypothesis re-derivation) -- and mutates the
+same object instances already embedded in `report` in place, so no
+re-assembly step is needed after it runs.
 
 Conditional edges implement the control flow. Nodes never raise — they record
 errors in state and let the graph route gracefully.
@@ -29,15 +45,11 @@ import logging
 
 from langgraph.graph import END, START, StateGraph
 
-from app.agent.nodes.ca_draft_generator import ca_draft_generator_node
-from app.agent.nodes.capa import capa_analysis_node
+from app.agent.nodes.core_synthesis import core_synthesis_node
 from app.agent.nodes.critic import critic_node
 from app.agent.nodes.evidence_recorder import record_evidence_node
 from app.agent.nodes.final_evidence_verification import final_evidence_verification_node
-from app.agent.nodes.impact import impact_assessment_node
-from app.agent.nodes.impact_capa_parallel import impact_capa_parallel_node
 from app.agent.nodes.investigation_planner import plan_investigation_node
-from app.agent.nodes.rca import root_cause_node
 from app.agent.nodes.report_generator import generate_report_node
 from app.agent.nodes.tool_executor import execute_tool_node
 from app.agent.nodes.understanding import understand_finding_node
@@ -53,7 +65,7 @@ logger = logging.getLogger(__name__)
 
 
 def should_investigate(state: AgentState) -> str:
-    """Route after plan_investigation: investigate or go straight to RCA."""
+    """Route after plan_investigation: investigate or go straight to core synthesis."""
     settings = get_settings()
     if (
         state.get("needs_investigation")
@@ -61,7 +73,7 @@ def should_investigate(state: AgentState) -> str:
         and state.get("iteration_count", 0) < settings.agent_max_iterations
     ):
         return "execute_tool"
-    return "root_cause_analysis"
+    return "core_synthesis"
 
 
 def more_tools_needed(state: AgentState) -> str:
@@ -80,7 +92,7 @@ def more_tools_needed(state: AgentState) -> str:
         and iteration_count < settings.agent_max_iterations
     ):
         return "execute_tool"
-    return "root_cause_analysis"
+    return "core_synthesis"
 
 
 def critic_decision(state: AgentState) -> str:
@@ -114,43 +126,40 @@ def build_agent_graph() -> StateGraph:
     graph.add_node("plan_investigation", plan_investigation_node)
     graph.add_node("execute_tool", execute_tool_node)
     graph.add_node("record_evidence", record_evidence_node)
-    graph.add_node("root_cause_analysis", root_cause_node)
-    graph.add_node("impact_capa", impact_capa_parallel_node)  # impact + CAPA run in parallel
+    graph.add_node("core_synthesis", core_synthesis_node)  # Single consolidated synthesis
     graph.add_node("critic", critic_node)
     graph.add_node("final_evidence_verification", final_evidence_verification_node)
     graph.add_node("generate_report", generate_report_node)
-    graph.add_node("generate_ca_draft", ca_draft_generator_node)
 
     # Entry point
     graph.add_edge(START, "understand_finding")
     graph.add_edge("understand_finding", "plan_investigation")
 
-    # Conditional: investigate or skip
+    # Conditional: investigate or skip to core synthesis
     graph.add_conditional_edges(
         "plan_investigation",
         should_investigate,
         {
             "execute_tool": "execute_tool",
-            "root_cause_analysis": "root_cause_analysis",
+            "core_synthesis": "core_synthesis",
         },
     )
 
     # Tool execution → evidence recording
     graph.add_edge("execute_tool", "record_evidence")
 
-    # Conditional: more tools or move to RCA
+    # Conditional: more tools or move to core synthesis
     graph.add_conditional_edges(
         "record_evidence",
         more_tools_needed,
         {
             "execute_tool": "execute_tool",
-            "root_cause_analysis": "root_cause_analysis",
+            "core_synthesis": "core_synthesis",
         },
     )
 
-    # Analysis chain (impact + CAPA run in parallel for speed)
-    graph.add_edge("root_cause_analysis", "impact_capa")
-    graph.add_edge("impact_capa", "critic")
+    # Core Synthesis → Critic
+    graph.add_edge("core_synthesis", "critic")
 
     # Conditional: critic decision
     graph.add_conditional_edges(
@@ -163,8 +172,7 @@ def build_agent_graph() -> StateGraph:
     )
 
     # Output chain
-    graph.add_edge("generate_report", "generate_ca_draft")
-    graph.add_edge("generate_ca_draft", "final_evidence_verification")
+    graph.add_edge("generate_report", "final_evidence_verification")
     graph.add_edge("final_evidence_verification", END)
 
     return graph.compile()

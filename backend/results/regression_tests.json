@@ -1,0 +1,410 @@
+[
+  {
+    "finding_id": "F001",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F001",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F001",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F001",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'SOP-CLN-004 copy'."
+  },
+  {
+    "finding_id": "F002",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'SOP-LAB-012 copy'."
+  },
+  {
+    "finding_id": "F002",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'holding time validation data'."
+  },
+  {
+    "finding_id": "F002",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'testing logs'."
+  },
+  {
+    "finding_id": "F003",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F003",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F003",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F004",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F004",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'BMR-2026-08 header template'."
+  },
+  {
+    "finding_id": "F005",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F005",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F005",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F005",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'SOP-ENG-002 copy'."
+  },
+  {
+    "finding_id": "F005",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'engineering change order'."
+  },
+  {
+    "finding_id": "F006",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F007",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F008",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F009",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F009",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F010",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F010",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'physical sensor spec sheet'."
+  },
+  {
+    "finding_id": "F010",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'room temperature sensor printout'."
+  },
+  {
+    "finding_id": "F011",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F011",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'bill of lading'."
+  },
+  {
+    "finding_id": "F011",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'purchase order'."
+  },
+  {
+    "finding_id": "F011",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'physical warehouse count'."
+  },
+  {
+    "finding_id": "F012",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F012",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F012",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F012",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'HR training matrix'."
+  },
+  {
+    "finding_id": "F012",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'SOP-PRD-022 attendance sheet'."
+  },
+  {
+    "finding_id": "F013",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F013",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F013",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F013",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'training sign-off sheets'."
+  },
+  {
+    "finding_id": "F013",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'competency evaluation forms'."
+  },
+  {
+    "finding_id": "F014",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F014",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'rinsing logbook'."
+  },
+  {
+    "finding_id": "F014",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'SOP tank volume spec'."
+  },
+  {
+    "finding_id": "F015",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F015",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'TRN-AUT-03 draft document'."
+  },
+  {
+    "finding_id": "F015",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'autoclave qualification protocol'."
+  },
+  {
+    "finding_id": "F016",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F016",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F017",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F017",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'Autoclave #1 trend printout'."
+  },
+  {
+    "finding_id": "F017",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'maintenance service report'."
+  },
+  {
+    "finding_id": "F018",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F018",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'work order PM-HVAC-2026-04'."
+  },
+  {
+    "finding_id": "F019",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F019",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'logbook page'."
+  },
+  {
+    "finding_id": "F019",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'pump start event timestamp'."
+  },
+  {
+    "finding_id": "F020",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F020",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'solution analytical test'."
+  },
+  {
+    "finding_id": "F021",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F021",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'seal integrity test reports'."
+  },
+  {
+    "finding_id": "F022",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F023",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F024",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F024",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F024",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  },
+  {
+    "finding_id": "F024",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'SOP-PROD-010 copy'."
+  },
+  {
+    "finding_id": "F024",
+    "failure_code": "MISSING_EVIDENCE_REQUIREMENT",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Investigation plan should recommend evidence matching 'raw material COAs'."
+  },
+  {
+    "finding_id": "F025",
+    "failure_code": "OBSERVATION_MISCLASSIFICATION",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Observation quality should be SUFFICIENT."
+  },
+  {
+    "finding_id": "F025",
+    "failure_code": "IRRELEVANT_HYPOTHESIS",
+    "severity": "MEDIUM",
+    "must_fix_condition": "Do not propose training/supervision/policy gaps without finding anchors."
+  }
+]

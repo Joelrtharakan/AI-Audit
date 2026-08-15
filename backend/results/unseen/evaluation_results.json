@@ -1,0 +1,639 @@
+{
+  "overall_score": 99.8,
+  "dimension_averages": {
+    "fact_preservation": 100.0,
+    "observation_quality": 100.0,
+    "root_cause_discipline": 100.0,
+    "evidence_boundary": 100.0,
+    "hypothesis_quality": 98.3,
+    "evidence_recommendations": 99.2,
+    "capa_discipline": 100.0,
+    "impact_assessment": 100.0,
+    "consistency": 100.0,
+    "5why_causal_coherence": 100.0,
+    "unsupported_specificity": 100.0,
+    "causal_leap_detection": 100.0
+  },
+  "readiness_gate": {
+    "passed": true,
+    "reasons": []
+  },
+  "findings": [
+    {
+      "finding_id": "U001",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U002",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U003",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U004",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U005",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U006",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U007",
+      "total_score": 95.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 50.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 1,
+      "failures": [
+        {
+          "code": "IRRELEVANT_HYPOTHESIS",
+          "severity": "MEDIUM",
+          "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The calibration or maintenance status for PP-09 may not be verified or within active service window.'",
+          "expected": "Do not propose training/supervision/policy gaps without finding anchors.",
+          "actual": "EQUIPMENT_CALIBRATION_GAP: The calibration or maintenance status for PP-09 may not be verified or within active service window."
+        }
+      ]
+    },
+    {
+      "finding_id": "U008",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U009",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U10",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U011",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U012",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U013",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U014",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U015",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U016",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U017",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U018",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U019",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U020",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U021",
+      "total_score": 97.5,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 75.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 1,
+      "failures": [
+        {
+          "code": "MISSING_EVIDENCE_REQUIREMENT",
+          "severity": "MEDIUM",
+          "explanation": "Recommended evidence missed key item: 'audit trail'",
+          "expected": "Investigation plan should recommend evidence matching 'audit trail'.",
+          "actual": "affected item asset verification log, physical inspection record affected item asset verification log, physical inspection record approved sop copy do"
+        }
+      ]
+    },
+    {
+      "finding_id": "U022",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U023",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U024",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U025",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U026",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U027",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U028",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U029",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    },
+    {
+      "finding_id": "U030",
+      "total_score": 100.0,
+      "dimension_scores": {
+        "fact_preservation": 100.0,
+        "observation_quality": 100.0,
+        "root_cause_discipline": 100.0,
+        "evidence_boundary": 100.0,
+        "hypothesis_quality": 100.0,
+        "evidence_recommendations": 100.0,
+        "capa_discipline": 100.0,
+        "impact_assessment": 100.0,
+        "consistency": 100.0,
+        "5why_causal_coherence": 100.0,
+        "unsupported_specificity": 100.0,
+        "causal_leap_detection": 100.0
+      },
+      "failures_count": 0,
+      "failures": []
+    }
+  ]
+}

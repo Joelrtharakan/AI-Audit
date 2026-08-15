@@ -20,6 +20,7 @@ from app.models.agent import (
     AgentFinalState,
     AgentTraceStep,
     CADraft,
+    CanonicalFindingState,
     CapaAnalysis,
     ContributingFactor,
     EvidenceGap,
@@ -32,6 +33,7 @@ from app.models.agent import (
     RootCauseAnalysis,
 )
 from app.models.analysis import ExtractionResult, ObservationQualityResult
+
 
 
 class AgentState(TypedDict, total=False):
@@ -52,6 +54,8 @@ class AgentState(TypedDict, total=False):
     # ------------------------------------------------------------------
     observation_quality: ObservationQualityResult | None
     extraction: ExtractionResult | None
+    canonical_finding_state: CanonicalFindingState | None
+
 
     # ------------------------------------------------------------------
     # Investigation planning
@@ -83,6 +87,17 @@ class AgentState(TypedDict, total=False):
     five_why: FiveWhyAnalysis | None
     impact_assessment: ImpactAssessment | None
     capa_analysis: CapaAnalysis | None
+    # "LLM" (normal path) or "DEGRADED" (core_synthesis's LLM call failed and
+    # a deterministic fallback ran) -- must be surfaced to the final report
+    # so degraded analysis is never mistaken for a normal result.
+    analysis_mode: str
+    # Infrastructure metadata from the LLM provider router (app/services/
+    # llm_router.py) — which provider actually answered core_synthesis's
+    # call, whether a fallback was needed, and the full attempt order. No
+    # analytical meaning; purely observability.
+    provider_used: str | None
+    fallback_used: bool
+    provider_attempts: list[str]
 
     # ------------------------------------------------------------------
     # Critic

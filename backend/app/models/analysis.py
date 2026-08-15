@@ -84,6 +84,20 @@ class ExtractionResult(BaseModel):
     # customer/patient-facing event. Gates whether generation is allowed to reach for
     # recall/quarantine/notify-customer language -- see grounding_validator.py 3.2.1.
     external_impact_stated: bool = False
+    # The semantic affected object of the deviation (e.g. "temperature log for
+    # refrigerator QC-REF-02", "the cleaning checklist") -- the actual noun
+    # phrase the deviation is ABOUT, never a framing fragment like "the audit"
+    # or a bare pronoun. Null if the extractor can't isolate one confidently;
+    # downstream code falls back to deterministic structural extraction rather
+    # than treating a low-confidence guess as ground truth.
+    deviation_subject: str | None = None
+    # The condition asserted about deviation_subject (e.g. "not completed",
+    # "missing", "incomplete"). Kept separate from deviation_subject so the
+    # two are never concatenated into one opaque string.
+    deviation_condition: str | None = None
+    # The person/role identified as responsible for or involved in the
+    # deviation, if the text names one (e.g. "the responsible technician").
+    deviation_actor: str | None = None
 
 
 class CausationClassification(BaseModel):

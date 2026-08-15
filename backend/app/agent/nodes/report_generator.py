@@ -205,7 +205,16 @@ async def generate_report_node(state: AgentState) -> AgentState:
         evidence_gaps=state.get("evidence_gaps", []),
         evidence=state.get("evidence_ledger", []),
         human_review_required=True,  # always
+        analysis_mode=state.get("analysis_mode", "LLM"),  # type: ignore[arg-type]
+        provider_used=state.get("provider_used"),
+        fallback_used=bool(state.get("fallback_used", False)),
+        provider_attempts=state.get("provider_attempts", []),
     )
+    if report.analysis_mode == "DEGRADED":
+        trace.append(AgentTraceStep.warn(
+            "Report generated in DEGRADED MODE — LLM-based causal synthesis was unavailable; "
+            "analysis below was produced deterministically and requires full auditor review."
+        ))
 
     trace.append(AgentTraceStep.ok("Investigation report generated"))
     trace.append(AgentTraceStep.warn("Auditor review required"))

@@ -65,7 +65,8 @@ async def test_no_asking_which_sop_when_sop_is_named():
 
     report = final.get("report")
     if report and report.investigation:
-        questions = " ".join(report.investigation.questions).lower()
+        q_strs = [q.question if hasattr(q, "question") else str(q) for q in report.investigation.questions]
+        questions = " ".join(q_strs).lower()
         # Must not ask "which SOP" since SOP-OPS-014 is already specified
         assert "which sop" not in questions
         assert "which sop-ops-014" not in questions
@@ -85,7 +86,8 @@ async def test_no_assuming_retraining_occurred():
 
     report = final.get("report")
     if report and report.investigation:
-        questions = " ".join(report.investigation.questions).lower()
+        q_strs = [q.question if hasattr(q, "question") else str(q) for q in report.investigation.questions]
+        questions = " ".join(q_strs).lower()
         # Must not assume retraining took place
         assert "when did retraining occur" not in questions
         assert "when did the retraining occur" not in questions
@@ -105,9 +107,11 @@ async def test_no_assuming_automated_reminders_exist():
 
     report = final.get("report")
     if report and report.investigation:
-        questions = " ".join(report.investigation.questions).lower()
+        q_strs = [q.question if hasattr(q, "question") else str(q) for q in report.investigation.questions]
+        questions = " ".join(q_strs).lower()
         assert "automated retraining reminder" not in questions
         assert "automated notification" not in questions
+
 
 
 @pytest.mark.asyncio

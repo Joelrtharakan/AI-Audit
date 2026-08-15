@@ -139,7 +139,12 @@ async def critic_node(state: AgentState) -> AgentState:
             for correction in corrections[:5]:  # log first 5
                 trace.append(AgentTraceStep.warn(f"  Critic: {correction}"))
 
-    except (LLMError, ValueError, KeyError) as exc:
+    except Exception as exc:
+        # Broad catch is deliberate here (mirrors core_synthesis_node): any
+        # LLM-path failure -- provider error, timeout, malformed JSON, or
+        # anything else -- must degrade gracefully to the pre-set safe
+        # defaults above (approve with a warning) rather than crash the
+        # whole graph and lose the analysis already produced upstream.
         logger.warning("Critic node failed: %s", exc)
         trace.append(AgentTraceStep.warn(f"Critic review failed — proceeding to report: {exc}"))
         errors.append(f"Critic error: {exc}")

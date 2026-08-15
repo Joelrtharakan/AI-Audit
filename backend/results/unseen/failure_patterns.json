@@ -1,0 +1,22 @@
+{
+  "IRRELEVANT_HYPOTHESIS": {
+    "count": 1,
+    "severity": "MEDIUM",
+    "examples": [
+      {
+        "finding_id": "U007",
+        "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The calibration or maintenance status for PP-09 may not be verified or within active service window.'"
+      }
+    ]
+  },
+  "MISSING_EVIDENCE_REQUIREMENT": {
+    "count": 1,
+    "severity": "MEDIUM",
+    "examples": [
+      {
+        "finding_id": "U021",
+        "explanation": "Recommended evidence missed key item: 'audit trail'"
+      }
+    ]
+  }
+}

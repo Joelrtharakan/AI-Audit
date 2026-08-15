@@ -32,6 +32,10 @@ def _ungrounded_phrases(parsed: dict, finding_text: str) -> list[str]:
     asset = parsed.get("asset_or_location")
     if asset:
         candidates.append(str(asset))
+    for field in ("deviation_subject", "deviation_condition", "deviation_actor"):
+        value = parsed.get(field)
+        if value:
+            candidates.append(str(value))
 
     # For named systems or document IDs, enforce entity grounding check
     for doc in parsed.get("named_systems_or_documents", []):
@@ -55,6 +59,9 @@ def _to_extraction_result(parsed: dict) -> ExtractionResult:
         timeframe=parsed.get("timeframe") or None,
         asset_or_location=parsed.get("asset_or_location") or None,
         external_impact_stated=bool(parsed.get("external_impact_stated", False)),
+        deviation_subject=parsed.get("deviation_subject") or None,
+        deviation_condition=parsed.get("deviation_condition") or None,
+        deviation_actor=parsed.get("deviation_actor") or None,
     )
 
 
@@ -70,7 +77,10 @@ async def extract_finding(finding_text: str, client: LLMClient | None = None) ->
         try:
             raw = await client.chat_completion(msgs, temperature=temperature, response_format_json=True)
             parsed = parse_llm_json(raw)
-        except (LLMError, ValueError, KeyError) as exc:
+        except Exception as exc:
+            # Broad catch: any provider failure (timeout, 429, malformed
+            # response, etc.) must degrade to the caller's deterministic
+            # fallback rather than crash the graph on its very first node.
             logger.warning("Extraction call failed (%s).", exc)
             return None
 

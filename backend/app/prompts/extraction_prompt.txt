@@ -28,6 +28,17 @@ any example anywhere in this prompt:
 - external_impact_stated: true ONLY if the text explicitly describes a release, shipment, or a
   customer/patient-facing event. false for everything else, including internal-only deviations -- do
   not infer external impact from severity or risk language alone; it must be explicitly described.
+- deviation_subject: the actual semantic object the deviation is ABOUT -- the specific record,
+  document, checklist, log, certificate, equipment, procedure, or process the observation says was
+  deficient. This is NEVER the audit/inspection itself, never a pronoun ("it", "this"), and never a
+  framing phrase describing how the finding was reported (e.g. "During the audit, it was observed
+  that ..." -- that whole clause is framing, not the subject). Extract the noun phrase the sentence's
+  condition (missing/incomplete/not completed/failed/expired/etc.) is actually predicated on, verbatim
+  or near-verbatim from the text. Null if you cannot isolate one with confidence -- never guess.
+- deviation_condition: the specific condition asserted about deviation_subject (e.g. "not completed",
+  "missing", "incomplete", "expired", "failed"), taken from the text. Null if deviation_subject is null.
+- deviation_actor: the specific person or role identified as responsible for or involved in the
+  deviation, if the text names one (e.g. "the responsible technician"). Null if none is named.
 
 CRITICAL RULES:
 - Extract ONLY what is explicitly present in the OBSERVATION text below. Do not add facts, do not
@@ -46,7 +57,10 @@ Output MUST be a single JSON object matching this schema exactly:
   "named_systems_or_documents": ["string"],
   "timeframe": "string or null",
   "asset_or_location": "string or null",
-  "external_impact_stated": true or false
+  "external_impact_stated": true or false,
+  "deviation_subject": "string or null",
+  "deviation_condition": "string or null",
+  "deviation_actor": "string or null"
 }}
 No prose outside the JSON. No markdown code fences.
 

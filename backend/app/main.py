@@ -19,29 +19,19 @@ def _configure_logging() -> None:
     )
 
 
-async def _check_ollama_reachable() -> None:
-    """Warn, don't crash, if LLM_PROVIDER=ollama but nothing is listening -- so devs
-    get a clear message instead of a cryptic connection-refused deep in a request."""
+async def _check_groq_reachable() -> None:
     settings = get_settings()
-    if settings.llm_provider != "ollama":
+    if settings.llm_provider != "groq":
         return
-
-    base = settings.ollama_base_url.removesuffix("/v1")
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            await client.get(base)
-        logger.info("Ollama reachable at %s (model=%s).", base, settings.ollama_model)
-    except httpx.HTTPError:
-        logger.warning(
-            "LLM_PROVIDER=ollama but %s is not reachable. Is `ollama serve` running? "
-            "Requests to /api/v1/analyze-finding will fail until it is.",
-            base,
-        )
+    if not settings.groq_api_key:
+        logger.warning("LLM_PROVIDER=groq but GROQ_API_KEY is missing in backend/.env")
+    else:
+        logger.info("Groq Provider initialized (model=%s).", settings.groq_model)
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    await _check_ollama_reachable()
+    await _check_groq_reachable()
     yield
 
 

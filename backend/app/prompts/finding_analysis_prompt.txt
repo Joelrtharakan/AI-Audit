@@ -23,10 +23,9 @@ EXAMPLES:
    (no what/where/when, no causal claim, no observed evidence.)
 
 3. "Logs were missing, no explanation given."
-   -> {{"sufficient": false, "missing_information": ["Which logs, and for what asset?",
-   "When did this occur?", "What was directly observed?"]}}
-   (a deviation is named but there's no what/where/when detail and explicitly no causal
-   signal.)
+   -> {{"sufficient": true, "missing_information": []}}
+   (The observed deviation is concrete and specific even though the root cause is unknown. Root cause uncertainty does NOT make observation quality insufficient.)
+
 
 Return a short JSON object: {{"sufficient": true|false, "missing_information":
 ["...", "..."]}}.

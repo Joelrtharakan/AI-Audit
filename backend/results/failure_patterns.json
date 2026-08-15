@@ -1,0 +1,56 @@
+{
+  "OBSERVATION_MISCLASSIFICATION": {
+    "count": 24,
+    "severity": "MEDIUM",
+    "examples": [
+      {
+        "finding_id": "F001",
+        "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT."
+      },
+      {
+        "finding_id": "F003",
+        "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT."
+      },
+      {
+        "finding_id": "F004",
+        "explanation": "Observation quality evaluated as ObservationQualityStatus.SUFFICIENT, expected SUFFICIENT."
+      }
+    ]
+  },
+  "IRRELEVANT_HYPOTHESIS": {
+    "count": 15,
+    "severity": "MEDIUM",
+    "examples": [
+      {
+        "finding_id": "F001",
+        "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The active procedure version for the an operator may not reflect the required operational steps.'"
+      },
+      {
+        "finding_id": "F001",
+        "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The required operational sequence for the an operator may not have been executed as defined.'"
+      },
+      {
+        "finding_id": "F003",
+        "explanation": "Candidate hypothesis invokes unanchored 2nd-order domain: 'The active procedure version for the an outdated printout of sop-qa-008 rev 2 may not reflect the required operational steps.'"
+      }
+    ]
+  },
+  "MISSING_EVIDENCE_REQUIREMENT": {
+    "count": 29,
+    "severity": "MEDIUM",
+    "examples": [
+      {
+        "finding_id": "F001",
+        "explanation": "Recommended evidence missed key item: 'SOP-CLN-004 copy'"
+      },
+      {
+        "finding_id": "F002",
+        "explanation": "Recommended evidence missed key item: 'SOP-LAB-012 copy'"
+      },
+      {
+        "finding_id": "F002",
+        "explanation": "Recommended evidence missed key item: 'holding time validation data'"
+      }
+    ]
+  }
+}
