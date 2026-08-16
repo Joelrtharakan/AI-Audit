@@ -1,68 +1,33 @@
-You extract facts from a single LQMS audit observation. Your ONLY job is to record what
-the text explicitly says -- you do not judge causation, you do not infer anything the text
-doesn't state, and you do not decide what the root cause is.
+You extract structured facts from an LQMS audit observation. Do not infer or invent facts.
 
-Extract exactly these fields. The bracketed hints below (<<like this>>) describe the KIND of
-content each field holds — they are not example text and must never influence what you write; every
-value you output must come only from the OBSERVATION text at the bottom of this prompt, never from
-any example anywhere in this prompt:
+Extract ONLY what is explicitly stated in the OBSERVATION:
+- stated_facts: factual observations with no named speaker.
+- attributed_statements: claims attributed to a speaker (e.g. [{{"speaker": "operator", "claim": "did not receive training"}}]).
+- referenced_records: specific logs, documents, or records cited.
+- named_systems_or_documents: specific equipment, system, or document IDs named.
+- timeframe: mentioned date or time period, or null.
+- asset_or_location: mentioned equipment or department, or null.
+- external_impact_stated: true only if customer/release impact is explicitly stated, else false.
+- deviation_subject: noun phrase of the record, item, or process with the issue, or null.
+- deviation_condition: condition word (e.g. "not completed", "missing"), or null.
+- deviation_actor: responsible person or role named, or null.
 
-- stated_facts: things the observation asserts directly, with no named speaker (<<e.g. a condition or
-  measurement stated as fact, taken verbatim/near-verbatim from the observation>>).
-- attributed_statements: claims the observation attributes to a specific speaker (staff, a supervisor,
-  an auditor, a technician, etc.) -- each with "speaker" (who said it, as named or described in the
-  text) and "claim" (what they said, in your own concise words but not inventing content). If no one is
-  named or described as saying anything, this is an empty list.
-- referenced_records: any specific record, log, document, or artifact the observation cites as
-  evidence, ONLY if the text says it was consulted/reviewed/confirmed by it -- not just mentioned in
-  passing. If nothing is cited as corroborating evidence, this is an empty list.
-- named_systems_or_documents: any specific system, software, piece of equipment, or document NAMED in
-  the text -- regardless of whether it's cited as corroborating evidence. This is broader than
-  referenced_records: a system can be named without being cited as confirming anything. If nothing is
-  named in the OBSERVATION text, this is an empty list — do NOT invent an identifier/name/number to
-  fill this field.
-- timeframe: the date, date range, or relative time period mentioned, taken verbatim from the text, or
-  null if none is given.
-- asset_or_location: the specific equipment, department, or location named in the text, or null if none
-  is given.
-- external_impact_stated: true ONLY if the text explicitly describes a release, shipment, or a
-  customer/patient-facing event. false for everything else, including internal-only deviations -- do
-  not infer external impact from severity or risk language alone; it must be explicitly described.
-- deviation_subject: the actual semantic object the deviation is ABOUT -- the specific record,
-  document, checklist, log, certificate, equipment, procedure, or process the observation says was
-  deficient. This is NEVER the audit/inspection itself, never a pronoun ("it", "this"), and never a
-  framing phrase describing how the finding was reported (e.g. "During the audit, it was observed
-  that ..." -- that whole clause is framing, not the subject). Extract the noun phrase the sentence's
-  condition (missing/incomplete/not completed/failed/expired/etc.) is actually predicated on, verbatim
-  or near-verbatim from the text. Null if you cannot isolate one with confidence -- never guess.
-- deviation_condition: the specific condition asserted about deviation_subject (e.g. "not completed",
-  "missing", "incomplete", "expired", "failed"), taken from the text. Null if deviation_subject is null.
-- deviation_actor: the specific person or role identified as responsible for or involved in the
-  deviation, if the text names one (e.g. "the responsible technician"). Null if none is named.
-
-CRITICAL RULES:
-- Extract ONLY what is explicitly present in the OBSERVATION text below. Do not add facts, do not
-  paraphrase into something more specific than the text supports, do not fill in plausible-sounding
-  details, and never copy an identifier, name, or example from this prompt's own instructions.
-- Do not judge whether any claim is true, corroborated, or sufficient -- that is a later step's job,
-  not yours.
-- If a field has nothing to extract, use an empty list (or null for timeframe/
-  asset_or_location) -- do not invent something to avoid an empty field.
-
-Output MUST be a single JSON object matching this schema exactly:
+Return ONLY valid JSON matching this schema:
 {{
   "stated_facts": ["string"],
   "attributed_statements": [{{"speaker": "string", "claim": "string"}}],
   "referenced_records": ["string"],
   "named_systems_or_documents": ["string"],
-  "timeframe": "string or null",
-  "asset_or_location": "string or null",
-  "external_impact_stated": true or false,
-  "deviation_subject": "string or null",
-  "deviation_condition": "string or null",
-  "deviation_actor": "string or null"
+  "timeframe": null,
+  "asset_or_location": null,
+  "external_impact_stated": false,
+  "deviation_subject": null,
+  "deviation_condition": null,
+  "deviation_actor": null
 }}
-No prose outside the JSON. No markdown code fences.
 
 OBSERVATION:
 {observation}
+
+Return ONLY one valid JSON object. No markdown fences, no explanations, no text outside the JSON.
+

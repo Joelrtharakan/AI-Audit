@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -49,6 +50,56 @@ router = APIRouter(
     dependencies=[Depends(require_internal_api_key)],
 )
 
+# (marker text, label) -- matched against AgentTraceStep.message to bound
+# each node's wall-clock span using the trace's own timestamps, rather than
+# adding a second parallel timing-collection mechanism through every node.
+_PERF_MARKERS: list[tuple[str, str]] = [
+    ("Finding extracted", "Understanding/Extraction"),
+    ("Deterministic semantic extraction recovered", "Understanding/Extraction"),
+    ("Extraction LLM call failed", "Understanding/Extraction"),
+    ("No LQMS tool investigation needed", "Investigation Planning"),
+    ("Investigation plan created", "Investigation Planning"),
+    ("Consolidated core synthesis completed", "Core Synthesis"),
+    ("Core synthesis transitioned to deterministic", "Core Synthesis"),
+    ("compact recovery call produced this analysis", "Core Synthesis"),
+    ("Core synthesis error", "Core Synthesis"),
+    ("Deterministic critic firewall", "Critic"),
+    ("Critic review", "Critic"),
+    ("Critic node failed", "Critic"),
+    ("Investigation report generated", "Report Generation"),
+    ("Final evidence verification", "Final Validation"),
+]
+
+
+def _log_performance_summary(trace: list, pipeline_ms: int, analysis_mode: str | None) -> None:
+    """PHASE 16: logs a PERFORMANCE SUMMARY derived from the trace's own
+    timestamps (every AgentTraceStep already carries one) -- avoids adding a
+    second, parallel timing-collection path through every node just to
+    produce this log line."""
+    if not trace:
+        logger.info("PERFORMANCE SUMMARY total_pipeline_ms=%d analysis_mode=%s (no trace)", pipeline_ms, analysis_mode)
+        return
+    try:
+        timestamps = [dt.datetime.fromisoformat(t.timestamp) for t in trace if t.timestamp]
+    except Exception:
+        timestamps = []
+    spans: dict[str, int] = {}
+    prev_time = timestamps[0] if timestamps else None
+    prev_label = "Understanding/Extraction"
+    for step, ts in zip(trace, timestamps):
+        label = next((lbl for marker, lbl in _PERF_MARKERS if marker in step.message), None)
+        if label and prev_time is not None:
+            spans[prev_label] = spans.get(prev_label, 0) + int((ts - prev_time).total_seconds() * 1000)
+            prev_time = ts
+            prev_label = label
+    lines = [f"  {name}: {ms} ms" for name, ms in spans.items()]
+    logger.info(
+        "PERFORMANCE SUMMARY\n%s\n  Total: %d ms\n  analysis_mode: %s",
+        "\n".join(lines) if lines else "  (insufficient trace markers to break down)",
+        pipeline_ms,
+        analysis_mode,
+    )
+
 
 @router.post("/investigate", response_model=InvestigateResponse)
 async def investigate_finding(payload: InvestigateRequest) -> InvestigateResponse:
@@ -66,10 +117,17 @@ async def investigate_finding(payload: InvestigateRequest) -> InvestigateRespons
     """
     settings = get_settings()
 
-    # Check cache first for duplicate request instant response
+    # Check cache first for duplicate request instant response. Keyed on
+    # model + prompt_version too, so a model swap or prompt edit can't
+    # silently serve a result generated under different configuration.
     depts_str = ",".join(payload.departments) if payload.departments else ""
+    cache_model = settings.ollama_model if settings.llm_provider == "ollama" else settings.openrouter_model
     cache_key = compute_cache_key(
-        payload.finding_text, depts_str, payload.audit_criteria or ""
+        payload.finding_text,
+        depts_str,
+        payload.audit_criteria or "",
+        model=cache_model,
+        prompt_version=settings.analysis_prompt_version,
     )
     cached = get_cached_analysis(cache_key)
     if cached:
@@ -109,6 +167,7 @@ async def investigate_finding(payload: InvestigateRequest) -> InvestigateRespons
         "errors": [],
     }
 
+    pipeline_t0 = time.monotonic()
     try:
         final_state_dict = await asyncio.wait_for(
             graph.ainvoke(initial_state),
@@ -168,6 +227,9 @@ async def investigate_finding(payload: InvestigateRequest) -> InvestigateRespons
             },
         )
 
+    pipeline_ms = int((time.monotonic() - pipeline_t0) * 1000)
+    _log_performance_summary(final_state_dict.get("trace", []), pipeline_ms, final_state_dict.get("analysis_mode"))
+
     model_name = (
         settings.ollama_model
         if settings.llm_provider == "ollama"
@@ -187,6 +249,14 @@ async def investigate_finding(payload: InvestigateRequest) -> InvestigateRespons
         ),
     )
 
-    # Store in cache
-    set_cached_analysis(cache_key, resp.model_dump())
+    # Store in cache -- but never a DEGRADED result. Caching a transient
+    # provider failure would otherwise permanently poison every subsequent
+    # request for the same finding, even once Ollama recovers (this is
+    # exactly the "Cache HIT for finding investigation" trap: a prior
+    # DEGRADED response getting replayed forever instead of being retried).
+    report = resp.report
+    if report is not None and getattr(report, "analysis_mode", "LLM") == "DEGRADED":
+        logger.info("Not caching DEGRADED analysis for finding: %s", cache_key[:12])
+    else:
+        set_cached_analysis(cache_key, resp.model_dump())
     return resp

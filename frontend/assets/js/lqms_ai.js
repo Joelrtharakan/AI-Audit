@@ -144,9 +144,13 @@
 
         // Mode Pill & Provider Info
         html += "<div style='display:flex; align-items:center; gap:10px;'>";
-        if (isDegraded) {
+        if (report.analysis_mode === "DETERMINISTIC") {
+            html += "<span style='background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
+            html += "<span style='width:8px; height:8px; border-radius:50%; background:#0284c7; display:inline-block; box-shadow:0 0 8px #0284c7;'></span> EVIDENCE-GROUNDED DETERMINISTIC ANALYSIS";
+            html += "</span>";
+        } else if (isDegraded) {
             html += "<span style='background:#fef2f2; color:#dc2626; border:1px solid #fecaca; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
-            html += "<span style='width:8px; height:8px; border-radius:50%; background:#dc2626; display:inline-block; box-shadow:0 0 8px #dc2626;'></span> DEGRADED MODE (DETERMINISTIC FALLBACK)";
+            html += "<span style='width:8px; height:8px; border-radius:50%; background:#dc2626; display:inline-block; box-shadow:0 0 8px #dc2626;'></span> SAFETY FALLBACK MODE";
             html += "</span>";
         } else {
             html += "<span style='background:#ecfdf5; color:#059669; border:1px solid #a7f3d0; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
@@ -196,23 +200,75 @@
         html += "</div>";
         html += "</div>";
 
-        // Root Cause Status Card
-        var rcStatColor = (rc.status === "VERIFIED" || rc.status === "SUPPORTED") ? "#059669" : "#d97706";
-        var rcStatBg = (rc.status === "VERIFIED" || rc.status === "SUPPORTED") ? "#ecfdf5" : "#fffbe6";
-        var rcStatBorder = (rc.status === "VERIFIED" || rc.status === "SUPPORTED") ? "#a7f3d0" : "#ffe58f";
-        html += "<div style='background:#ffffff; border:1px solid #cbd5e1; border-radius:14px; padding:16px 18px; box-shadow:0 2px 6px rgba(15,23,42,0.04);'>";
-        html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>Root Cause Status</div>";
-        html += "<div style='margin-top:8px;'>";
-        html += "<span style='background:" + rcStatBg + "; color:" + rcStatColor + "; border:1px solid " + rcStatBorder + "; font-size:12px; font-weight:800; padding:4px 10px; border-radius:8px; text-transform:uppercase; letter-spacing:0.5px;'>";
-        html += escapeHtml(rc.status || "NOT_ESTABLISHED");
-        html += "</span>";
-        html += "</div>";
-        html += "</div>";
-
         html += "</div>"; // End metrics grid
+
+        // ONE canonical root-cause status display (Section 8: never render
+        // root-cause status in more than one place) — a compact STATUS / WHY
+        // / LEADING HYPOTHESIS strip directly under the metrics grid. This
+        // is the single place report.root_cause.status is rendered anywhere
+        // on the page.
+        var rcStatColor = (rc.status === "VERIFIED" || rc.status === "SUPPORTED") ? "#059669" : "#d97706";
+        var rcWhy = rc.root_cause_basis || rc.narrative || "";
+        var rcLeadDisplay = rc.leading_hypothesis || "";
+        var rcLeadIsNone = !rcLeadDisplay || rcLeadDisplay.indexOf("NONE") === 0 || rcLeadDisplay.indexOf("TIED") === 0 || rc.leading_hypothesis_status === "TIED" || rc.leading_hypothesis_status === "NONE";
+        html += "<div style='background:#ffffff; border:1px solid #e2e8f0; border-radius:14px; padding:16px 20px; margin-bottom:20px; box-shadow:0 2px 6px rgba(15,23,42,0.04);'>";
+        html += "<div style='display:flex; flex-wrap:wrap; gap:24px; align-items:flex-start;'>";
+        html += "<div style='min-width:160px;'><div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>Root Cause Status</div>";
+        html += "<div style='font-size:15px; font-weight:800; color:" + rcStatColor + "; margin-top:4px;'>" + escapeHtml(rc.status || "NOT_ESTABLISHED") + "</div></div>";
+        if (rcWhy) {
+            html += "<div style='flex:1; min-width:240px;'><div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>Why</div>";
+            html += "<div style='font-size:13px; color:#334155; margin-top:4px; line-height:1.5;'>" + safeEsc(rcWhy) + "</div></div>";
+        }
+        html += "<div style='min-width:140px;'><div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>Leading Hypothesis</div>";
+        html += "<div style='font-size:14px; font-weight:800; color:" + (rcLeadIsNone ? "#b45309" : "#15803d") + "; margin-top:4px;'>" + (rcLeadIsNone ? "NONE" : escapeHtml(rcLeadDisplay)) + "</div></div>";
+        html += "</div></div>";
 
         // --- Main Content Modules Container ---
         html += "<div style='display:flex; flex-direction:column; gap:20px;'>";
+
+        // --- 1b. Evidence Status & Claim Provenance Card ---
+        var evClaims = report.evidence_claims || [];
+        var evConflicts = report.evidence_conflicts || [];
+        if (evClaims.length || evConflicts.length) {
+            html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
+            html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
+            html += "<span style='font-weight:800; font-size:16px; color:#0f172a; letter-spacing:-0.2px;'>Evidence Ledger & Claim Provenance</span>";
+            if (evConflicts.length) {
+                html += "<span style='background:#fef2f2; color:#dc2626; font-size:11px; font-weight:800; padding:5px 12px; border-radius:20px; border:1px solid #fecaca; text-transform:uppercase; letter-spacing:0.5px;'>⚠ " + evConflicts.length + " Conflict(s) Detected</span>";
+            } else {
+                html += "<span style='background:#ecfdf5; color:#059669; font-size:11px; font-weight:800; padding:5px 12px; border-radius:20px; border:1px solid #a7f3d0; text-transform:uppercase; letter-spacing:0.5px;'>Consistent Evidence</span>";
+            }
+            html += "</div>";
+
+            if (evConflicts.length) {
+                html += "<div style='display:flex; flex-direction:column; gap:10px; margin-bottom:16px;'>";
+                evConflicts.forEach(function(cf) {
+                    html += "<div style='background:#fff1f2; border:1px solid #fecdd3; border-left:4px solid #e11d48; border-radius:8px; padding:12px 16px;'>";
+                    html += "<div style='font-weight:800; font-size:13px; color:#9f1239; margin-bottom:4px;'><span class='glyphicon glyphicon-exclamation-sign'></span> " + safeEsc(cf.conflict_id || 'CONFLICT') + ": " + safeEsc(cf.proposition || '') + "</div>";
+                    html += "<div style='font-size:12px; color:#881337;'>Status: <strong style='color:#be123c;'>" + safeEsc(cf.status || 'UNRESOLVED') + "</strong> — Available evidence contains conflicting reports. Objective records required for resolution.</div>";
+                    html += "</div>";
+                });
+                html += "</div>";
+            }
+
+            if (evClaims.length) {
+                html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:10px;'>";
+                evClaims.forEach(function(c) {
+                    var isVer = (c.status === "VERIFIED");
+                    var cBg = isVer ? "#f0fdf4" : "#f8fafc";
+                    var cBrd = isVer ? "#bbf7d0" : "#e2e8f0";
+                    var cTxt = isVer ? "#166534" : "#334155";
+                    var badgeBg = isVer ? "#dcfce7" : "#f1f5f9";
+                    var badgeTxt = isVer ? "#15803d" : "#475569";
+                    html += "<div style='background:" + cBg + "; border:1px solid " + cBrd + "; border-radius:8px; padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start;'>";
+                    html += "<div style='font-size:12px; color:" + cTxt + "; line-height:1.4;'><strong>" + safeEsc(c.claim_id || 'C') + ":</strong> " + safeEsc(c.text) + "</div>";
+                    html += "<span style='background:" + badgeBg + "; color:" + badgeTxt + "; font-size:10px; font-weight:800; padding:2px 8px; border-radius:6px; text-transform:uppercase; margin-left:8px; flex-shrink:0;'>" + safeEsc(c.status) + "</span>";
+                    html += "</div>";
+                });
+                html += "</div>";
+            }
+            html += "</div>";
+        }
 
         // --- 2. AI-Suggested Root-Cause Hypothesis Card ---
         html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
@@ -222,20 +278,21 @@
         html += "</div>";
 
         var candList = rc.candidate_hypotheses || [];
+        var leadingHyp = rc.leading_hypothesis || "";
 
-        if (rc.leading_hypothesis && rc.status !== "NOT_ESTABLISHED") {
-            html += "<div style='background:linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); border:1px solid #a7f3d0; border-radius:12px; padding:16px 18px; margin-bottom:16px; box-shadow:0 2px 4px rgba(16,185,129,0.05);'>";
-            html += "<div style='font-weight:800; font-size:12px; color:#047857; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:6px; display:flex; align-items:center; gap:6px;'><span class='glyphicon glyphicon-ok-sign'></span> Leading Hypothesis</div>";
-            html += "<p style='font-size:14px; font-weight:600; color:#065f46; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(rc.leading_hypothesis) + "</p>";
-            html += "<div style='font-size:11px; color:#059669; font-weight:600;'>Status: <span style='background:#ffffff; color:#047857; padding:2px 8px; border-radius:6px; border:1px solid #a7f3d0;'>POSSIBLE — REQUIRES VERIFICATION</span></div>";
+        if (leadingHyp && !leadingHyp.startsWith("NONE") && !leadingHyp.startsWith("TIED")) {
+            html += "<div style='background:linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); border:1px solid #86efac; border-left:5px solid #22c55e; border-radius:12px; padding:16px 18px; margin-bottom:16px; box-shadow:0 2px 4px rgba(34,197,94,0.05);'>";
+            html += "<div style='font-weight:800; font-size:12px; color:#15803d; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:6px; display:flex; align-items:center; gap:6px;'><span class='glyphicon glyphicon-ok-sign'></span> Current Leading Hypothesis</div>";
+            html += "<p style='font-size:14px; font-weight:700; color:#14532d; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(leadingHyp) + "</p>";
+            html += "<div style='font-size:11px; color:#166534; font-weight:600;'>Status: <span style='background:#ffffff; color:#15803d; padding:3px 10px; border-radius:6px; border:1px solid #86efac; font-weight:800;'>POSSIBLE — REQUIRES OBJECTIVE VERIFICATION</span></div>";
             html += "</div>";
         } else if (candList.length) {
-            html += "<div style='background:#fffbe6; border:1px solid #ffe58f; border-radius:10px; padding:12px 16px; margin-bottom:16px; display:flex; align-items:center; gap:10px;'>";
-            html += "<span class='glyphicon glyphicon-info-sign' style='color:#d97706; font-size:16px;'></span>";
-            html += "<p style='font-size:13px; color:#855900; margin:0; font-weight:600;'>No single leading hypothesis is established from current evidence. Competing hypotheses requiring auditor investigation:</p>";
+            html += "<div style='background:#fffbe6; border:1px solid #ffe58f; border-left:5px solid #d97706; border-radius:10px; padding:14px 18px; margin-bottom:16px;'>";
+            html += "<div style='font-weight:800; font-size:12px; color:#b45309; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:4px;'><span class='glyphicon glyphicon-info-sign'></span> Leading Hypothesis: NONE (Competing Hypotheses Tied)</div>";
+            html += "<p style='font-size:13px; color:#78350f; margin:0; font-weight:500; line-height:1.4;'>Available evidence does not definitively single out one cause. The following competing hypotheses require objective record verification:</p>";
             html += "</div>";
         } else {
-            html += "<p style='font-size:13px; color:#64748b; margin-bottom:16px; font-style:italic;'>No leading hypothesis established from the available evidence. Auditor investigation is required.</p>";
+            html += "<p style='font-size:13px; color:#64748b; margin-bottom:16px; font-style:italic;'>No hypotheses established from available evidence. Auditor investigation is required.</p>";
         }
 
         if (candList.length) {
@@ -260,7 +317,8 @@
         // Risk of Recurrence Footer
         html += "<div style='display:flex; justify-content:space-between; align-items:center; background:#f8fafc; border:1px solid #e2e8f0; padding:12px 18px; border-radius:10px; font-size:13px;'>";
         html += "<div><span style='color:#64748b; font-weight:500;'>Risk of Recurrence:</span> <strong style='color:#d97706; font-weight:800; margin-left:4px;'>" + escapeHtml(rc.risk_of_recurrence || "NOT_ASSESSABLE") + "</strong></div>";
-        html += "<div><span style='color:#64748b; font-weight:500;'>Recommended CAPA Owner:</span> <strong style='color:#0f172a; font-weight:700; margin-left:4px;'>Auditor to Assign</strong></div>";
+        var capaOwnerText = (rc.status === "NOT_ESTABLISHED") ? "To be assigned after root-cause confirmation" : "Auditor to Assign";
+        html += "<div><span style='color:#64748b; font-weight:500;'>Recommended CAPA Owner:</span> <strong style='color:#0f172a; font-weight:700; margin-left:4px;'>" + escapeHtml(capaOwnerText) + "</strong></div>";
         html += "</div>";
         html += "</div>";
 
@@ -284,6 +342,13 @@
                     }
                     if (q.evidence && q.evidence !== 'not specified') {
                         html += "<div style='font-size:12px; color:#475569; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f1f5f9;'>↳ <strong style='font-weight:700; color:#334155;'>Evidence required:</strong> " + escapeHtml(q.evidence) + "</div>";
+                    }
+                    if (q.possible_outcomes && q.possible_outcomes.length) {
+                        html += "<div style='font-size:12px; color:#475569; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f1f5f9; margin-top:4px;'>↳ <strong style='font-weight:700; color:#334155;'>Possible outcomes:</strong><ul style='margin:4px 0 0 18px; padding:0;'>";
+                        q.possible_outcomes.forEach(function(o) {
+                            html += "<li style='margin-bottom:2px;'>" + escapeHtml(o) + "</li>";
+                        });
+                        html += "</ul></div>";
                     }
                 } else {
                     html += "<div style='font-weight:700; font-size:14px; color:#4c1d95;'>" + (idx + 1) + ". " + escapeHtml(q) + "</div>";
@@ -317,10 +382,10 @@
             html += "<div style='display:flex; flex-direction:column; gap:14px;'>";
             $.each(stepsToRender, function(i, step) {
                 var num = i + 1;
-                var stStatus = (num === 1) ? "VERIFIED" : (step.status || "UNKNOWN");
-                var badgeBg = (stStatus === "VERIFIED") ? "#dcfce7" : (stStatus === "REPORTED" ? "#fef3c7" : "#f1f5f9");
-                var badgeTxt = (stStatus === "VERIFIED") ? "#15803d" : (stStatus === "REPORTED" ? "#b45309" : "#475569");
-                var badgeBorder = (stStatus === "VERIFIED") ? "#bbf7d0" : (stStatus === "REPORTED" ? "#fde68a" : "#e2e8f0");
+                var stStatus = step.status || "UNKNOWN";
+                var badgeBg = (stStatus === "VERIFIED") ? "#dcfce7" : (stStatus.indexOf("REPORTED") !== -1 ? "#fef3c7" : (stStatus.indexOf("CONFLICT") !== -1 ? "#ffe4e6" : "#f1f5f9"));
+                var badgeTxt = (stStatus === "VERIFIED") ? "#15803d" : (stStatus.indexOf("REPORTED") !== -1 ? "#b45309" : (stStatus.indexOf("CONFLICT") !== -1 ? "#e11d48" : "#475569"));
+                var badgeBorder = (stStatus === "VERIFIED") ? "#bbf7d0" : (stStatus.indexOf("REPORTED") !== -1 ? "#fde68a" : (stStatus.indexOf("CONFLICT") !== -1 ? "#fecdd3" : "#e2e8f0"));
 
                 html += "<div style='display:flex; gap:16px; align-items:stretch;'>";
                 html += "<div style='display:flex; flex-direction:column; align-items:center;'>";
@@ -373,10 +438,15 @@
         }
         html += "</div></div>";
 
-        // Potential CAPA Scope
+        // Investigation Areas / Potential CAPA Scope -- while root cause is
+        // NOT_ESTABLISHED these are candidate areas to investigate, not
+        // confirmed causes, so the heading must not imply a cause has
+        // already been identified (Section 9).
+        var areasNotEstablished = (rc.status === "NOT_ESTABLISHED");
+        var areasHeading = areasNotEstablished ? "Investigation Areas — Cause Not Yet Established" : "Potential CAPA Scope";
         html += "<div class='col-sm-6' style='margin-bottom:20px;'><div style='background:linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%); border:1px solid #dcfce7; border-radius:16px; padding:20px 22px; height:100%; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.05);'>";
         html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid #dcfce7;'>";
-        html += "<h5 style='font-weight:800; color:#15803d; margin:0; font-size:16px; letter-spacing:-0.2px;'>Potential CAPA Scope</h5>";
+        html += "<h5 style='font-weight:800; color:#15803d; margin:0; font-size:16px; letter-spacing:-0.2px;'>" + areasHeading + "</h5>";
         html += "<span style='font-size:10px; font-weight:800; background:#dcfce7; color:#15803d; padding:4px 10px; border-radius:12px; border:1px solid #bbf7d0; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(capa.status || "INVESTIGATION_REQUIRED") + "</span>";
         html += "</div>";
 

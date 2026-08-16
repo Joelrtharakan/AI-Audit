@@ -285,3 +285,121 @@ async def test_understand_finding_node_does_not_regress_original_bug() -> None:
     assert "audit, it" not in affected.lower()
     assert "temperature log" in affected.lower()
     assert "qc-ref-02" in affected.lower()
+
+
+# ---------------------------------------------------------------------------
+# Upstream Semantic Validation Tests (Requirements 2, 3, 5, 6, 7, 8, 9, 22, 25)
+# ---------------------------------------------------------------------------
+
+def test_semantic_subject_rejects_clause():
+    from app.services.semantic_subject import reject_subject_if_clause, validate_semantic_subject
+
+    invalid_subjects = [
+        "they had not received training on the revised procedure",
+        "was not completed",
+        "operator stated they had not received training",
+        "the operator stated",
+        "the supervisor claimed that the training was completed",
+        "had been calibrated recently",
+        "procedure was not followed",
+        "certificate was unavailable",
+        "they were unaware that the procedure had been revised",
+        "temperature check was missed during the morning shift",
+    ]
+    for inv in invalid_subjects:
+        assert reject_subject_if_clause(inv), f"Expected clause rejection for: {inv!r}"
+        assert not validate_semantic_subject(inv), f"Expected validation failure for: {inv!r}"
+
+
+def test_semantic_subject_preserves_noun_phrase():
+    from app.services.semantic_subject import reject_subject_if_clause, validate_semantic_subject
+
+    valid_subjects = [
+        "temperature log",
+        "temperature log for refrigerator QC-REF-02",
+        "calibration status label",
+        "calibration status label for equipment EQ-104",
+        "daily equipment inspection checklist",
+        "training compliance for the revised procedure",
+        "training record / status",
+        "cleaning checklist for Room 102",
+        "autoclave cycle log",
+        "batch record BR-101",
+    ]
+    for valid in valid_subjects:
+        assert not reject_subject_if_clause(valid), f"Expected valid subject for: {valid!r}"
+        assert validate_semantic_subject(valid), f"Expected validation success for: {valid!r}"
+
+
+def test_reported_statement_not_subject():
+    from app.services.semantic_subject import resolve_deviation
+    finding = "The operator stated they had not received training on the revised procedure."
+    resolved = resolve_deviation(finding)
+    assert "they had not received" not in resolved.finding_subject.lower()
+    assert "operator stated" not in resolved.finding_subject.lower()
+    assert "training" in resolved.finding_subject.lower()
+    assert "procedure" in resolved.finding_subject.lower()
+
+
+def test_pronoun_clause_not_subject():
+    from app.services.semantic_subject import resolve_deviation
+    finding = "During audit, they had not completed the log."
+    resolved = resolve_deviation(finding)
+    assert not resolved.finding_subject.lower().startswith("they")
+
+
+def test_mechanism_not_subject():
+    from app.services.semantic_subject import resolve_deviation
+    finding = "The daily equipment inspection checklist was not completed because the operator stated they were unaware that the procedure had been revised."
+    resolved = resolve_deviation(finding)
+    assert "checklist" in resolved.finding_subject.lower()
+    assert "unaware" not in resolved.finding_subject.lower()
+
+
+def test_evidence_not_subject():
+    from app.services.semantic_subject import resolve_deviation
+    finding = "The calibration status label was missing from equipment EQ-104. The operator stated the calibration certificate was not available."
+    resolved = resolve_deviation(finding)
+    assert "label" in resolved.finding_subject.lower()
+    assert "certificate" not in resolved.finding_subject.lower()
+
+
+def test_critical_case_1_equipment_inspection_checklist():
+    """Case 1: Daily inspection checklist + unaware of procedure revision."""
+    from app.services.semantic_subject import resolve_deviation
+    finding = "The daily equipment inspection checklist was not completed for three consecutive days. The operator stated that they were unaware that the checklist procedure had been revised."
+    resolved = resolve_deviation(finding)
+    assert "checklist" in resolved.finding_subject.lower()
+    assert "inspection" in resolved.finding_subject.lower()
+    assert "unaware" not in resolved.finding_subject.lower()
+
+
+def test_critical_case_2_temperature_log_qc_ref_02():
+    """Case 2: Temperature log + QC-REF-02 + missed temperature check."""
+    from app.services.semantic_subject import resolve_deviation
+    finding = "During the internal audit, the temperature log for refrigerator QC-REF-02 was not completed for 12 August 2026. The responsible technician confirmed that the temperature check was missed during the morning shift."
+    resolved = resolve_deviation(finding)
+    assert "temperature log" in resolved.finding_subject.lower()
+    assert "qc-ref-02" in resolved.finding_subject.lower()
+    assert "morning shift" not in resolved.finding_subject.lower()
+
+
+def test_critical_case_3_calibration_status_label_eq_104():
+    """Case 3: Calibration status label + EQ-104."""
+    from app.services.semantic_subject import resolve_deviation
+    finding = "The auditor observed that the calibration status label was missing from equipment EQ-104. The operator stated that the equipment had been calibrated recently, but the calibration certificate was not available during the audit."
+    resolved = resolve_deviation(finding)
+    assert "label" in resolved.finding_subject.lower()
+    assert "eq-104" in resolved.finding_subject.lower()
+    assert "calibrated recently" not in resolved.finding_subject.lower()
+
+
+def test_critical_case_4_training_conflict_revised_procedure():
+    """Case 4: Training conflict on revised procedure."""
+    from app.services.semantic_subject import resolve_deviation
+    finding = "The operator stated they had not received training on the revised procedure, but the supervisor stated that the training had been completed."
+    resolved = resolve_deviation(finding)
+    assert "they had not received" not in resolved.finding_subject.lower()
+    assert "training" in resolved.finding_subject.lower()
+    assert "procedure" in resolved.finding_subject.lower()
+

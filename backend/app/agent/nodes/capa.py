@@ -1,7 +1,8 @@
-"""Node 7: capa_analysis
+"""LEGACY NODE — NOT PART OF LIVE GRAPH.
+This module exists only for isolated unit-test guard checks.
+core_synthesis_node is the SOLE authoritative synthesis path.
 
-Determines CAPA status based on root cause and evidence.
-Enforces the strict status rules in code — LLM cannot override them.
+Node 7: capa_analysis (Legacy)
 """
 
 from __future__ import annotations

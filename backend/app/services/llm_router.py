@@ -206,6 +206,7 @@ class LLMRouter:
         temperature: float = 0.2,
         response_format_json: bool = False,
         max_tokens: int | None = None,
+        num_ctx: int | None = None,
     ) -> str:
         from app.config import get_settings
 
@@ -221,6 +222,7 @@ class LLMRouter:
                     temperature=temperature,
                     response_format_json=response_format_json,
                     max_tokens=max_tokens,
+                    num_ctx=num_ctx,
                 )
                 _last_call_metadata.set({
                     "provider_used": "ollama",
@@ -236,6 +238,7 @@ class LLMRouter:
                         temperature=temperature,
                         response_format_json=response_format_json,
                         max_tokens=max_tokens,
+                        num_ctx=num_ctx,
                     )
                     _last_call_metadata.set({
                         "provider_used": "ollama",

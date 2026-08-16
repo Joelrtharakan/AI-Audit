@@ -13,12 +13,55 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
-    ollama_timeout_seconds: float = 60.0
-    ollama_keep_alive: str = "5m"
-    ollama_num_ctx: int = 4096
+    ollama_timeout_seconds: float = 25.0
+    # 10 minutes so the model stays resident across the extraction ->
+    # core_synthesis -> critic sequence of a single investigation (and across
+    # back-to-back investigations) instead of being evicted and reloaded --
+    # a reload shows up as a large `load_ms` on the very next call.
+    ollama_keep_alive: str = "10m"
+    # qwen3:8b supports up to 40960 natively; 8192 comfortably covers a
+    # typical finding + evidence ledger + full core_synthesis output with
+    # headroom, without paying for a much larger KV cache than needed. This
+    # remains the default/fallback context; per-call overrides below use a
+    # smaller window for the lighter-weight nodes (extraction, critic) so
+    # prompt evaluation isn't paying for KV cache it never uses.
+    ollama_num_ctx: int = 8192
     ollama_temperature: float = 0.1
     ollama_thinking: bool = False
     ollama_max_retries: int = 1
+
+    # Operation-specific timeouts. A single global timeout meant a slow but
+    # non-critical call (extraction, critic) could eat the same budget as
+    # the primary synthesis call the whole investigation depends on.
+    #
+    # Generation throughput on this deployment's qwen3:8b (CPU) is ~20-24
+    # tokens/sec regardless of context size, so latency scales almost
+    # entirely with how much output is requested -- NOT with a larger
+    # ceiling. The schema/prompt were made deliberately compact (1-sentence
+    # fields, no narrative outside JSON) so a normal core_synthesis response
+    # is ~300-700 tokens; the 1400-token ceiling below is a safety margin,
+    # not a target, and should rarely be reached by a well-formed response.
+    ollama_extraction_timeout_seconds: float = 12.0
+    ollama_extraction_max_tokens: int = 350
+    # Extraction's schema/prompt is small and self-contained -- it never
+    # needs the full 8192-token synthesis window.
+    ollama_extraction_num_ctx: int = 4096
+    ollama_primary_synthesis_timeout_seconds: float = 25.0
+    # Compact-schema ceiling (Section 1 fix): large enough for the full
+    # core_synthesis JSON object (root cause, hypotheses, 5-Why, contributing
+    # factors, CAPA, impact) at the prompt's 1-sentence-per-field discipline,
+    # without inviting the model to fill unused budget with prose.
+    ollama_core_synthesis_max_tokens: int = 1400
+    ollama_recovery_synthesis_timeout_seconds: float = 15.0
+    # Recovery is causal-reasoning fields only (no impact/CAPA) -- 900 tokens
+    # is comfortably above the ~400-550 tokens that schema measures at, while
+    # still being a materially smaller ceiling than the primary call's.
+    ollama_recovery_max_tokens: int = 900
+    ollama_critic_timeout_seconds: float = 10.0
+    # The critic returns a handful of structured validation fields, not
+    # prose -- 250 tokens is generous headroom over its typical ~60-100.
+    ollama_critic_max_tokens: int = 250
+    ollama_critic_num_ctx: int = 4096
 
     # Optional provider timeouts (for fallback router tests)
     groq_timeout_seconds: float = 15.0

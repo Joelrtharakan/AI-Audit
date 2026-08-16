@@ -1,0 +1,61 @@
+RECOVERY MODE: the primary full-schema synthesis call did not produce usable output. Produce ONLY the
+causal reasoning fields below -- do not attempt impact, CAPA, or CA-draft fields, they are not requested
+here (they are derived deterministically downstream).
+
+CANONICAL CASE STATE (already extracted deterministically -- treat as ground truth, do not re-derive,
+do not repeat the finding text back):
+  Finding subject / observed deviation: {observed_deviation}
+  Immediate mechanism (HOW it happened, if the finding states one): {immediate_mechanism}
+  Immediate mechanism status: {immediate_mechanism_status}
+  Evidence claims (trimmed to the most relevant items): {evidence_ledger_json}
+  Finding (context only, for wording): {finding_text}
+
+OUTPUT DISCIPLINE: Return ONLY one valid JSON object — no markdown fences, no prose, no commentary
+outside it. Every field capped at ONE concise sentence (roughly 15-20 words). Provide exactly 2
+candidate hypotheses, not more. Name the subject once; refer to it briefly afterward instead of
+repeating the full subject phrase in every field.
+
+RULES (condensed from the full synthesis contract -- same evidence discipline applies):
+- If evidence does not establish a root cause, status="NOT_ESTABLISHED", statement=null,
+  category="TO_BE_CONFIRMED". This is a normal, successful outcome, not a failure.
+- leading_hypothesis must be set (id + statement of the best-evidenced hypothesis) whenever
+  candidate_hypotheses is non-empty.
+- Each hypothesis must use only this finding's own entities -- no invented actors, domains, or
+  documents. status: POSSIBLE by default, SUPPORTED only if a ledger item directly confirms it.
+- 5-Why: 1-2 steps only. WHY 1's answer should be the established mechanism if one is given above.
+  STOP at the evidence boundary with "UNKNOWN" rather than fabricating depth.
+- contributing_factors: 0-1 entries, only if genuinely supported by the finding; empty array is a
+  correct and expected result.
+
+Respond with valid JSON only:
+{{
+  "root_cause": {{
+    "status": "NOT_ESTABLISHED",
+    "category": "TO_BE_CONFIRMED",
+    "statement": null,
+    "leading_hypothesis": null,
+    "candidate_hypotheses": [
+      {{
+        "id": "H1",
+        "name": "CATEGORY_NAME",
+        "statement": "Plausible statement derived only from finding",
+        "rationale": "Why this finding's own facts make this plausible",
+        "status": "POSSIBLE or SUPPORTED",
+        "evidence_needed": "Specific record to confirm",
+        "confirms_if": "The specific result that would confirm this hypothesis",
+        "refutes_if": "The specific result that would refute this hypothesis"
+      }}
+    ],
+    "narrative": "1-2 sentences: mechanism if any, open causal question, discriminating evidence."
+  }},
+  "five_why": {{
+    "steps": [
+      {{"level": 1, "question": "Why was <deviation> the case?", "answer": "Established mechanism or verified fact", "status": "VERIFIED or SUPPORTED", "evidence_reference": "Finding text or ledger item"}}
+    ],
+    "is_complete": false,
+    "status_note": "5-Why stopped at evidence boundary"
+  }},
+  "contributing_factors": [
+    {{"description": "A condition plausibly supported by this finding", "rationale": "Why", "evidence_status": "INFERRED|REPORTED|VERIFIED", "status": "POSSIBLE_UNCONFIRMED|VERIFIED", "evidence_required": "What would confirm this"}}
+  ]
+}}

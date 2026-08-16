@@ -23,6 +23,8 @@ from app.models.agent import (
     CanonicalFindingState,
     CapaAnalysis,
     ContributingFactor,
+    EvidenceClaim,
+    EvidenceConflict,
     EvidenceGap,
     EvidenceItem,
     FiveWhyAnalysis,
@@ -105,6 +107,13 @@ class AgentState(TypedDict, total=False):
     critic_approved: bool
     critic_feedback: str | None
     critic_send_back: bool           # True → critic wants more investigation
+    # "SKIPPED" (deterministic pre-gate found nothing to check — 0ms fast
+    # path), "OK" (LLM critic ran and returned a usable result), or
+    # "UNAVAILABLE" (LLM critic call failed/timed out). The critic is a
+    # secondary quality check, not the primary source of truth — its own
+    # unavailability must never demote a valid core_synthesis result to
+    # DEGRADED/DETERMINISTIC. See app/agent/nodes/critic.py.
+    critic_status: str
 
     # ------------------------------------------------------------------
     # Final outputs

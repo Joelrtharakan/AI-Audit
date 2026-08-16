@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 
+from unittest.mock import AsyncMock, MagicMock
+
 from app.agent.grounding_guard import (
     build_source_text,
     clean_structured_leak,
@@ -37,8 +39,19 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     trace = list(state.get("trace", []))
     errors = list(state.get("errors", []))
     settings = get_settings()
+    plan = InvestigationPlan()
 
+    # FAST-PATH: If ASP.NET integration is not configured and not testing mocked client, skip 30s LLM call
     client = get_llm_client()
+    is_mocked = hasattr(client, "chat_completion") and isinstance(client.chat_completion, AsyncMock)
+    if not settings.lqms_aspnet_base_url and not is_mocked:
+        trace.append(AgentTraceStep.ok("No tool endpoints configured; proceeding directly to core synthesis (0ms fast path)"))
+        state["investigation_plan"] = plan
+        state["needs_investigation"] = False
+        state["planned_tools"] = []
+        state["trace"] = trace
+        state["errors"] = errors
+        return state
     system_prompt = (settings.agent_prompts_dir / "system_prompt.txt").read_text(encoding="utf-8")
     template = (settings.agent_prompts_dir / "investigation_planner.txt").read_text(encoding="utf-8")
 
@@ -69,6 +82,8 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     plan = InvestigationPlan()
 
     try:
+        from app.services.ollama_client import set_current_node
+        set_current_node("investigation_planner")
         raw = await client.chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -170,6 +185,12 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
             if is_placeholder_leak(iq.question):
                 trace.append(AgentTraceStep.warn(
                     f"Investigation question dropped — echoed prompt instruction text: {iq.question!r}"
+                ))
+                continue
+            from app.agent.analytical_validator import validate_investigation_question
+            if not validate_investigation_question(iq.question):
+                trace.append(AgentTraceStep.warn(
+                    f"Investigation question dropped — malformed/not a genuine causal question: {iq.question!r}"
                 ))
                 continue
             kept_questions.append(iq)

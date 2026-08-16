@@ -17,12 +17,17 @@ from app.agent.analytical_validator import (
     compute_analytical_quality,
     compute_impact_field_basis,
     conditional_action_has_causal_linkage,
+    derive_investigation_questions,
     five_why_skips_available_mechanism,
+    hypothesis_confidence,
     leading_hypothesis_confidence,
+    leading_hypothesis_display,
+    leading_hypothesis_status,
     repair_five_why_with_mechanism,
     select_leading_hypothesis,
     validate_capa_causal_linkage,
     validate_causal_graph,
+    validate_investigation_question,
     validate_root_cause_state,
 )
 from app.agent.causal_guard import MechanismInfo
@@ -92,6 +97,70 @@ def test_leading_hypothesis_confidence_levels():
     hyps2 = [_hyp("H1", status="POSSIBLE")]
     assert leading_hypothesis_confidence(hyps2, "H1 — x") == "LOW"
     assert leading_hypothesis_confidence([], None) == "LOW"
+
+
+# ---------------------------------------------------------------------------
+# leading_hypothesis_status / leading_hypothesis_display
+#
+# The bug these close: select_leading_hypothesis returning None for BOTH
+# "no hypotheses" and "genuinely tied hypotheses" meant a report couldn't
+# tell those apart -- both rendered as a blank/"no leading hypothesis"
+# field, which reads as a weak/empty analysis even when the LLM actually
+# produced two well-reasoned, evenly-matched hypotheses (Class C).
+# ---------------------------------------------------------------------------
+
+
+def test_leading_hypothesis_status_none_when_no_hypotheses():
+    assert leading_hypothesis_status([]) == "NONE"
+    assert leading_hypothesis_display([]) is None
+
+
+def test_leading_hypothesis_status_selected_when_single_supported():
+    hyps = [_hyp("H1", status="SUPPORTED"), _hyp("H2", status="POSSIBLE", rank="LOW")]
+    assert leading_hypothesis_status(hyps) == "SELECTED"
+    assert leading_hypothesis_display(hyps).startswith("H1")
+
+
+def test_leading_hypothesis_status_tied_is_not_none_display():
+    """Class C: two hypotheses tied at the same rank must render as an
+    explicit TIED result, not disappear into the same blank the empty-list
+    case produces."""
+    hyps = [_hyp("H1", status="POSSIBLE", rank="HIGH"), _hyp("H2", status="POSSIBLE", rank="HIGH")]
+    assert leading_hypothesis_status(hyps) == "TIED"
+    assert select_leading_hypothesis(hyps) is None  # unchanged contract
+    assert leading_hypothesis_display(hyps) == "NONE — COMPETING HYPOTHESES REMAIN TIED"
+
+
+def test_leading_hypothesis_status_none_when_all_refuted():
+    hyps = [_hyp("H1", status="REFUTED"), _hyp("H2", status="REFUTED")]
+    assert leading_hypothesis_status(hyps) == "NONE"
+    assert leading_hypothesis_display(hyps) is None
+
+
+# ---------------------------------------------------------------------------
+# hypothesis_confidence
+# ---------------------------------------------------------------------------
+
+
+def test_hypothesis_confidence_supported_high_rank_is_high():
+    h = _hyp("H1", status="SUPPORTED", rank="HIGH")
+    assert hypothesis_confidence(h) == "HIGH"
+
+
+def test_hypothesis_confidence_supported_lower_rank_is_medium():
+    h = _hyp("H1", status="SUPPORTED", rank="MEDIUM")
+    assert hypothesis_confidence(h) == "MEDIUM"
+
+
+def test_hypothesis_confidence_possible_without_discrimination_is_low():
+    h = _hyp("H1", status="POSSIBLE", rank="HIGH")
+    assert hypothesis_confidence(h) == "LOW"
+
+
+def test_hypothesis_confidence_possible_high_rank_with_discrimination_is_medium():
+    h = _hyp("H1", status="POSSIBLE", rank="HIGH")
+    h.discrimination_evidence = "The calibration certificate would confirm or refute this."
+    assert hypothesis_confidence(h) == "MEDIUM"
 
 
 # ---------------------------------------------------------------------------
@@ -407,3 +476,77 @@ def test_causal_graph_audit_clean_state_no_violations():
     )
     violations = validate_causal_graph(rc, FiveWhyAnalysis(), capa, MechanismInfo())
     assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# derive_investigation_questions
+#
+# Closes the "investigation questions are empty even though hypotheses
+# exist" bug: plan_investigation runs BEFORE core_synthesis produces
+# hypotheses (and is usually fast-pathed to an empty plan in this
+# deployment), so questions must be derivable from the hypotheses
+# afterward, not only authored by the earlier planning step.
+# ---------------------------------------------------------------------------
+
+
+def test_derive_investigation_questions_one_per_live_hypothesis():
+    hyps = [
+        _hyp("H1", statement="The required post-calibration labeling step may not have been completed."),
+        _hyp("H2", statement="Calibration record retrieval may have failed.", status="REFUTED"),
+        _hyp("H3", statement="The label may have been removed after application."),
+    ]
+    hyps[0].evidence_needed = "Calibration completion and label application records"
+    hyps[2].evidence_needed = "Equipment history and prior inspection records"
+
+    questions = derive_investigation_questions(hyps)
+
+    # REFUTED hypotheses don't need further discrimination.
+    assert len(questions) == 2
+    assert all(q.evidence for q in questions)
+    assert any("labeling step" in q.question for q in questions)
+
+
+def test_derive_investigation_questions_empty_when_no_hypotheses():
+    assert derive_investigation_questions([]) == []
+
+
+def test_derive_investigation_questions_are_grammatical_not_concatenated():
+    """The exact regression from live output: "Does <evidence>. confirm or
+    refute: <hypothesis>" is not a real question -- it's evidence text and
+    hypothesis text glued together. The generated question must be a
+    standalone, grammatically complete sentence that never contains that
+    concatenation shape."""
+    hyps = [_hyp("H1", statement="The calibration label was not applied due to human oversight or error.")]
+    hyps[0].evidence_needed = "Record of label application or audit trail for EQ-104."
+
+    questions = derive_investigation_questions(hyps)
+
+    assert len(questions) == 1
+    q = questions[0].question
+    assert q.endswith("?")
+    assert "confirm or refute" not in q.lower()
+    assert not q.startswith("Does " + hyps[0].evidence_needed)
+
+
+# ---------------------------------------------------------------------------
+# validate_investigation_question
+# ---------------------------------------------------------------------------
+
+
+def test_validate_investigation_question_rejects_concatenation_pattern():
+    assert not validate_investigation_question(
+        "Does Record of label application or audit trail for EQ-104. confirm or refute: "
+        "The calibration label was not applied due to human oversight or error."
+    )
+
+
+def test_validate_investigation_question_rejects_non_question():
+    assert not validate_investigation_question("Review the relevant records.")
+    assert not validate_investigation_question(None)
+    assert not validate_investigation_question("Why?")
+
+
+def test_validate_investigation_question_accepts_well_formed_question():
+    assert validate_investigation_question(
+        "Was the required equipment-status label applied after the calibration event?"
+    )

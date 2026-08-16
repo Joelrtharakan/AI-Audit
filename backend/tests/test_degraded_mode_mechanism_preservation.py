@@ -86,7 +86,12 @@ async def test_reported_mechanism_survives_total_llm_outage(finding_text):
         result = await graph.ainvoke(_build_initial_state(finding_text))
 
     report = result["report"]
-    assert report.analysis_mode == "DEGRADED"
+    # Total LLM outage with a complete, evidence-grounded deterministic
+    # result is analysis_mode="DETERMINISTIC", not "DEGRADED" — DEGRADED is
+    # reserved for when the deterministic engine ALSO fails to produce a
+    # safe result (see app/agent/nodes/core_synthesis.py _classify_failure /
+    # the DETERMINISTIC-vs-DEGRADED contract).
+    assert report.analysis_mode == "DETERMINISTIC"
     assert report.root_cause.status == "NOT_ESTABLISHED"
 
     five_why = report.five_why

@@ -1,7 +1,8 @@
-"""Node 6: impact_assessment
+"""LEGACY NODE — NOT PART OF LIVE GRAPH.
+This module exists only for isolated unit-test guard checks.
+core_synthesis_node is the SOLE authoritative synthesis path.
 
-Assesses what is known and unknown about impact based on evidence.
-Prevents recall/quarantine language without external impact evidence.
+Node 6: impact_assessment (Legacy)
 """
 
 from __future__ import annotations

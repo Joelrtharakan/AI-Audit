@@ -66,7 +66,8 @@ SAFE_ROOT_CAUSE_FALLBACK = (
 _DOMAIN_TRIGGER_STEMS = (
     "train", "authoriz", "competenc", "communicat", "supervis", "workload",
     "policy", "sop", "procedure", "management", "careless", "human error",
-    "resource", "staffing", "maintenance"
+    "resource", "staffing", "maintenance", "vendor", "supplier", "billing",
+    "contract", "auditor"
 )
 
 

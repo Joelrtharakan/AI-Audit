@@ -46,16 +46,21 @@ def _ungrounded_phrases(parsed: dict, finding_text: str) -> list[str]:
 
 
 def _to_extraction_result(parsed: dict) -> ExtractionResult:
-    statements = [
-        AttributedStatement(speaker=str(s.get("speaker", "")), claim=str(s.get("claim", "")))
-        for s in parsed.get("attributed_statements", [])
-        if isinstance(s, dict) and s.get("claim")
-    ]
+    statements: list[AttributedStatement] = []
+    for s in parsed.get("attributed_statements", []):
+        if isinstance(s, dict):
+            claim = str(s.get("claim") or s.get("statement") or "").strip()
+            if claim:
+                speaker = str(s.get("speaker") or "").strip()
+                statements.append(AttributedStatement(speaker=speaker, claim=claim))
+        elif isinstance(s, str) and s.strip():
+            statements.append(AttributedStatement(speaker="", claim=s.strip()))
+
     return ExtractionResult(
-        stated_facts=[str(x) for x in parsed.get("stated_facts", [])],
+        stated_facts=[str(x).strip() for x in parsed.get("stated_facts", []) if str(x).strip()],
         attributed_statements=statements,
-        referenced_records=[str(x) for x in parsed.get("referenced_records", [])],
-        named_systems_or_documents=[str(x) for x in parsed.get("named_systems_or_documents", [])],
+        referenced_records=[str(x).strip() for x in parsed.get("referenced_records", []) if str(x).strip()],
+        named_systems_or_documents=[str(x).strip() for x in parsed.get("named_systems_or_documents", []) if str(x).strip()],
         timeframe=parsed.get("timeframe") or None,
         asset_or_location=parsed.get("asset_or_location") or None,
         external_impact_stated=bool(parsed.get("external_impact_stated", False)),
@@ -75,7 +80,15 @@ async def extract_finding(finding_text: str, client: LLMClient | None = None) ->
 
     async def _attempt(msgs: list[dict[str, str]], temperature: float) -> dict | None:
         try:
-            raw = await client.chat_completion(msgs, temperature=temperature, response_format_json=True)
+            from app.services.ollama_client import set_current_node
+            set_current_node("extraction")
+            raw = await client.chat_completion(
+                msgs,
+                temperature=temperature,
+                response_format_json=True,
+                max_tokens=settings.ollama_extraction_max_tokens,
+                num_ctx=settings.ollama_extraction_num_ctx,
+            )
             parsed = parse_llm_json(raw)
         except Exception as exc:
             # Broad catch: any provider failure (timeout, 429, malformed
@@ -94,19 +107,4 @@ async def extract_finding(finding_text: str, client: LLMClient | None = None) ->
     if parsed is not None:
         return _to_extraction_result(parsed)
 
-    stricter_messages = messages + [
-        {
-            "role": "user",
-            "content": (
-                "Your previous response either was invalid JSON or included content not "
-                "explicitly present in the OBSERVATION text. Extract ONLY words, phrases, "
-                "and claims that literally appear (or are very close paraphrases of "
-                "wording that appears) in the OBSERVATION. Return ONLY the JSON object."
-            ),
-        }
-    ]
-    parsed = await _attempt(stricter_messages, temperature=0.0)
-    if parsed is not None:
-        return _to_extraction_result(parsed)
-
-    raise LLMError("Extraction failed after retry: LLM call failed or introduced ungrounded content.")
+    raise LLMError("Extraction failed: LLM call timed out or introduced ungrounded content.")

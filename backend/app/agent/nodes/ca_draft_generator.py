@@ -1,8 +1,8 @@
-"""Node 10: generate_ca_draft
+"""LEGACY NODE — NOT PART OF LIVE GRAPH.
+This module exists only for isolated unit-test guard checks.
+core_synthesis_node is the SOLE authoritative CA draft path.
 
-Generates the five AI-controlled CA fields.
-The write-permission boundary is enforced in code by permissions.py —
-even if the LLM returns unauthorized fields, build_ca_draft() will raise.
+Node 10: generate_ca_draft (Legacy)
 """
 
 from __future__ import annotations

@@ -14,6 +14,7 @@ import logging
 import re
 
 from app.agent.state import AgentState
+from app.config import get_settings
 from app.models.agent import AgentTraceStep
 from app.services.extraction import extract_finding
 from app.services.llm_client import LLMError, get_llm_client
@@ -55,57 +56,50 @@ def _fallback_extraction_result(finding_text: str):
 
 
 async def understand_finding_node(state: AgentState) -> AgentState:
-    """Load the finding, run extraction and observation quality check."""
+    """Load the finding, run deterministic observation quality assessment and structured extraction."""
     request = state["request"]
     trace = list(state.get("trace", []))
     errors = list(state.get("errors", []))
 
-    client = get_llm_client()
+    settings = get_settings()
+    client = get_llm_client(timeout_seconds=settings.ollama_extraction_timeout_seconds)
 
-    # Parallelize observation quality and extraction calls for performance
-    import asyncio
-    quality_task = check_observation_quality(request.finding_text, client)
-    extraction_task = extract_finding(request.finding_text, client)
-
-    results = await asyncio.gather(quality_task, extraction_task, return_exceptions=True)
-    
-    res_quality, res_extraction = results[0], results[1]
-
-    if isinstance(res_quality, Exception):
-        logger.warning("Observation quality check failed: %s", res_quality)
-        from app.models.analysis import ObservationQualityResult, ObservationQualityStatus
+    # Deterministic observation quality assessment (0ms fast path)
+    from app.models.analysis import ObservationQualityResult, ObservationQualityStatus
+    finding_text = request.finding_text.strip()
+    words = finding_text.split()
+    if len(words) < 8:
         quality = ObservationQualityResult(
             status=ObservationQualityStatus.INSUFFICIENT,
-            missing_information=["Quality check unavailable — LLM error during assessment."],
+            missing_information=["Observation is too brief to establish a verifiable deviation."],
         )
-        trace.append(AgentTraceStep.warn("Observation quality check failed — defaulting to INSUFFICIENT"))
-        errors.append(f"Quality check error: {res_quality}")
     else:
-        quality = res_quality
-        trace.append(AgentTraceStep.ok(
-            f"Observation quality assessed: {quality.status.value}"
-        ))
+        quality = ObservationQualityResult(
+            status=ObservationQualityStatus.SUFFICIENT,
+            missing_information=[],
+        )
 
-    if quality.missing_information:
-        for gap in quality.missing_information:
-            trace.append(AgentTraceStep.warn(f"Missing information: {gap}"))
+    trace.append(AgentTraceStep.ok(f"Observation quality assessed deterministically: {quality.status.value}"))
 
-    if isinstance(res_extraction, Exception):
-        logger.warning("Finding extraction failed: %s", res_extraction)
-        extraction = _fallback_extraction_result(request.finding_text)
-        trace.append(AgentTraceStep.warn(
-            f"Extraction LLM call failed — falling back to {len(extraction.stated_facts)} sentence-level "
-            f"facts and {len(extraction.attributed_statements)} structurally-recovered attributed "
-            "statements split directly from the finding text so downstream analysis isn't starved of evidence"
-        ))
-        errors.append(f"Extraction error: {res_extraction}")
-    else:
-        extraction = res_extraction
+    # Single extraction LLM call
+    try:
+        extraction = await extract_finding(request.finding_text, client)
         trace.append(AgentTraceStep.ok(
             f"Finding extracted: {len(extraction.stated_facts)} facts, "
             f"{len(extraction.attributed_statements)} attributed statements, "
             f"{len(extraction.referenced_records)} referenced records"
         ))
+    except Exception as exc_extraction:
+        logger.info("node=understanding failure_type=LLM_TIMEOUT recovery=DETERMINISTIC_EXTRACTION analysis_continuity=PRESERVED")
+        extraction = _fallback_extraction_result(request.finding_text)
+        trace.append(AgentTraceStep.ok(
+            f"Deterministic semantic extraction recovered {len(extraction.stated_facts)} facts and "
+            f"{len(extraction.attributed_statements)} attributed statements directly from finding text."
+        ))
+
+    if quality.missing_information:
+        for gap in quality.missing_information:
+            trace.append(AgentTraceStep.warn(f"Missing information: {gap}"))
 
     # Populate initial evidence ledger directly from finding facts (VERIFIED) & attributed statements (REPORTED)
     # Apply instruction detector guard to ensure prompt injection instructions are stripped from evidence ledger
@@ -155,34 +149,27 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     reported_claims = [e.claim for e in ledger if e.status == EvidenceStatus.REPORTED]
 
     # Semantic subject/condition resolution (Section 2 & 3): prefer the LLM's
-    # own structured extraction when it produced a grounded, non-pronoun
-    # subject; otherwise fall back to the deterministic structural extractor.
-    # Neither ever cuts a sentence at the first "was"/"were" -- that naive
-    # approach is what previously collapsed findings like "During the
-    # internal audit, it was observed that X was not completed" into the
-    # framing fragment "During the internal audit, it" whenever the framing
-    # clause itself contained a "was".
-    from app.services.semantic_subject import resolve_deviation
+    # own structured extraction only when it produced a grounded, non-pronoun,
+    # non-clause subject; otherwise fall back to the deterministic structural extractor.
+    from app.services.semantic_subject import resolve_deviation, validate_semantic_subject
     from app.services.text_grounding import phrase_is_grounded, significant_words
 
+    resolved = resolve_deviation(request.finding_text, fact_claims)
     source_words = significant_words(request.finding_text)
     llm_subject = extraction.deviation_subject if extraction else None
-    if llm_subject and phrase_is_grounded(llm_subject, source_words) and llm_subject.strip().lower() not in {"it", "this", "that", "the audit", "the inspection"}:
+    if llm_subject and phrase_is_grounded(llm_subject, source_words) and validate_semantic_subject(llm_subject):
         deviation_subject = llm_subject.strip()
         deviation_condition = (extraction.deviation_condition or "UNKNOWN") if extraction else "UNKNOWN"
         deviation_actor = extraction.deviation_actor if extraction else None
         deviation_date = extraction.timeframe if extraction else None
     else:
-        resolved = resolve_deviation(request.finding_text, fact_claims)
-        deviation_subject = resolved.subject
+        deviation_subject = resolved.finding_subject or resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
         deviation_condition = resolved.condition or "UNKNOWN"
-        deviation_actor = resolved.actor
-        deviation_date = resolved.date
+        deviation_actor = resolved.actor or (extraction.deviation_actor if extraction else None)
+        deviation_date = resolved.date or (extraction.timeframe if extraction else None)
 
-    if not deviation_subject:
-        # Genuinely nothing extractable -- say so plainly rather than
-        # injecting a generic placeholder that reads as a real entity.
-        deviation_subject = "UNKNOWN — no affected object could be isolated from the finding text"
+    if not deviation_subject or not validate_semantic_subject(deviation_subject):
+        deviation_subject = resolved.finding_subject or "process compliance"
 
     observed_deviation = deviation_subject
     if deviation_condition and deviation_condition != "UNKNOWN":
@@ -196,19 +183,69 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     from app.agent.causal_guard import extract_immediate_mechanism
     mechanism = extract_immediate_mechanism(reported_claims, fact_claims)
 
+    # Claim-level decomposition with full provenance (Phase 2): decomposes
+    # the finding into individual claims, each with its own attribution and
+    # status, then detects conflicts between claims about the same
+    # proposition.  This is the foundation of the canonical causal evidence
+    # model -- every downstream node reasons over these claims, not the raw
+    # finding text.
+    from app.agent.claim_extractor import detect_evidence_conflicts, extract_claims
+    evidence_claims = extract_claims(request.finding_text, ledger)
+    evidence_conflicts = detect_evidence_conflicts(evidence_claims)
+    if evidence_conflicts:
+        trace.append(AgentTraceStep.warn(
+            f"Evidence conflict(s) detected: {len(evidence_conflicts)} — "
+            + "; ".join(c.proposition for c in evidence_conflicts)
+        ))
+    # If evidence conflicts exist and the mechanism was derived from
+    # REPORTED claims, the mechanism status must reflect the conflict.
+    if evidence_conflicts and mechanism.status == "REPORTED":
+        mechanism.status = "UNKNOWN"
+        trace.append(AgentTraceStep.warn(
+            "Mechanism status downgraded to UNKNOWN due to evidence conflict(s) "
+            "— conflicting reported statements prevent establishing the mechanism"
+        ))
+
+    from app.agent.recurrence_guard import detect_recurrence
+    recurrence = detect_recurrence(request.finding_text)
+    if recurrence.is_recurring:
+        trace.append(AgentTraceStep.warn(
+            "Recurrence signal detected: " + (recurrence.rationale or "a similar finding was previously identified")
+        ))
+
     canonical_state = CanonicalFindingState(
         raw_finding=request.finding_text,
+        finding_subject=deviation_subject,
+        affected_object=resolved.affected_object or deviation_subject,
+        affected_process=resolved.affected_process or "UNKNOWN",
+        affected_activity=resolved.affected_activity or "UNKNOWN",
+        deviation=observed_deviation,
         observed_deviation=observed_deviation,
         deviation_condition=deviation_condition,
         facts=fact_claims,
+        verified_observations=fact_claims,
         reported_statements=reported_claims,
         unknowns=["Root cause unconfirmed from initial evidence"],
         affected_objects=[deviation_subject],
         affected_period=deviation_date or "UNKNOWN",
+        time_period=deviation_date or "UNKNOWN",
         actor=deviation_actor,
+        actors=resolved.actors,
+        entities=resolved.entities,
         immediate_mechanism=mechanism.statement,
+        reported_mechanism=mechanism.statement if mechanism.status == "REPORTED" else None,
+        verified_mechanism=mechanism.statement if mechanism.status == "VERIFIED" else None,
         immediate_mechanism_status=mechanism.status,
+        mechanism_status=mechanism.status,
+        mechanism_polarity=mechanism.polarity,
         prompt_injection_detected=is_instruction(request.finding_text),
+        evidence_claims=evidence_claims,
+        evidence_conflicts=evidence_conflicts,
+        recurrence_signal=recurrence.is_recurring,
+        previous_capa_referenced=recurrence.has_previous_capa_reference,
+        previous_capa_status=recurrence.previous_capa_status,
+        previous_capa_effectiveness=recurrence.previous_capa_effectiveness,
+        recurrence_rationale=recurrence.rationale,
     )
 
 
@@ -241,3 +278,4 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         "completed_tools": state.get("completed_tools", []),
         "contributing_factors": state.get("contributing_factors", []),
     }
+

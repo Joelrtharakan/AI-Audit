@@ -13,9 +13,13 @@ import pytest
 
 from app.agent.causal_guard import (
     MechanismInfo,
+    answer_asserts_verified_but_is_reported,
+    classify_mixed_evidence_answer,
     extract_immediate_mechanism,
     hypothesis_contradicts_mechanism,
+    hypothesis_overclaims_human_error,
     is_circular_why_answer,
+    is_evidence_gap_not_hypothesis,
     is_generic_non_analysis_filler,
     is_reporting_why_question,
     mechanism_already_names_generic_hypothesis,
@@ -361,3 +365,147 @@ def test_verified_facts_never_get_general_catchall():
     mechanism = extract_immediate_mechanism([], ["the log was incomplete for the stated period"])
     assert mechanism.status == "UNKNOWN"
     assert mechanism.statement is None
+
+
+# ---------------------------------------------------------------------------
+# is_evidence_gap_not_hypothesis
+#
+# The exact bug this closes: "Calibration certificate not available" was
+# being accepted as a candidate root-cause hypothesis when it's really just
+# a restated evidence gap already present in the finding text -- not a
+# proposed explanation for WHY the deviation occurred. Generic, no domain
+# words hardcoded: the same test applied to an unrelated domain below.
+# ---------------------------------------------------------------------------
+
+_CALIBRATION_FINDING_SOURCE = (
+    "the auditor observed that the calibration status label was missing from equipment eq-104 "
+    "the operator stated that the equipment had been calibrated recently but the calibration "
+    "certificate was not available during the audit"
+)
+
+
+def test_evidence_gap_restatement_is_rejected():
+    assert is_evidence_gap_not_hypothesis(
+        "Calibration certificate not available", _CALIBRATION_FINDING_SOURCE
+    )
+    assert is_evidence_gap_not_hypothesis(
+        "The calibration certificate was not available during the audit.", _CALIBRATION_FINDING_SOURCE
+    )
+
+
+def test_genuine_causal_hypothesis_is_not_rejected():
+    assert not is_evidence_gap_not_hypothesis(
+        "The required post-calibration labeling step may not have been completed.",
+        _CALIBRATION_FINDING_SOURCE,
+    )
+    assert not is_evidence_gap_not_hypothesis(
+        "The process may lack an effective control ensuring status labels are updated after calibration.",
+        _CALIBRATION_FINDING_SOURCE,
+    )
+
+
+def test_evidence_gap_filter_generalizes_to_unrelated_domain():
+    """Same structural test, different domain (training) -- proves this
+    isn't a calibration-specific rule."""
+    source = (
+        "the auditor observed that the training record for operator j alvarez was missing "
+        "the supervisor stated training had been completed but the record could not be located"
+    )
+    assert is_evidence_gap_not_hypothesis("The training record could not be located during the audit.", source)
+    assert not is_evidence_gap_not_hypothesis(
+        "The training completion may not have been recorded due to a gap in the filing control.", source
+    )
+
+
+# ---------------------------------------------------------------------------
+# answer_asserts_verified_but_is_reported
+# ---------------------------------------------------------------------------
+
+
+def test_verified_label_on_reported_content_is_flagged():
+    reported = ["the operator stated the equipment had been calibrated recently"]
+    verified = ["the calibration status label was missing"]
+    assert answer_asserts_verified_but_is_reported(
+        "The equipment had been calibrated recently.", "VERIFIED", reported, verified
+    )
+
+
+def test_verified_label_on_actually_verified_content_is_not_flagged():
+    reported = ["the operator stated the equipment had been calibrated recently"]
+    verified = ["the calibration status label was missing from the equipment"]
+    assert not answer_asserts_verified_but_is_reported(
+        "The calibration status label was missing from the equipment.", "VERIFIED", reported, verified
+    )
+
+
+def test_non_verified_status_is_never_flagged():
+    reported = ["the operator stated the equipment had been calibrated recently"]
+    assert not answer_asserts_verified_but_is_reported(
+        "The equipment had been calibrated recently.", "REPORTED", reported, []
+    )
+
+
+def test_attribution_language_flags_verified_regardless_of_overlap_dilution():
+    """The exact regression from the live output: a mixed sentence that
+    narrates a report AND adds other content dilutes word-overlap ratios,
+    but the attribution verb itself is enough on its own."""
+    reported = ["the operator stated the equipment had been calibrated recently"]
+    verified = ["the status label was not present"]
+    answer = "The operator stated the equipment had been calibrated recently, but the label was not affixed."
+    assert answer_asserts_verified_but_is_reported(answer, "VERIFIED", reported, verified)
+
+
+# ---------------------------------------------------------------------------
+# hypothesis_overclaims_human_error
+# ---------------------------------------------------------------------------
+
+
+def test_bare_human_error_claim_is_flagged():
+    assert hypothesis_overclaims_human_error(
+        "The calibration label was not applied due to human oversight or error."
+    )
+
+
+def test_human_error_with_process_framing_is_not_flagged():
+    assert not hypothesis_overclaims_human_error(
+        "A verification control may not have existed to catch a missed post-calibration labeling step."
+    )
+
+
+def test_non_human_error_hypothesis_is_not_flagged():
+    assert not hypothesis_overclaims_human_error(
+        "The required post-calibration equipment-status labeling step may not have been completed."
+    )
+
+
+# ---------------------------------------------------------------------------
+# classify_mixed_evidence_answer
+#
+# Test A/B from the regression list: a compound 5-Why answer combining a
+# REPORTED claim with an independently-standing factual clause must be
+# labeled MIXED, not collapsed to a single status (previously VERIFIED,
+# which silently promoted the reported half too).
+# ---------------------------------------------------------------------------
+
+
+def test_reported_plus_verified_clause_is_mixed():
+    answer = "The operator stated the equipment had been calibrated recently, but the certificate was not available."
+    assert classify_mixed_evidence_answer(answer) == "MIXED"
+
+
+def test_purely_reported_answer_is_not_mixed():
+    """No second, independently-standing clause -- this is the pure-
+    REPORTED case answer_asserts_verified_but_is_reported already handles,
+    not a mixed-evidence case."""
+    answer = "The operator stated the equipment had been calibrated recently."
+    assert classify_mixed_evidence_answer(answer) is None
+
+
+def test_purely_factual_answer_is_not_mixed():
+    answer = "The calibration status label was not present on the equipment, and the log was blank."
+    assert classify_mixed_evidence_answer(answer) is None
+
+
+def test_mixed_detection_generalizes_to_unrelated_domain():
+    answer = "The supervisor reported that training had been completed, but the certificate was not on file."
+    assert classify_mixed_evidence_answer(answer) == "MIXED"

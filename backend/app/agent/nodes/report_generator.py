@@ -88,17 +88,21 @@ def _compute_confidence_scores(state: AgentState) -> tuple[str, str, str]:
     # Observation confidence
     obs_conf = "HIGH" if quality and quality.status == ObservationQualityStatus.SUFFICIENT else "LOW"
 
-    # Root cause confidence
+    # Root cause confidence (Requirements 5 & 20)
+    # If root_cause status is NOT_ESTABLISHED, confidence MUST be LOW (never MEDIUM/HIGH).
     rc_conf = "LOW"
     if root_cause:
-        if hasattr(root_cause, "confidence") and root_cause.confidence:
+        status_val = getattr(root_cause.status, "value", root_cause.status)
+        if status_val in ("NOT_ESTABLISHED", "STATED_UNVERIFIED", "CONTRADICTED"):
+            rc_conf = "LOW"
+        elif hasattr(root_cause, "confidence") and root_cause.confidence:
             rc_conf = root_cause.confidence
-        elif root_cause.status in ("VERIFIED", "SUPPORTED"):
+        elif status_val in ("VERIFIED", "SUPPORTED"):
             rc_conf = "HIGH" if any(e.status == EvidenceStatus.VERIFIED for e in evidence_ledger) else "MEDIUM"
-        elif root_cause.status == "STATED_UNVERIFIED":
+        else:
             rc_conf = "LOW"
 
-    # Overall confidence
+    # Overall analytical confidence
     if obs_conf == "HIGH" and rc_conf == "HIGH":
         overall_conf = "HIGH"
     elif obs_conf == "HIGH" or rc_conf == "MEDIUM":
@@ -189,6 +193,10 @@ async def generate_report_node(state: AgentState) -> AgentState:
 
     _final_grounding_sweep(state, root_cause, five_why, capa, impact, trace)
 
+    canonical = state.get("canonical_finding_state")
+    evidence_claims = canonical.evidence_claims if canonical else []
+    evidence_conflicts = canonical.evidence_conflicts if canonical else []
+
     report = InvestigationReport(
         observation_quality=observation_quality,  # type: ignore[arg-type]
         observation_confidence=obs_conf,  # type: ignore[arg-type]
@@ -204,16 +212,23 @@ async def generate_report_node(state: AgentState) -> AgentState:
         impact_assessment=impact,
         evidence_gaps=state.get("evidence_gaps", []),
         evidence=state.get("evidence_ledger", []),
+        evidence_claims=evidence_claims,
+        evidence_conflicts=evidence_conflicts,
         human_review_required=True,  # always
         analysis_mode=state.get("analysis_mode", "LLM"),  # type: ignore[arg-type]
+        analysis_engine=state.get("analysis_engine", "LLM"),  # type: ignore[arg-type]
         provider_used=state.get("provider_used"),
         fallback_used=bool(state.get("fallback_used", False)),
         provider_attempts=state.get("provider_attempts", []),
+        critic_status=state.get("critic_status"),
     )
-    if report.analysis_mode == "DEGRADED":
+    if report.analysis_mode == "DETERMINISTIC":
+        trace.append(AgentTraceStep.ok(
+            "Report generated using evidence-grounded deterministic synthesis."
+        ))
+    elif report.analysis_mode == "DEGRADED":
         trace.append(AgentTraceStep.warn(
-            "Report generated in DEGRADED MODE — LLM-based causal synthesis was unavailable; "
-            "analysis below was produced deterministically and requires full auditor review."
+            "Report generated in DEGRADED MODE — full auditor review required."
         ))
 
     trace.append(AgentTraceStep.ok("Investigation report generated"))

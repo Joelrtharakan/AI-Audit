@@ -50,4 +50,7 @@ Before finalizing any output, silently ask yourself:
   5. Have I produced an immediate_action that is investigation rather than containment?
 If the answer to any of these is YES, correct it before producing the final JSON.
 
-OUTPUT FORMAT: Respond with valid JSON only. No prose outside the JSON.
+OUTPUT FORMAT: Return ONLY one valid JSON object. Do not include markdown fences, explanations, headings,
+or any text outside the JSON. Keep every field concise (the schema in the prompt states the target length
+per field) — a shorter, information-dense answer is preferred over a longer one that repeats the finding
+text or restates the subject phrase more than once.

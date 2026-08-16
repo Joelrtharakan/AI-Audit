@@ -107,13 +107,17 @@ async def test_degraded_mode_never_fabricates_root_cause(finding_text, verified,
         mock_get_client.return_value = mock_client
         result = await core_synthesis_node(state)
 
-    assert result["analysis_mode"] == "DEGRADED"
+    # LLM call failed but the deterministic analytical engine produced a
+    # complete, evidence-grounded result -> analysis_mode="DETERMINISTIC",
+    # never "DEGRADED" and never mislabeled "DEGRADED MODE" in prose.
+    # DEGRADED is reserved for when the deterministic engine ALSO fails to
+    # produce a safe result.
+    assert result["analysis_mode"] == "DETERMINISTIC"
     root_cause = result["root_cause"]
     assert root_cause.status == "NOT_ESTABLISHED"
     assert root_cause.category == "TO_BE_CONFIRMED"
-    # Root cause narrative must be explicit about degraded mode, not blend
-    # into normal-looking analysis text.
-    assert "DEGRADED MODE" in root_cause.narrative
+    assert root_cause.narrative
+    assert "DEGRADED MODE" not in root_cause.narrative
 
     five_why = result["five_why"]
     assert len(five_why.steps) >= 1
@@ -126,7 +130,8 @@ async def test_degraded_mode_never_fabricates_root_cause(finding_text, verified,
     assert capa.status.value == "INVESTIGATION_REQUIRED"
 
     impact = result["impact_assessment"]
-    assert "DEGRADED MODE" in (impact.narrative or "")
+    assert impact.narrative
+    assert "DEGRADED MODE" not in (impact.narrative or "")
 
 
 @pytest.mark.asyncio
@@ -193,11 +198,13 @@ async def test_llm_success_path_sets_analysis_mode_llm():
 
 
 @pytest.mark.asyncio
-async def test_full_graph_survives_total_llm_outage_and_stays_degraded():
+async def test_full_graph_survives_total_llm_outage_and_stays_deterministic():
     """Worst-case resilience test: every LLM-calling node fails (simulating
     a total provider outage / persistent 429s), not just core_synthesis.
-    The graph must run to completion and report DEGRADED mode rather than
-    crash or silently present a normal-looking report."""
+    The graph must run to completion and report DETERMINISTIC mode (the
+    deterministic evidence-grounded engine still produced a safe, complete
+    result) rather than crash, silently present a normal-looking LLM report,
+    or mislabel a successful deterministic result as DEGRADED."""
     from app.agent.graph import get_agent_graph
     from app.models.agent import InvestigateRequest
 
@@ -233,7 +240,7 @@ async def test_full_graph_survives_total_llm_outage_and_stays_degraded():
 
     report = result.get("report")
     assert report is not None, "graph must complete and produce a report even under total LLM outage"
-    assert report.analysis_mode == "DEGRADED"
+    assert report.analysis_mode == "DETERMINISTIC"
     assert report.root_cause.status == "NOT_ESTABLISHED"
     assert report.human_review_required is True
     # Degraded-mode CAPA must stay pending, never present a finalized action.

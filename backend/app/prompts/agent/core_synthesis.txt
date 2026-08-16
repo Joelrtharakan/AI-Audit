@@ -1,207 +1,76 @@
-Perform a complete, evidence-grounded investigation analysis on the following finding.
+Perform evidence-grounded investigation analysis on the following finding.
 
-FINDING Context:
-{finding_text}
+CANONICAL CASE STATE (single source of truth — do not re-derive or repeat the raw finding text):
+DEVIATION: {observed_deviation}
+MECHANISM: {immediate_mechanism} ({immediate_mechanism_status})
+EVIDENCE (claim + status): {evidence_ledger_json}
+CONFLICTS: {evidence_conflicts_json}
+FINDING (context only, for wording — do not restate it verbatim in your answer): {finding_text}
 
-EXTRACTION & EVIDENCE LEDGER:
-{evidence_ledger_json}
+RULES:
+1. Evidence hierarchy: Verified > Supported > Reported. Never promote a reported claim to verified root cause.
+2. If root cause is not established: status="NOT_ESTABLISHED", statement=null, category="TO_BE_CONFIRMED".
+3. Provide 2-3 plausible candidate hypotheses explaining WHY the deviation occurred.
+4. If evidence conflicts exist, do not select one side as fact; keep competing hypotheses POSSIBLE.
+5. 5-Why: 1-3 causal steps. Stop with UNKNOWN or MIXED at the evidence boundary.
+6. CAPA: conditional_actions mapping "IF confirmed THEN action" — the action must be an organizational
+   corrective/preventive step, never a record name (put record names in evidence_needed instead).
 
-CAUSAL CONTEXT (already extracted deterministically -- treat as ground truth, do not re-derive):
-  Observed deviation (Layer 1 -- the artifact/state described): {observed_deviation}
-  Immediate mechanism (Layer 2 -- HOW it happened, if the finding states one): {immediate_mechanism}
-  Immediate mechanism status: {immediate_mechanism_status}
+OUTPUT DISCIPLINE (compact JSON, not prose):
+- Every string field is ONE concise sentence (roughly 15-25 words). No paragraphs, no markdown, no lists
+  inside a string field.
+- Name the subject/topic ONCE per field; refer to it briefly afterward (e.g. "it", "the record") rather
+  than repeating the full subject phrase in every field.
+- discrimination_evidence/confirms_if/refutes_if state exactly what evidence would distinguish this
+  hypothesis from the others — not a vague "distinguishes X from Y" label.
+- Do not include narrative, headings, or commentary outside the JSON object below.
 
-OBSERVATION QUALITY: {observation_quality}
-MISSING INFO: {missing_info}
-
-============================================================
-CAUSAL LAYERS -- DO NOT COLLAPSE THEM
-============================================================
-Layer 1 OBSERVATION: the artifact/state a finding describes (e.g. "the log was incomplete").
-Layer 2 IMMEDIATE MECHANISM: the action-level explanation of HOW it happened, ONLY when the
-  finding/evidence directly states one (e.g. "the check was missed"). If CAUSAL CONTEXT above already
-  gives you a non-UNKNOWN immediate mechanism, that mechanism is ALREADY ESTABLISHED -- do not
-  regenerate it as a "possible hypothesis" (e.g. do not propose "the activity may not have been
-  performed" as though it were still uncertain when the mechanism already confirms it).
-Layer 3 CONTRIBUTING FACTOR: a condition that made the mechanism more likely, if the finding
-  plausibly supports one -- not an action item, not fabricated if nothing supports it.
-Layer 4/5 ROOT CAUSE: WHY the established mechanism occurred. This is a SEPARATE, DEEPER question
-  than the mechanism itself -- evidence establishing the mechanism ("the check was missed") is NOT
-  evidence of why it happened. Do not jump from mechanism straight to a confident root cause.
-
-If CAUSAL CONTEXT gives a non-UNKNOWN immediate mechanism, your hypotheses and 5-Why chain must
-start from "why did this mechanism occur", not re-litigate whether the mechanism occurred at all.
-
-============================================================
-HARD CONSTRAINTS & INSTRUCTIONS
-============================================================
-1. EVIDENCE HIERARCHY: Level 1 (Verified Fact) > Level 2 (Supported Fact) > Level 3 (Reported Statement) > Level 4 (Reasonable Inference) > Level 5 (Plausible Hypothesis) > Level 6 (Unknown).
-   - Reported statements (Level 3) must NOT be discarded, but must NEVER be promoted to Level 1 verified root cause without objective proof. Preserve reported explanations as REPORTED_UNVERIFIED and investigate them.
-2. RECURRENCE & PREVIOUS CAPA ANALYSIS:
-   - When finding mentions previous occurrences or prior CAPA, treat it as a high-value signal.
-   - Distinguish PREVIOUS ACTION COMPLETED from PREVIOUS ACTION EFFECTIVE. Create a specific Recurrence/CAPA Effectiveness hypothesis (e.g. "Previous corrective action may not have effectively addressed the recurrence mechanism").
-3. SYSTEMIC / CROSS-DEPARTMENT DETECTION:
-   - Identify structural signals (multiple departments, sites, operators, records, or procedures affected).
-   - If multiple independent areas are affected by the SAME requirement/procedure/control, classify SYSTEMIC_PATTERN = POSSIBLE (never VERIFIED systemic cause without proof).
-   - Propose cross-department hypothesis: "The recurring deviations across affected areas may indicate a weakness in the implementation or effectiveness of the common [control]." Status: POSSIBLE - NOT CONFIRMED.
-4. If evidence does not establish a root cause, set status to "NOT_ESTABLISHED", statement to null, and category to "TO_BE_CONFIRMED".
-   NOT_ESTABLISHED is a SUCCESSFUL analysis outcome when paired with well-reasoned candidate
-   hypotheses and a clear next investigative question -- it is not a failure state and never an
-   excuse to skip hypothesis generation.
-   leading_hypothesis must NOT be null whenever candidate_hypotheses is non-empty: set it to the
-   id and statement of whichever hypothesis is best evidenced (SUPPORTED first, otherwise the
-   highest-relevance POSSIBLE one). "Root cause NOT_ESTABLISHED, leading_hypothesis = H1" is a
-   normal and useful result -- it means the deeper cause is unconfirmed while still pointing the
-   investigation in the most evidence-supported direction. Only leave leading_hypothesis null when
-   candidate_hypotheses is genuinely empty.
-5. Provide 2-4 candidate hypotheses (H1, H2, ...) answering the CURRENT open causal question (the
-   mechanism's cause, if the mechanism is established; otherwise the mechanism itself). For each hypothesis give:
-   - id, name (a short case-specific code, not a fixed universal label)
-   - statement: the causal claim, using only this finding's own entities
-   - rationale: WHY this is plausible for this specific finding (what about the finding suggests it)
-   - status: "POSSIBLE" by default; "SUPPORTED" only if a ledger item directly confirms this specific
-     hypothesis (not just the mechanism); "REFUTED" if a ledger item directly contradicts it
-   - evidence_needed: the specific record/document that would confirm or refute it
-   - evidence_against: any ledger fact that argues against it, or null
-   - confirms_if: the specific result that would CONFIRM it
-   - refutes_if: the specific result that would REFUTE it
-   - discrimination_evidence: what would distinguish THIS hypothesis from the OTHERS you propose
-   Hypotheses MUST be selected from causal categories actually supported by THIS finding's own
-   content (e.g. task assignment, shift handover, scheduling, procedure clarity, procedure revision,
-   communication, workload/interruption, verification/control weakness, equipment availability,
-   supplier-related, previous CAPA effectiveness, monitoring/control weakness, etc.) -- this is not a
-   fixed list to cycle through; pick only categories the finding's own facts actually point toward.
-   Do NOT default to "training", "communication", "workload", or "supervision" merely because they
-   are common QMS root causes -- each must be independently justified by this finding's content.
-   Do NOT propose a hypothesis that logically conflicts with an already-established mechanism (e.g.
-   if the mechanism confirms the activity was NOT performed at all, do not propose "it was performed
-   but not documented" as a competing hypothesis -- that is contradicted, not merely less likely).
-6. Provide a 5-Why chain that advances causally and STOPS the moment evidence runs out (1-3 steps
-   typically; do NOT force it to 5). Rules:
-   - WHY 1 answer must be a VERIFIED or SUPPORTED fact -- if CAUSAL CONTEXT gives an established
-     mechanism, WHY 1's answer should generally BE that mechanism (it is the direct explanation of
-     the observation), not a restatement of the observation itself.
-   - Each subsequent WHY must explain the PRECEDING ANSWER, not repeat the observation and not
-     repeat the previous answer in different words.
-   - A "why" whose answer is just the question restated (e.g. Q: "Why was X incomplete?" A: "X was
-     incomplete.") is a FAILURE -- it must be rejected, not emitted.
-   - STOP at the evidence boundary with an honest "UNKNOWN" / "not established from available
-     evidence" answer rather than fabricating a deeper step. Do not manufacture Why 3+ with generic
-     text like "control effectiveness was not demonstrated" when nothing in the evidence supports it.
-7. Provide an Impact Assessment: status ("IMPACT_REQUIRES_ASSESSMENT"), affected_object, affected_people, affected_period, process_at_risk, relevant_change ("NOT ESTABLISHED" if no revision/change stated in finding), potential_effect ("Potential effect (unconfirmed): ..."), evidence_needed, and narrative. Distinguish record loss/absence from actual process/temperature failure.
-   - process_at_risk: if the finding names or clearly implies a process (e.g. the affected object is
-     "the calibration log for X" -> the process is "calibration of X"; "the training record for Y" ->
-     "training/qualification of Y"), STATE that process -- do not write "NOT ESTABLISHED" merely
-     because the finding didn't use the word "process". Only use "NOT ESTABLISHED" when the finding
-     truly gives no basis to name any process at all.
-   - potential_effect and any product/patient/regulatory/safety/customer impact claim: only state a
-     CONFIRMED impact if the finding/evidence directly says so; otherwise phrase it as unconfirmed
-     potential effect requiring evidence, and never invent a compliance/safety consequence the
-     finding doesn't support.
-8. Provide CAPA Analysis: status ("INVESTIGATION_REQUIRED"), potential_areas, recommended_investigation, and conditional_actions array. CAPA must follow the causal analysis above, not precede or ignore it -- conditional_actions should map each live candidate hypothesis to what action would follow IF it were confirmed (one "IF Hx confirmed THEN action" per live hypothesis).
-   Never recommend training merely because a person made an error -- only when a hypothesis about
-   knowledge/competency is itself live. Never recommend procedure revision merely because a
-   procedure wasn't followed -- only when a hypothesis about procedure clarity/currency is live.
-   Never recommend disciplinary action based on this finding alone.
-9. Provide contributing_factors: 0-3 conditions (not action items) that plausibly made the mechanism
-   more likely, ONLY if the finding's own content supports them. Each needs: description, rationale
-   (why this finding suggests it), evidence_status ("INFERRED"|"REPORTED"|"VERIFIED"), status
-   ("POSSIBLE_UNCONFIRMED" unless VERIFIED evidence exists), and evidence_required. An empty array is
-   correct and expected when nothing in the finding supports a contributing factor -- NEVER emit an
-   entry whose description is a boilerplate non-answer like "Additional contributing factors are not
-   established" or "Contributing factors are not determined" -- if you have nothing case-specific to
-   say, return an empty contributing_factors array instead of an entry that just says so in words.
-10. Provide the 5 AI Form Pre-fill Fields:
-   - immediate_action: Genuine CONTAINMENT action only (remove/restrict/segregate affected item, NOT investigation).
-   - root_cause: 1-2 sentence summary of reported facts & plausible mechanism (never restate finding as cause).
-   - root_cause_category: Exactly match the root_cause category ("TO_BE_CONFIRMED" if not established).
-   - preventive_action: Systemic control prevention specific to this finding's domain.
-   - impact_analysis: Affected object/record/period and what remains to be confirmed.
-
-Respond with valid JSON only:
+Return valid JSON matching this schema:
 {{
   "root_cause": {{
     "status": "NOT_ESTABLISHED",
     "category": "TO_BE_CONFIRMED",
     "statement": null,
     "leading_hypothesis": null,
+    "root_cause_basis": "string, 1 sentence",
+    "evidence_required": ["string, concrete record name"],
     "candidate_hypotheses": [
       {{
         "id": "H1",
-        "name": "CATEGORY_NAME",
-        "statement": "Plausible statement derived only from finding",
-        "rationale": "Why this finding's own facts make this plausible",
-        "status": "POSSIBLE, or SUPPORTED if a direct evidence-ledger statement confirms this specific hypothesis, or REFUTED if directly contradicted",
-        "evidence_needed": "Specific record to confirm",
-        "evidence_against": "A ledger fact arguing against this hypothesis, or null",
-        "confirms_if": "The specific result that would confirm this hypothesis",
-        "refutes_if": "The specific result that would refute this hypothesis",
-        "discrimination_evidence": "Specific evidence distinguishing H1 from H2"
+        "name": "SHORT_CODE",
+        "statement": "1 sentence: the specific plausible cause",
+        "rationale": "1 sentence: why this finding's own evidence makes it plausible",
+        "status": "POSSIBLE",
+        "relevance_rank": "HIGH",
+        "evidence_needed": "concrete record name, not a sentence",
+        "confirms_if": "1 sentence: the specific result that would confirm this",
+        "refutes_if": "1 sentence: the specific result that would refute this"
       }}
     ],
-    "risk_of_recurrence": "HIGH|MEDIUM|LOW|NOT_ASSESSABLE",
-    "narrative": "One paragraph: (a) the established mechanism if any, (b) the open causal question, (c) the competing hypotheses and why each is plausible, (d) what would discriminate between them."
+    "risk_of_recurrence": "NOT_ASSESSABLE",
+    "narrative": "1-2 sentences"
   }},
   "five_why": {{
     "steps": [
-      {{
-        "level": 1,
-        "question": "Why was <the observed deviation> the case?",
-        "answer": "The established mechanism from CAUSAL CONTEXT, or the verified fact from the finding if no mechanism is established",
-        "status": "VERIFIED or SUPPORTED",
-        "evidence_reference": "Finding text or evidence ledger item"
-      }},
-      {{
-        "level": 2,
-        "question": "Why did <the Why-1 answer, i.e. the mechanism> occur?",
-        "answer": "Not established from available evidence",
-        "status": "UNKNOWN",
-        "evidence_reference": "Requires verification"
-      }}
-
+      {{"question": "1 concise sentence", "answer": "1 concise sentence", "status": "MIXED"}}
     ],
     "is_complete": false,
-    "status_note": "5-Why stopped at evidence boundary"
+    "status_note": "1 short phrase"
   }},
   "impact_assessment": {{
-    "status": "IMPACT_REQUIRES_ASSESSMENT",
-    "affected_object": "Specific object/record/process named in finding",
-    "affected_people": "Who was affected",
-    "affected_period": "Timeframe stated or 'requires confirmation'",
-    "process_at_risk": "NOT ESTABLISHED (unless explicit process named in finding)",
-
-    "relevant_change": "NOT ESTABLISHED (unless explicit revision stated in finding)",
-    "potential_effect": "Potential effect (unconfirmed): ...",
-    "evidence_needed": "Record to bound scope",
-    "areas": ["Specific area 1"],
-    "narrative": "One paragraph impact narrative"
+    "affected_object": "the status/qualification/process affected — not the record itself",
+    "process_at_risk": "short phrase",
+    "potential_effect": "1 sentence: plausible consequence, not a restatement of the finding",
+    "evidence_needed": "concrete record name",
+    "narrative": "1 sentence"
   }},
   "capa": {{
-    "status": "INVESTIGATION_REQUIRED",
-    "potential_areas": ["Potential area pending confirmation"],
-    "recommended_investigation": ["Specific investigation step"],
+    "potential_areas": ["short phrase"],
+    "recommended_investigation": ["1 sentence"],
     "conditional_actions": [
-      {{
-        "if_cause_confirmed": "If condition X is confirmed",
-        "recommended_action": "Then take action Y",
-        "verification_method": "How effectiveness of action Y would be verified (e.g. what to re-check and over what period)"
-      }}
+      {{"if_cause_confirmed": "IF <hypothesis id/name> confirmed", "recommended_action": "1 sentence: organizational action", "verification_method": "1 sentence", "evidence_needed": "concrete record name"}}
     ]
   }},
-  "contributing_factors": [
-    {{
-      "description": "A condition (not an action item) plausibly supported by this finding",
-      "rationale": "Why this finding suggests it",
-      "evidence_status": "INFERRED|REPORTED|VERIFIED",
-      "status": "POSSIBLE_UNCONFIRMED|VERIFIED",
-      "evidence_required": "What would confirm this factor"
-    }}
-  ],
-  "ca_draft": {{
-    "immediate_action": "Specific containment action",
-    "root_cause": "Summary of reported facts and mechanism",
-    "root_cause_category": "TO_BE_CONFIRMED",
-    "preventive_action": "Systemic prevention",
-    "impact_analysis": "Affected object and scope statement"
-  }}
+  "contributing_factors": []
 }}
+

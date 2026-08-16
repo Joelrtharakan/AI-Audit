@@ -49,7 +49,8 @@ def select_leading_hypothesis(candidate_hypotheses: list) -> str | None:
     - No SUPPORTED hypothesis, but the POSSIBLE ones differ in
       relevance_rank -> the single highest-ranked one.
     - No SUPPORTED hypothesis and all POSSIBLE ones share the same
-      relevance_rank -> None (equally plausible, no leader to force).
+      relevance_rank -> use structural scoring to break ties. If scoring
+      still can't differentiate (scores within 0.1), return None.
     """
     if not candidate_hypotheses:
         return None
@@ -61,11 +62,457 @@ def select_leading_hypothesis(candidate_hypotheses: list) -> str | None:
 
     ranks = {_RANK_ORDER.get(h.relevance_rank, 1) for h in pool}
     if len(pool) > 1 and len(ranks) == 1:
-        # All tied at the same rank -- no defensible single leader.
+        # All tied at the same rank -- try structural scoring to break tie
+        scored = [(h, score_hypothesis(h)) for h in pool]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        best_score = scored[0][1]
+        second_score = scored[1][1] if len(scored) > 1 else 0.0
+        if best_score - second_score > 0.1:
+            # Enough differentiation to declare a leader
+            best = scored[0][0]
+            return f"{best.id} — {best.statement}"
+        # Still tied -- no defensible single leader.
         return None
 
     best = min(pool, key=lambda h: _RANK_ORDER.get(h.relevance_rank, 1))
     return f"{best.id} — {best.statement}"
+
+
+def score_hypothesis(hypothesis, claims: list | None = None,
+                     conflicts: list | None = None,
+                     mechanism=None) -> float:
+    """Deterministic structural scoring of a hypothesis across 8 dimensions.
+
+    Returns a float in [0.0, 1.0] reflecting overall hypothesis quality.
+    Higher is better. This is used for tie-breaking when multiple hypotheses
+    share the same relevance_rank, and for computing per-hypothesis
+    confidence grades.
+
+    Dimensions (each contributes 0.0–0.125 to the final score):
+      1. Evidence support: does it cite evidence_needed?
+      2. Causal relevance: does its statement contain causal language?
+      3. Contradiction-free: is it not contradicted by known claims?
+      4. Evidence availability: does it specify discrimination_evidence?
+      5. Explanatory coverage: how specific is the rationale?
+      6. Specificity: does it use specific (non-generic) language?
+      7. Unsupported assumptions: does it overclaim?
+      8. Discriminating evidence quality: does it specify confirms_if/refutes_if?
+    """
+    from app.agent.causal_guard import _CAUSAL_EXPLANATION_RE
+
+    score = 0.0
+
+    # 1. Evidence support
+    if getattr(hypothesis, "evidence_needed", None):
+        score += 0.125
+
+    # 2. Causal relevance
+    statement = getattr(hypothesis, "statement", "")
+    if statement and _CAUSAL_EXPLANATION_RE.search(statement):
+        score += 0.125
+
+    # 3. Contradiction-free
+    if claims:
+        from app.agent.causal_guard import test_hypothesis_against_claims
+        result = test_hypothesis_against_claims(statement, claims)
+        if result == "CONSISTENT":
+            score += 0.125
+        elif result == "CONTRADICTED":
+            pass  # 0 for this dimension
+        else:
+            score += 0.0625  # UNKNOWN -- partial credit
+
+    else:
+        score += 0.0625  # No claims to test against
+
+    # 4. Evidence availability
+    if getattr(hypothesis, "discrimination_evidence", None):
+        score += 0.125
+
+    # 5. Explanatory coverage
+    rationale = getattr(hypothesis, "rationale", "")
+    if rationale and len(rationale.split()) >= 5:
+        score += 0.125
+
+    # 6. Specificity (not generic filler)
+    from app.agent.causal_guard import is_generic_non_analysis_filler
+    if statement and not is_generic_non_analysis_filler(statement):
+        score += 0.125
+
+    # 7. Unsupported assumptions
+    from app.agent.causal_guard import hypothesis_overclaims_human_error
+    if not hypothesis_overclaims_human_error(statement):
+        score += 0.125
+
+    # 8. Discriminating evidence quality
+    confirms_if = getattr(hypothesis, "confirms_if", None)
+    refutes_if = getattr(hypothesis, "refutes_if", None)
+    if confirms_if and refutes_if:
+        score += 0.125
+    elif confirms_if or refutes_if:
+        score += 0.0625
+
+    return min(score, 1.0)
+
+
+def validate_root_cause_establishment(
+    root_cause,
+    mechanism=None,
+    claims: list | None = None,
+    conflicts: list | None = None,
+) -> tuple[bool, list[str]]:
+    """Deterministic validation of whether a root cause can be ESTABLISHED.
+
+    Returns (can_establish, reasons) where reasons lists every criterion
+    that failed. The root cause can ONLY be established if ALL of:
+      1. A causal mechanism is supported by evidence (not just reported)
+      2. The mechanism explains the observation
+      3. Competing plausible causes are sufficiently excluded
+      4. Evidence is not merely REPORTED
+      5. There is no unsupported causal leap
+      6. The causal relationship is explicit or strongly evidenced
+      7. No evidence conflicts remain UNRESOLVED
+
+    This function never mutates root_cause -- it only reports whether
+    establishment is defensible.
+    """
+    reasons: list[str] = []
+
+    # 1. Mechanism must exist and be more than UNKNOWN
+    if not mechanism or not mechanism.statement:
+        reasons.append("No causal mechanism established")
+    elif mechanism.status == "UNKNOWN":
+        reasons.append("Mechanism status is UNKNOWN (possibly due to evidence conflict)")
+    elif mechanism.status == "REPORTED":
+        reasons.append("Mechanism is only REPORTED, not VERIFIED")
+
+    # 2. Root cause must have a statement
+    if root_cause and not root_cause.statement:
+        reasons.append("No root cause statement provided")
+
+    # 3. Evidence conflicts must be resolved
+    if conflicts:
+        unresolved = [c for c in conflicts if getattr(c, "status", "UNRESOLVED") == "UNRESOLVED"]
+        if unresolved:
+            reasons.append(f"{len(unresolved)} evidence conflict(s) remain UNRESOLVED")
+
+    # 4. Supporting evidence must exist
+    if root_cause and not root_cause.supporting_evidence:
+        reasons.append("No supporting evidence listed")
+
+    # 5. Status must not already be NOT_ESTABLISHED/CONTRADICTED
+    if root_cause:
+        status_value = getattr(root_cause.status, "value", root_cause.status)
+        if status_value in ("NOT_ESTABLISHED", "CONTRADICTED"):
+            reasons.append(f"Root cause status is already {status_value}")
+
+    can_establish = len(reasons) == 0
+    return can_establish, reasons
+
+
+def leading_hypothesis_status(candidate_hypotheses: list) -> str:
+    """Distinguishes WHY select_leading_hypothesis returned None, which
+    matters for what the report should say:
+
+    - "NONE": there are no (surviving) hypotheses at all -- nothing to lead.
+    - "TIED": 2+ hypotheses are equally plausible -- a real analytical
+      outcome, not a missing one.
+    - "SELECTED": a single leader was chosen.
+
+    Collapsing TIED into the same bare `None` as NONE is exactly what makes
+    a report read as "No leading hypothesis established" when the truth is
+    "multiple well-reasoned hypotheses are genuinely competing" -- those are
+    different things and must render differently.
+    """
+    if not candidate_hypotheses:
+        return "NONE"
+    pool = [h for h in candidate_hypotheses if h.status != "REFUTED"]
+    if not pool:
+        return "NONE"
+    if select_leading_hypothesis(candidate_hypotheses) is not None:
+        return "SELECTED"
+    return "TIED"
+
+
+def leading_hypothesis_display(candidate_hypotheses: list) -> str | None:
+    """Same selection as select_leading_hypothesis, but renders the TIED
+    case as an explicit, informative string instead of a bare None a report
+    would otherwise show as "no leading hypothesis" -- when the real
+    situation is "multiple hypotheses are competing", that must be visible,
+    not indistinguishable from "no hypotheses were generated at all"."""
+    if not candidate_hypotheses:
+        return None
+    leading = select_leading_hypothesis(candidate_hypotheses)
+    if leading is not None:
+        return leading
+    if leading_hypothesis_status(candidate_hypotheses) == "TIED":
+        return "NONE — COMPETING HYPOTHESES REMAIN TIED"
+    return None
+
+
+def apply_conflict_tie_override(root_cause, has_unresolved_conflict: bool) -> None:
+    """When candidate hypotheses are competing explanations for the SAME
+    unresolved evidence conflict (e.g. two REPORTED statements directly
+    disagree about whether an activity was completed), a single "leading"
+    hypothesis must never be promoted merely because of an incidental
+    scoring/wording difference between otherwise equally-plausible
+    statements -- score_hypothesis's structural dimensions (e.g. whether a
+    statement happens to use a verb phrase the causal-language regex
+    matches) were never meant to arbitrate between hypotheses that all
+    equally trace back to one still-open disagreement in the evidence
+    itself. Only a hypothesis with independently SUPPORTED status (i.e.
+    objective evidence beyond the conflicting reports themselves) may still
+    lead. Mutates root_cause in place; a no-op when there is no unresolved
+    conflict or no hypothesis was actually SELECTED."""
+    if not has_unresolved_conflict:
+        return
+    if root_cause.leading_hypothesis_status != "SELECTED":
+        return
+    if any(getattr(h, "status", None) == "SUPPORTED" for h in root_cause.candidate_hypotheses):
+        return
+    root_cause.leading_hypothesis_status = "TIED"
+    root_cause.leading_hypothesis = "NONE — COMPETING HYPOTHESES REMAIN TIED"
+    root_cause.confidence = "LOW"
+
+
+def _statement_as_question_clause(statement: str) -> str:
+    """Lower-cases the leading word and strips a trailing period so a
+    declarative hypothesis statement can be embedded mid-sentence inside a
+    grammatically complete question, without any NLP dependency."""
+    s = (statement or "").strip().rstrip(".")
+    if not s:
+        return "this hypothesis is supported by the available evidence"
+    return s[0].lower() + s[1:]
+
+
+_NEGATION_LEAD_RE = re.compile(r"^(no|none|never|not|absence|failure)\b", re.IGNORECASE)
+_POSITIVE_VERB_RE = re.compile(
+    r"^(?P<subject>.+?)\s+(?P<verb>confirms?|shows?|indicates?|verifies?|establishes?|exists?)\b(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+
+
+def _positive_clause_to_question(hypothesis) -> str | None:
+    """Turn a hypothesis's own confirms_if/refutes_if condition into a
+    natural, positively-phrased yes/no investigation question (e.g. "An
+    approved training completion record confirms timely completion." ->
+    "Does an approved training completion record confirm timely
+    completion?") instead of wrapping an absence-phrased condition in "Is
+    there evidence that no X exists?" -- prefers whichever of
+    confirms_if/refutes_if does NOT start with a negation, since a
+    hypothesis's refutes_if and confirms_if are usually opposite polarity
+    and at least one is typically phrased as a positive existence/state
+    claim. Purely structural (verb-fronting), no domain vocabulary."""
+    refutes_if = getattr(hypothesis, "refutes_if", None)
+    confirms_if = getattr(hypothesis, "confirms_if", None)
+    clause = None
+    for candidate in (refutes_if, confirms_if):
+        if candidate and not _NEGATION_LEAD_RE.match(candidate.strip()):
+            clause = candidate.strip()
+            break
+    if not clause:
+        return None
+    text = clause.rstrip(".")
+    m = _POSITIVE_VERB_RE.match(text)
+    # A compound clause ("X is located and confirms Y") has an auxiliary
+    # verb (is/was/were/has/have/are) already inside the captured subject --
+    # fronting "Does <subject-with-its-own-verb> confirm...?" produces a
+    # double-verb artifact ("Does X is located and confirm Y?"). Fall back
+    # to the safe generic wrapper in that case rather than guess which verb
+    # to front.
+    if m and re.search(r"\b(?:is|was|were|are|has|have|had)\b", m.group("subject"), re.IGNORECASE):
+        m = None
+    if not m:
+        return f"Does the available evidence show: {text[0].lower()}{text[1:]}?"
+    subject = m.group("subject").strip()
+    verb = m.group("verb").rstrip("s")  # confirms -> confirm, exists -> exist
+    rest = m.group("rest").strip()
+    subject_lc = subject[0].lower() + subject[1:] if subject else subject
+    return f"Does {subject_lc} {verb}{(' ' + rest) if rest else ''}?"
+
+
+def derive_investigation_questions(candidate_hypotheses: list) -> list:
+    """Builds discriminating investigation questions directly from the
+    already-synthesized candidate hypotheses -- for when core_synthesis
+    produced hypotheses but the investigation plan (built by a separate,
+    earlier node that runs BEFORE hypotheses exist, or fast-pathed with an
+    empty plan) never got a chance to ask anything that would discriminate
+    between them. This is the path that actually populates investigation
+    questions on a normal successful LLM run when tool-based planning is
+    fast-pathed to an empty plan (the common no-ASP.NET-integration
+    deployment), so its wording quality matters as much as the deterministic
+    fallback's.
+
+    Each question is built from a FIXED, always-grammatical template rather
+    than concatenating raw evidence-list text with the hypothesis statement.
+    Prefers a POSITIVELY-phrased confirms_if/refutes_if clause turned into a
+    natural "Does X confirm Y?" question (see _positive_clause_to_question)
+    over wrapping a (frequently absence-phrased) condition in "Is there
+    evidence that no X exists?", which reads as an awkward negative
+    question. Generalizes to any domain: the template only ever wraps the
+    hypothesis's own confirms_if/refutes_if/statement text, never re-parses
+    or infers new content.
+    """
+    from app.models.agent import InvestigationQuestion
+
+    questions = []
+    for h in candidate_hypotheses:
+        if getattr(h, "status", None) == "REFUTED":
+            continue
+        evidence = h.evidence_needed or "the relevant record for this hypothesis"
+        purpose = h.discrimination_evidence or f"Determines whether {_statement_as_question_clause(h.statement)}"
+        question = _positive_clause_to_question(h)
+        if not question:
+            clause = _statement_as_question_clause(h.confirms_if or h.statement)
+            question = f"Is there evidence that {clause}?"
+        if not validate_investigation_question(question):
+            continue
+        questions.append(InvestigationQuestion(
+            question=question,
+            purpose=purpose,
+            evidence=evidence,
+            hypothesis_tested=getattr(h, "id", None),
+            confirms_if=getattr(h, "confirms_if", None),
+            refutes_if=getattr(h, "refutes_if", None),
+        ))
+    return questions
+
+
+def derive_required_evidence(candidate_hypotheses: list, evidence_conflicts: list | None = None) -> str | None:
+    """Derives a concise "what would actually resolve the current
+    uncertainty" evidence summary from the live candidate hypotheses' own
+    (already-grounded) evidence_needed fields, rather than trusting a
+    separately-generated impact/CAPA field that can drift onto an unrelated
+    concept (e.g. the LLM proposing "procedure revision documentation" for a
+    training finding). This is the single source of truth for "what
+    evidence is needed" -- every hypothesis already carries its own
+    evidence_needed, so this only dedupes and concatenates, never invents.
+    Returns None when there are no hypotheses to derive from."""
+    if not candidate_hypotheses:
+        return None
+    items = [h.evidence_needed for h in candidate_hypotheses if getattr(h, "evidence_needed", None) and h.status != "REFUTED"]
+    deduped = list(dict.fromkeys(items))
+    if not deduped:
+        return None
+    if len(deduped) == 1:
+        return deduped[0]
+    return "; ".join(deduped)
+
+
+def derive_investigation_areas(candidate_hypotheses: list) -> list[str]:
+    """Derives investigation-area labels directly from the live candidate
+    hypotheses -- every area must trace to an unresolved hypothesis (Section
+    7: hypotheses -> evidence needed -> investigation question ->
+    investigation area), never independently generated by an LLM free to
+    invent a category the finding doesn't support (e.g. "communication of
+    requirements" for a finding that never mentions communication). One area
+    per surviving hypothesis, phrased from its own name/mechanism category
+    (the same name-suffix convention build_conditional_capa_actions uses),
+    duplicates collapsed. Falls back to a readable version of the
+    hypothesis's own name when the suffix doesn't match a known category --
+    still hypothesis-derived, never a generic invented label."""
+    areas: list[str] = []
+    for h in candidate_hypotheses:
+        if getattr(h, "status", None) == "REFUTED":
+            continue
+        name = (getattr(h, "name", "") or "").upper()
+        topic_raw = name.split("_")[0] if name else ""
+        topic = topic_raw.capitalize() if topic_raw.isalpha() else None
+        area = None
+        if topic:
+            if name.endswith("NOT_COMPLETED"):
+                area = f"{topic} completion verification"
+            elif "RECORD_UNAVAILABLE" in name or "RECORD_OMISSION" in name:
+                area = f"{topic} record retrieval"
+            elif "RECORD_CONTROL" in name:
+                area = f"{topic} record control"
+            elif "VERIFICATION_CONTROL" in name or "RECORDING_AND_VERIFICATION" in name:
+                area = f"{topic} verification/authorization"
+        if not area and getattr(h, "name", None):
+            area = h.name.replace("_", " ").title()
+        if area and area not in areas:
+            areas.append(area)
+    return areas
+
+
+def deduplicate_investigation_questions(questions: list) -> list:
+    """Drops near-duplicate investigation questions (Section 5: every
+    question must have a distinct discrimination purpose -- two hypotheses
+    must never be tested with what is effectively the same question).
+    Structural: compares significant-word sets with a high overlap
+    threshold, not exact string equality, since two questions can be near-
+    identical restatements without being byte-identical. Keeps the first
+    occurrence (earlier questions are assumed to already be in priority
+    order)."""
+    if not questions:
+        return questions
+    kept: list = []
+    seen_word_sets: list[frozenset] = []
+    for q in questions:
+        q_text = getattr(q, "question", None) or (q.get("question") if isinstance(q, dict) else None)
+        if not q_text:
+            kept.append(q)
+            continue
+        words = frozenset(significant_words(q_text))
+        is_duplicate = False
+        for seen in seen_word_sets:
+            if not words or not seen:
+                continue
+            overlap = len(words & seen) / max(len(words | seen), 1)
+            if overlap >= 0.75:
+                is_duplicate = True
+                break
+        if is_duplicate:
+            continue
+        seen_word_sets.append(words)
+        kept.append(q)
+    return kept
+
+
+def validate_investigation_question(question: str | None) -> bool:
+    """Deterministic structural quality gate for a generated investigation
+    question (Phase 4/11 of the RCA quality pass). True if the question is
+    well-formed; False if it should be rejected/regenerated. Domain-generic
+    -- every check is about sentence SHAPE, never specific vocabulary:
+
+    - must end with '?' and have enough words to be a real question
+    - must not contain the "confirm or refute:" concatenation pattern that
+      previously leaked raw evidence-list text into the question
+    - must not ask about reporting behavior instead of causal mechanism
+      (reuses the same guard 5-Why questions are held to)
+    """
+    if not question:
+        return False
+    q = question.strip()
+    if not q.endswith("?"):
+        return False
+    if len(q.split()) < 5:
+        return False
+    if "confirm or refute" in q.lower():
+        return False
+    from app.agent.causal_guard import is_reporting_why_question
+    if is_reporting_why_question(q):
+        return False
+    return True
+
+
+def hypothesis_confidence(hypothesis) -> str:
+    """Deterministic per-hypothesis confidence (distinct from
+    leading_hypothesis_confidence, which grades only the selected leader).
+    Never asserted by the LLM -- computed here from the same structural
+    signals used elsewhere (status, relevance_rank, whether discriminating
+    evidence was actually specified) so every hypothesis in the report
+    carries a confidence grade, not just the leading one."""
+    status = getattr(hypothesis, "status", "POSSIBLE")
+    rank = getattr(hypothesis, "relevance_rank", "MEDIUM")
+    has_discrimination = bool(getattr(hypothesis, "discrimination_evidence", None))
+    if status == "SUPPORTED":
+        return "HIGH" if rank == "HIGH" else "MEDIUM"
+    if status == "POSSIBLE":
+        if rank == "HIGH" and has_discrimination:
+            return "MEDIUM"
+        return "LOW"
+    return "LOW"
 
 
 def leading_hypothesis_confidence(candidate_hypotheses: list, leading_hypothesis: str | None) -> str:
@@ -396,15 +843,21 @@ def validate_causal_graph(root_cause, five_why, capa, mechanism: MechanismInfo |
     repair_five_why_with_mechanism, validate_capa_causal_linkage)."""
     violations: list[str] = []
 
-    # Root Cause -> must have supporting evidence if it claims certainty.
     status_value = getattr(root_cause.status, "value", root_cause.status) if root_cause else "NOT_ESTABLISHED"
-    if status_value in _ESTABLISHED_LIKE_STATUSES and root_cause and not root_cause.supporting_evidence:
-        # Not fatal on its own (narrative may carry the evidence reference),
-        # but worth surfacing: an ESTABLISHED-like claim with an empty
-        # supporting_evidence list is a weak edge.
-        violations.append("Root cause claims established-level certainty but supporting_evidence is empty")
 
-    # Candidate Hypothesis -> Evidence: every hypothesis needs a rationale
+    # Edge: Evidence -> Root Cause
+    # Root Cause -> must have supporting evidence if it claims certainty.
+    if status_value in _ESTABLISHED_LIKE_STATUSES:
+        if root_cause and not root_cause.supporting_evidence:
+            violations.append("Root cause claims established-level certainty but supporting_evidence is empty")
+        if not mechanism or mechanism.status != "VERIFIED":
+            violations.append(f"Root cause claims certainty ({status_value}) but mechanism is not VERIFIED ({getattr(mechanism, 'status', 'None')})")
+
+    # Edge: Mechanism -> Root Cause (Reported statement must not be asserted as verified root cause)
+    if status_value in _ESTABLISHED_LIKE_STATUSES and mechanism and mechanism.status == "REPORTED":
+        violations.append("Reported statement asserted as verified root cause without corroborating evidence")
+
+    # Edge: Candidate Hypothesis -> Evidence: every hypothesis needs a rationale
     # and something identifying what would confirm/discriminate it.
     for h in (root_cause.candidate_hypotheses if root_cause else []):
         if not h.rationale:
@@ -412,7 +865,7 @@ def validate_causal_graph(root_cause, five_why, capa, mechanism: MechanismInfo |
         if not h.evidence_needed and not h.discrimination_evidence:
             violations.append(f"Hypothesis {h.id} has no evidence_needed/discrimination_evidence")
 
-    # Corrective Action -> linked cause: every conditional CAPA action must
+    # Edge: Root Cause / Hypotheses -> Corrective Action: every conditional CAPA action must
     # trace back to a hypothesis (already enforced/repaired by
     # validate_capa_causal_linkage upstream; this re-checks post-repair).
     if capa:
@@ -424,7 +877,7 @@ def validate_causal_graph(root_cause, five_why, capa, mechanism: MechanismInfo |
             if action.action_type == "SYSTEMIC_ACTION" and not action.verification_method:
                 violations.append(f"Systemic CAPA action {action.if_cause_confirmed!r} has no verification_method")
 
-    # 5-Why -> mechanism preservation (already repaired upstream; re-check).
+    # Edge: Observation -> Mechanism -> 5-Why (already repaired upstream; re-check).
     if five_why and mechanism and mechanism.statement:
         if five_why_skips_available_mechanism(five_why.steps, mechanism):
             violations.append("5-Why chain does not reflect the explicitly available mechanism")

@@ -1,13 +1,8 @@
-"""Node 5: root_cause_analysis
+"""LEGACY NODE — NOT PART OF LIVE GRAPH.
+This module exists only for isolated unit-test guard checks.
+core_synthesis_node is the SOLE authoritative RCA path.
 
-Performs RCA and 5-Why analysis over the evidence ledger. This is a separate
-LLM call that reasons ONLY over classified evidence, not raw finding text,
-matching the existing pipeline's separation of extraction from classification.
-
-Enforces:
-  - ESTABLISHED status requires at least one VERIFIED evidence item
-  - 5-Why SUPPORTED answers require corresponding ledger entries
-  - Contributing factors are conditions, not action items
+Node 5: root_cause_analysis (Legacy)
 """
 
 from __future__ import annotations

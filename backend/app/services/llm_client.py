@@ -76,11 +76,19 @@ class LLMClient(Protocol):
         temperature: float = 0.2,
         response_format_json: bool = False,
         max_tokens: int | None = None,
+        num_ctx: int | None = None,
     ) -> str: ...
 
 
-def get_llm_client() -> LLMClient:
-    """Returns OllamaClient for local inference, or LLMRouter when explicitly configured."""
+def get_llm_client(timeout_seconds: float | None = None) -> LLMClient:
+    """Returns OllamaClient for local inference, or LLMRouter when explicitly configured.
+
+    `timeout_seconds` lets a caller request an operation-specific timeout
+    (e.g. a shorter one for an optional/secondary call, a dedicated one for
+    a compact recovery retry) instead of the single global
+    `ollama_timeout_seconds` default. Only honored for the direct-Ollama
+    path -- the router manages its own per-provider timeouts internally.
+    """
     from app.config import get_settings
 
     settings = get_settings()
@@ -89,4 +97,4 @@ def get_llm_client() -> LLMClient:
         return get_llm_router()
 
     from app.services.ollama_client import OllamaClient
-    return OllamaClient()
+    return OllamaClient(timeout_seconds=timeout_seconds)

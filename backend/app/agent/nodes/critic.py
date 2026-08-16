@@ -46,38 +46,100 @@ async def critic_node(state: AgentState) -> AgentState:
     evidence_ledger = state.get("evidence_ledger", [])
     root_cause = state.get("root_cause")
     five_why = state.get("five_why")
-    capa = state.get("capa_analysis")
-    impact = state.get("impact_assessment")
     settings = get_settings()
-    client = get_llm_client()
+
+    # DETERMINISTIC PRE-CRITIC QUALITY GATE: the critic is an exception-path
+    # quality-control mechanism, not a mandatory step on every successful
+    # synthesis (it costs a full extra LLM round-trip -- ~15-20s on this
+    # hardware -- for no benefit on an already-clean result). It only runs
+    # when a concrete, structural concern survives everything core_synthesis
+    # already checked deterministically:
+    #   - a fabricated mechanism/entity core_synthesis's own guards missed
+    #     (ungrounded_entities / mentions_unsupported_domain -- the same
+    #     checks core_synthesis applies to its own output, re-run here
+    #     because THIS is the last point before the report is finalized)
+    #   - a required analytical field came back empty when it shouldn't
+    #     (no candidate_hypotheses, no five_why steps) -- core_synthesis's
+    #     own fallbacks should already prevent this, so seeing it here means
+    #     something upstream genuinely misbehaved and deserves a second look
+    # A clean result skips straight to report generation.
+    from app.agent.grounding_guard import build_source_text, mentions_unsupported_domain, ungrounded_entities
+
+    source_text = build_source_text(state["request"].finding_text, evidence_ledger)
+
+    def _flagged(text: str | None) -> bool:
+        if not text:
+            return False
+        return bool(ungrounded_entities(text, source_text)) or mentions_unsupported_domain(text, source_text)
+
+    has_ungrounded = False
+    if root_cause:
+        if _flagged(root_cause.narrative) or _flagged(root_cause.statement):
+            has_ungrounded = True
+        if not root_cause.candidate_hypotheses:
+            has_ungrounded = True
+        for hyp in root_cause.candidate_hypotheses:
+            if _flagged(hyp.statement) or _flagged(hyp.name):
+                has_ungrounded = True
+                break
+    if five_why is not None and not five_why.steps:
+        has_ungrounded = True
+
+    if state.get("analysis_mode") == "DEGRADED" or not has_ungrounded:
+        trace.append(AgentTraceStep.ok("Deterministic critic firewall: Analysis grounded & structurally valid (0ms fast path)"))
+        state["critic_approved"] = True
+        state["critic_feedback"] = "Deterministic verification approved."
+        state["critic_send_back"] = False
+        state["critic_status"] = "SKIPPED"
+        state["trace"] = trace
+        state["errors"] = errors
+        return state
+
+    client = get_llm_client(timeout_seconds=settings.ollama_critic_timeout_seconds)
 
     system_prompt = (settings.agent_prompts_dir / "system_prompt.txt").read_text(encoding="utf-8")
     template = (settings.agent_prompts_dir / "critic.txt").read_text(encoding="utf-8")
 
+    # PHASE 6: the critic only ever ACTS on domain-relevance/grounding
+    # findings (drops flagged hypotheses, replaces a flagged narrative --
+    # see the SEMANTIC ENFORCEMENT block below); contributing_factors/capa/
+    # impact were never read from its response, so resending them was pure
+    # wasted input tokens. Evidence is trimmed the same way the compact
+    # synthesis-recovery path trims it (top VERIFIED/REPORTED items only) --
+    # the critic needs enough to judge grounding, not the full ledger.
+    from app.agent.nodes.core_synthesis import _trim_evidence_for_recovery
+    reason_parts = []
+    if root_cause and not root_cause.candidate_hypotheses:
+        reason_parts.append("no candidate hypotheses were generated")
+    if five_why is not None and not five_why.steps:
+        reason_parts.append("5-Why chain is empty")
+    if root_cause and (_flagged(root_cause.narrative) or _flagged(root_cause.statement)):
+        reason_parts.append("root cause narrative/statement may reference an unsupported entity or domain")
+    if root_cause and any(_flagged(h.statement) or _flagged(h.name) for h in root_cause.candidate_hypotheses):
+        reason_parts.append("one or more hypotheses may reference an unsupported entity or domain")
+    flag_reason = "; ".join(reason_parts) or "deterministic grounding check flagged a possible issue"
+
     prompt = template.format(
         finding_text=state["request"].finding_text,
         evidence_ledger_json=json.dumps(
-            [e.model_dump() for e in evidence_ledger], default=str
+            [e.model_dump() for e in _trim_evidence_for_recovery(evidence_ledger)], default=str
         ),
-        root_cause_status=root_cause.status if root_cause else "NOT_ESTABLISHED",
         root_cause_narrative=root_cause.narrative if root_cause else "Not established.",
         candidate_hypotheses_json=json.dumps(
             [h.model_dump() for h in (root_cause.candidate_hypotheses if root_cause else [])], default=str
         ),
-        contributing_factors_json=json.dumps(
-            [cf.model_dump() for cf in state.get("contributing_factors", [])], default=str
-        ),
-        five_why_json=five_why.model_dump_json(indent=2) if five_why else "{}",
-        capa_status=capa.status.value if capa else "INVESTIGATION_REQUIRED",
-        impact_status=impact.status if impact else "REQUIRES_ASSESSMENT",
+        flag_reason=flag_reason,
     )
 
     # Default: approve with warning if LLM fails
     approved = True
     send_back = False
     critic_feedback = "Critic review unavailable — LLM error. Proceeding to report generation."
+    critic_status = "OK"
 
     try:
+        from app.services.ollama_client import set_current_node
+        set_current_node("critic")
         raw = await client.chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -85,7 +147,8 @@ async def critic_node(state: AgentState) -> AgentState:
             ],
             temperature=0.0,
             response_format_json=True,
-            max_tokens=1024,
+            max_tokens=settings.ollama_critic_max_tokens,
+            num_ctx=settings.ollama_critic_num_ctx,
         )
         parsed = parse_llm_json(raw)
 
@@ -145,15 +208,24 @@ async def critic_node(state: AgentState) -> AgentState:
         # anything else -- must degrade gracefully to the pre-set safe
         # defaults above (approve with a warning) rather than crash the
         # whole graph and lose the analysis already produced upstream.
+        # Critical: this node NEVER sets/touches state["analysis_mode"]. The
+        # critic is a secondary/optional review of an already-successful
+        # core_synthesis result -- its own failure is not a primary-synthesis
+        # failure and must never demote analysis_mode="LLM" to "DEGRADED".
         logger.warning("Critic node failed: %s", exc)
-        trace.append(AgentTraceStep.warn(f"Critic review failed — proceeding to report: {exc}"))
+        trace.append(AgentTraceStep.warn(
+            f"Critic review unavailable ({type(exc).__name__}) — core synthesis result preserved as-is, "
+            f"analysis_mode unchanged: {exc}"
+        ))
         errors.append(f"Critic error: {exc}")
+        critic_status = "UNAVAILABLE"
 
     return {
         **state,
         "critic_approved": approved,
         "critic_send_back": send_back,
         "critic_feedback": critic_feedback,
+        "critic_status": critic_status,
         "critic_iteration": critic_iteration + 1,
         "trace": trace,
         "errors": errors,

@@ -6,8 +6,11 @@ thinking mode controls, context size, keep-alive, metrics logging, and fast fail
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import logging
 import time
+import weakref
 import httpx
 
 from app.config import get_settings
@@ -15,9 +18,77 @@ from app.services.llm_client import LLMClient, LLMError, LLMNetworkError, LLMTim
 
 logger = logging.getLogger(__name__)
 
+# Set by a node right before it calls chat_completion, purely so the request/
+# response log lines below can be attributed to a node (e.g. "core_synthesis"
+# vs "critic") without threading a `node` parameter through the shared
+# provider-agnostic LLMClient protocol used by every provider client and the
+# router. Same ContextVar-per-asyncio-task pattern as llm_router's
+# _last_call_metadata. Only meaningful when llm_provider="ollama" (the
+# default and only path that constructs OllamaClient directly).
+_current_node: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "ollama_current_node", default="unknown"
+)
+
+
+def set_current_node(node: str) -> None:
+    _current_node.set(node)
+
+
+# Ground-truth metadata from the most recent chat_completion call on this
+# asyncio task, so a caller can inspect WHY generation stopped (Ollama's own
+# `done_reason`: "stop" = the model finished naturally, "length" = it hit
+# num_predict) instead of inferring truncation from
+# generated_tokens == max_output_tokens, which is unreliable -- a model can
+# legitimately fill the entire budget with valid, complete JSON.
+_last_call_metadata: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "ollama_last_call_metadata", default={}
+)
+
+
+def get_last_call_metadata() -> dict:
+    return _last_call_metadata.get()
+
 
 class OllamaError(LLMError):
     pass
+
+
+# One persistent, connection-pooling AsyncClient per running event loop,
+# reused across every node/call instead of opening a fresh TCP connection
+# per request (Section 6): avoids paying handshake/connection-setup cost on
+# every single one of extraction/core_synthesis/critic's calls.
+#
+# Keyed by the event LOOP OBJECT itself (via a WeakKeyDictionary), never by
+# id(loop): a plain dict keyed by id() is unsafe here because a garbage-
+# collected loop's memory address can be reused by a brand-new loop (this
+# happens routinely under pytest-asyncio, which creates a fresh loop per
+# test), which would hand back an httpx.AsyncClient whose connection pool is
+# still bound to the OLD, now-dead loop's transport -- using it from the new
+# loop doesn't raise, it just hangs forever waiting on I/O that can never
+# complete. WeakKeyDictionary ties the cache entry to the loop's actual
+# lifetime, so a dead loop's entry is dropped automatically instead of
+# silently colliding with a new one.
+_client_lock = asyncio.Lock()
+_clients: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = weakref.WeakKeyDictionary()
+
+
+async def _get_shared_client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    client = _clients.get(loop)
+    if client is not None and not client.is_closed:
+        # timeout is set per-request below (httpx supports a per-call
+        # `timeout=` override), so a shared client is safe to reuse even
+        # though individual calls specify different timeouts.
+        return client
+    async with _client_lock:
+        client = _clients.get(loop)
+        if client is not None and not client.is_closed:
+            return client
+        client = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+        )
+        _clients[loop] = client
+        return client
 
 
 class OllamaClient(LLMClient):
@@ -63,16 +134,11 @@ class OllamaClient(LLMClient):
         temperature: float = 0.2,
         response_format_json: bool = False,
         max_tokens: int | None = None,
+        num_ctx: int | None = None,
     ) -> str:
         settings = self._settings
         url = self._get_native_url("/api/chat")
-
-        options: dict = {
-            "temperature": temperature if temperature is not None else settings.ollama_temperature,
-            "num_ctx": settings.ollama_num_ctx,
-        }
-        if max_tokens is not None:
-            options["num_predict"] = max_tokens
+        effective_num_ctx = num_ctx or settings.ollama_num_ctx
 
         payload: dict = {
             "model": settings.ollama_model,
@@ -80,46 +146,127 @@ class OllamaClient(LLMClient):
             "stream": False,
             "think": settings.ollama_thinking,
             "keep_alive": settings.ollama_keep_alive,
-            "options": options,
+            "options": {
+                "temperature": temperature if temperature is not None else settings.ollama_temperature,
+                "num_ctx": effective_num_ctx,
+                "num_predict": max_tokens or 1024,
+            },
         }
         if response_format_json:
             payload["format"] = "json"
 
+        node = _current_node.get()
+        prompt_chars = sum(len(m.get("content", "")) for m in messages)
+        # Rough heuristic only (~4 chars/token for English prose); the
+        # post-call log below reports Ollama's own prompt_eval_count, which
+        # is the ground truth -- this estimate exists so a caller can be
+        # warned about an oversized prompt BEFORE paying for the request.
+        estimated_input_tokens = prompt_chars // 4
+        logger.info(
+            "OLLAMA REQUEST node=%s model=%s prompt_chars=%d estimated_input_tokens=%d "
+            "max_output_tokens=%d temperature=%.2f think=%s num_ctx=%d keep_alive=%s",
+            node,
+            settings.ollama_model,
+            prompt_chars,
+            estimated_input_tokens,
+            payload["options"]["num_predict"],
+            payload["options"]["temperature"],
+            settings.ollama_thinking,
+            effective_num_ctx,
+            settings.ollama_keep_alive,
+        )
+        if estimated_input_tokens + payload["options"]["num_predict"] > effective_num_ctx:
+            logger.warning(
+                "OLLAMA REQUEST node=%s estimated_input_tokens(%d) + max_output_tokens(%d) "
+                "exceeds num_ctx(%d) -- context truncation/shifting is likely, which can make "
+                "this call far slower than its token count would suggest",
+                node, estimated_input_tokens, payload["options"]["num_predict"], effective_num_ctx,
+            )
+
         t_start = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    url,
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                )
+            client = await _get_shared_client()
+            resp = await client.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=self._timeout,
+            )
         except httpx.TimeoutException as exc:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            logger.error("provider=ollama model=%s event=timeout elapsed_ms=%d", settings.ollama_model, elapsed_ms)
+            logger.error(
+                "provider=ollama model=%s node=%s event=timeout elapsed_ms=%d timeout_setting_s=%.1f "
+                "failure_type=TIMEOUT",
+                settings.ollama_model, node, elapsed_ms, self._timeout,
+            )
+            _last_call_metadata.set({"failure_type": "TIMEOUT"})
             raise LLMTimeoutError(f"Ollama request timed out after {self._timeout}s.") from exc
         except httpx.HTTPError as exc:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            logger.error("provider=ollama model=%s event=network_error elapsed_ms=%d err=%s", settings.ollama_model, elapsed_ms, exc)
+            logger.error(
+                "provider=ollama model=%s node=%s event=network_error elapsed_ms=%d err=%s "
+                "failure_type=PROVIDER_FAILURE",
+                settings.ollama_model, node, elapsed_ms, exc,
+            )
+            _last_call_metadata.set({"failure_type": "PROVIDER_FAILURE"})
             raise LLMNetworkError(f"Ollama connection failed: {exc}. Is Ollama running at {settings.ollama_base_url}?") from exc
 
         elapsed_ms = int((time.monotonic() - t_start) * 1000)
 
         if resp.status_code >= 400:
-            logger.error("provider=ollama model=%s event=http_error status=%d elapsed_ms=%d", settings.ollama_model, resp.status_code, elapsed_ms)
+            logger.error(
+                "provider=ollama model=%s event=http_error status=%d elapsed_ms=%d failure_type=PROVIDER_FAILURE",
+                settings.ollama_model, resp.status_code, elapsed_ms,
+            )
+            _last_call_metadata.set({"failure_type": "PROVIDER_FAILURE"})
             raise OllamaError(f"Ollama returned HTTP {resp.status_code}: {resp.text}")
 
         data = resp.json()
         eval_count = data.get("eval_count", 0)
         eval_duration = data.get("eval_duration", 0)
         tokens_per_sec = round((eval_count / (eval_duration / 1e9)), 2) if eval_duration > 0 else 0.0
+        # Ground-truth split of where the elapsed time actually went (Ollama
+        # reports these in nanoseconds): prompt_eval = prefill of the input
+        # context, eval = generation of the output tokens, load = time spent
+        # loading/swapping the model in (should be ~0 while it stays warm).
+        prompt_eval_count = data.get("prompt_eval_count", 0)
+        prompt_eval_ms = round(data.get("prompt_eval_duration", 0) / 1e6)
+        load_ms = round(data.get("load_duration", 0) / 1e6)
+        # Ollama's own signal for WHY generation stopped: "stop" = the model
+        # emitted its own end-of-turn/end-of-JSON naturally; "length" = it
+        # was cut off at num_predict. This is the ground truth a caller
+        # should use to decide whether a response might be truncated --
+        # generated_tokens == max_output_tokens alone is NOT reliable proof,
+        # since a model can legitimately use the full budget and still
+        # finish (done_reason=="stop") right at the boundary.
+        done_reason = data.get("done_reason", "unknown")
 
         logger.info(
-            "provider=ollama model=%s elapsed_ms=%d tokens_generated=%d tokens_per_second=%.2f success=true",
+            "provider=ollama model=%s node=%s elapsed_ms=%d prompt_eval_count=%d prompt_eval_ms=%d "
+            "load_ms=%d tokens_generated=%d tokens_per_second=%.2f done_reason=%s max_output_tokens=%d "
+            "success=true",
             settings.ollama_model,
+            node,
             elapsed_ms,
+            prompt_eval_count,
+            prompt_eval_ms,
+            load_ms,
             eval_count,
             tokens_per_sec,
+            done_reason,
+            payload["options"]["num_predict"],
         )
+
+        _last_call_metadata.set({
+            "node": node,
+            "done_reason": done_reason,
+            "eval_count": eval_count,
+            "prompt_eval_count": prompt_eval_count,
+            "max_output_tokens": payload["options"]["num_predict"],
+            "elapsed_ms": elapsed_ms,
+            "load_ms": load_ms,
+            "hit_output_limit": done_reason == "length",
+        })
 
         try:
             content = data["message"]["content"]

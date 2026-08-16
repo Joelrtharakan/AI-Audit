@@ -366,6 +366,75 @@ async def test_core_synthesis_sets_leading_hypothesis_when_root_cause_not_establ
     assert root_cause.status == "NOT_ESTABLISHED"
     assert root_cause.leading_hypothesis is not None
     assert "H1" in root_cause.leading_hypothesis  # SUPPORTED hypothesis preferred over LOW-rank POSSIBLE one
+    assert root_cause.leading_hypothesis_status == "SELECTED"
+    assert result["analysis_mode"] == "LLM"
+
+
+@pytest.mark.asyncio
+async def test_core_synthesis_tied_hypotheses_are_explicit_not_silent():
+    """Class C (competing hypotheses): when two equally-plausible hypotheses
+    are genuinely tied, the report must say so explicitly rather than
+    leaving leading_hypothesis blank — a blank field is indistinguishable
+    from 'no analysis was done', which is exactly the complaint this fixes.
+    Both hypotheses must still be visible in candidate_hypotheses, and
+    analysis_mode must stay LLM (a genuine, disciplined analytical outcome,
+    not a failure)."""
+    from app.agent.nodes.core_synthesis import core_synthesis_node
+
+    finding_text = "The required monthly verification entry was not completed for the reporting period."
+    mechanism = "the responsible reviewer confirmed the verification was missed"
+    state = _build_state(finding_text, mechanism)
+
+    llm_response = json.dumps({
+        "root_cause": {
+            "status": "NOT_ESTABLISHED",
+            "category": "TO_BE_CONFIRMED",
+            "leading_hypothesis": None,
+            "candidate_hypotheses": [
+                {
+                    "id": "H1",
+                    "name": "TASK_ASSIGNMENT_GAP",
+                    "statement": "Responsibility for the verification was not clearly assigned for the affected period.",
+                    "status": "POSSIBLE",
+                    "evidence_needed": "Assignment/roster records",
+                    "relevance_rank": "HIGH",
+                },
+                {
+                    "id": "H2",
+                    "name": "SCHEDULING_GAP",
+                    "statement": "The verification schedule did not account for reviewer absence.",
+                    "status": "POSSIBLE",
+                    "evidence_needed": "Scheduling records",
+                    "relevance_rank": "HIGH",
+                },
+            ],
+            "narrative": "Two equally plausible explanations remain open given current evidence.",
+        },
+        "five_why": {"steps": [], "is_complete": False, "status_note": "Stopped at evidence boundary"},
+        "impact_assessment": {"status": "IMPACT_REQUIRES_ASSESSMENT", "areas": []},
+        "capa": {"status": "INVESTIGATION_REQUIRED", "potential_areas": [], "recommended_investigation": []},
+        "contributing_factors": [],
+        "ca_draft": {
+            "immediate_action": "Assess the affected verification record.",
+            "root_cause": "NOT_ESTABLISHED",
+            "root_cause_category": "TO_BE_CONFIRMED",
+            "preventive_action": "Strengthen verification controls.",
+            "impact_analysis": "Scope requires auditor assessment.",
+        },
+    })
+
+    with patch("app.agent.nodes.core_synthesis.get_llm_client") as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.chat_completion.return_value = llm_response
+        mock_get_client.return_value = mock_client
+        result = await core_synthesis_node(state)
+
+    root_cause = result["root_cause"]
+    assert result["analysis_mode"] == "LLM"
+    assert root_cause.leading_hypothesis_status == "TIED"
+    assert root_cause.leading_hypothesis == "NONE — COMPETING HYPOTHESES REMAIN TIED"
+    assert {h.id for h in root_cause.candidate_hypotheses} == {"H1", "H2"}
+    assert all(h.confidence is not None for h in root_cause.candidate_hypotheses)
 
 
 @pytest.mark.asyncio

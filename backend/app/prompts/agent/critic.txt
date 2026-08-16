@@ -1,81 +1,36 @@
-You are a critic reviewing an AI investigation analysis for quality, accuracy, and evidence grounding.
+A deterministic check flagged a possible issue in this analysis. Verify it using your own semantic
+judgment (not keyword matching) and correct it if real.
 
-FINDING (untrusted data):
+FINDING:
 {finding_text}
 
-EVIDENCE LEDGER:
+KEY EVIDENCE:
 {evidence_ledger_json}
 
-CURRENT ANALYSIS:
-Root cause status: {root_cause_status}
-Root cause narrative: {root_cause_narrative}
-Candidate hypotheses: {candidate_hypotheses_json}
-Contributing factors: {contributing_factors_json}
-5-Why: {five_why_json}
-CAPA status: {capa_status}
-Impact: {impact_status}
+ROOT CAUSE NARRATIVE: {root_cause_narrative}
+CANDIDATE HYPOTHESES: {candidate_hypotheses_json}
+FLAGGED CONCERN: {flag_reason}
 
-YOUR CRITIC TASKS — check each category:
+TASK -- DOMAIN RELEVANCE: for the narrative and EACH hypothesis above, does it introduce an actor,
+event, or causal domain (training, authorization, communication, supervision, workload, vendor, or
+any other) that is NOT actually evidenced in the finding/evidence above? A hypothesis may propose an
+explanation the finding doesn't state outright -- the test is whether its SPECIFIC MECHANISM has any
+real anchor in what was observed/reported, not whether the words themselves are ordinary. Example to
+reject: a missing-calibration-label finding producing a hypothesis about "miscommunication with the
+auditor" -- nothing in that finding involves an auditor interaction, so the mechanism is fabricated.
 
-1. EVIDENCE GROUNDING
-   - Is every factual claim supported by the evidence ledger?
-   - Was a REPORTED item mistakenly treated as VERIFIED fact?
-   - Was organizational knowledge invented (SOPs, policies, records not in ledger)?
-   - Are evidence gaps honestly disclosed?
+Also flag if evidence grounding is broken elsewhere (an invented entity/number/date, a REPORTED
+statement presented as VERIFIED) or if additional investigation would materially improve the
+analysis.
 
-2. ROOT CAUSE
-   - Is ESTABLISHED status actually justified by VERIFIED evidence in the ledger?
-   - Is the agent blaming an individual rather than a systemic factor?
-   - Are alternative causes considered?
-   - Is more investigation actually needed?
-
-3. CAPA
-   - Is CAPA_RECOMMENDED premature (root cause not ESTABLISHED)?
-   - Does the recommended action address the actual (not assumed) cause?
-   - Are recommendations labeled as possibilities, not requirements?
-
-4. IMPACT
-   - Is impact claimed without supporting evidence?
-   - Was recall/quarantine language used without an external impact statement?
-
-5. 5-WHY
-   - Are SUPPORTED answers actually supported by the ledger?
-   - Is the chain being artificially extended with UNKNOWN steps?
-
-6. DOMAIN RELEVANCE (read this one carefully — this is the check most likely to be missed):
-   For EACH candidate hypothesis listed above, ask: does it introduce an actor, event, interaction,
-   or causal domain (e.g. training, authorization, communication, supervision, workload, or ANY other
-   domain) that is NOT actually evidenced anywhere in the finding text or evidence ledger above? A
-   hypothesis is allowed to propose an explanation the finding doesn't state outright (that's a normal
-   hypothesis) — the test is whether the SPECIFIC MECHANISM it proposes has any real anchor in what was
-   actually observed/reported, versus being a generic explanation that could be pasted into any
-   unrelated finding with the nouns swapped. Example of what to reject: a finding about a missing
-   calibration label producing a hypothesis about "miscommunication with the auditor" — nothing in
-   that finding involves an auditor interaction at all, so the mechanism is fabricated even though the
-   words are ordinary. List the "id" of every hypothesis that fails this test. Apply the same test to
-   the root cause narrative and statement themselves.
-
-Respond with JSON:
+Respond with JSON only:
 {{
   "approved": true/false,
   "send_back_for_investigation": false,
-  "issues": [
-    {{
-      "category": "EVIDENCE|ROOT_CAUSE|CAPA|IMPACT|FIVE_WHY|DOMAIN_RELEVANCE",
-      "severity": "BLOCKING|WARNING",
-      "description": "specific issue found"
-    }}
-  ],
-  "feedback": "overall summary of issues or 'Analysis is well-grounded and appropriately uncertain.'",
-  "corrections_required": [
-    "specific correction needed before approval"
-  ],
-  "unsupported_hypothesis_ids": ["the 'id' of each candidate hypothesis that fails the DOMAIN RELEVANCE test above — empty list if none"],
+  "feedback": "one sentence",
+  "unsupported_hypothesis_ids": ["id of each hypothesis failing the domain-relevance test, else []"],
   "root_cause_narrative_unsupported": false
 }}
-
-If approved is false, corrections_required must be non-empty.
-If send_back_for_investigation is true, the agent will attempt another investigation round.
 Set send_back_for_investigation=true ONLY if additional tool calls would materially improve the analysis.
-Set root_cause_narrative_unsupported=true ONLY if the root cause narrative/statement itself (not just a
-candidate hypothesis) proposes a fabricated mechanism per the DOMAIN RELEVANCE test.
+Set root_cause_narrative_unsupported=true ONLY if the narrative/statement itself (not just a hypothesis)
+fabricates a mechanism per the test above.
