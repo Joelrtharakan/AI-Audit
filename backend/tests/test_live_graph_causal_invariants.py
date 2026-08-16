@@ -179,8 +179,14 @@ async def test_live_graph_mechanism_not_emitted_as_hypothesis_and_no_circular_wh
     assert "DOCUMENTATION_OMISSION" not in hyp_names
     assert not any("may not have been performed" in s for s in hyp_statements)
     assert not any("performed but not documented" in s for s in hyp_statements)
-    # Valid causal hypotheses must survive
-    assert any(n in hyp_names for n in ("SHIFT_HANDOVER_BREAKDOWN", "TASK_ASSIGNMENT_OR_HANDOVER_OMISSION"))
+    # SHIFT_HANDOVER_BREAKDOWN is itself an invented mechanism: this finding
+    # never mentions shift handover, a roster, or a task-assignment control
+    # -- "morning shift" is temporal context only (when the deviation was
+    # noticed), not evidence that handover/assignment itself failed. It
+    # must be rejected by the same unsupported-causal-specificity firewall
+    # as EXECUTION_OMISSION/DOCUMENTATION_OMISSION above, not preserved.
+    assert "SHIFT_HANDOVER_BREAKDOWN" not in hyp_names
+    assert not any("shift handover" in s.lower() for s in hyp_statements)
 
     # Invariant 6: A Why asks about reporting instead of causation ("Why did personnel report...") -> truncated/replaced
     five_why_questions = [s.question for s in report.five_why.steps]

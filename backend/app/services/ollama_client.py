@@ -195,18 +195,23 @@ class OllamaClient(LLMClient):
         except httpx.TimeoutException as exc:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
             logger.error(
-                "provider=ollama model=%s node=%s event=timeout elapsed_ms=%d timeout_setting_s=%.1f "
-                "failure_type=TIMEOUT",
-                settings.ollama_model, node, elapsed_ms, self._timeout,
+                "OLLAMA REQUEST FAILED node=%s model=%s failure_type=TIMEOUT elapsed_ms=%d "
+                "timeout_setting_s=%.1f requested_max_output=%d estimated_input_tokens=%d "
+                "num_ctx=%d think=%s",
+                node, settings.ollama_model, elapsed_ms, self._timeout,
+                payload["options"]["num_predict"], estimated_input_tokens,
+                effective_num_ctx, settings.ollama_thinking,
             )
             _last_call_metadata.set({"failure_type": "TIMEOUT"})
             raise LLMTimeoutError(f"Ollama request timed out after {self._timeout}s.") from exc
         except httpx.HTTPError as exc:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
             logger.error(
-                "provider=ollama model=%s node=%s event=network_error elapsed_ms=%d err=%s "
-                "failure_type=PROVIDER_FAILURE",
-                settings.ollama_model, node, elapsed_ms, exc,
+                "OLLAMA REQUEST FAILED node=%s model=%s failure_type=PROVIDER_FAILURE elapsed_ms=%d "
+                "err=%s requested_max_output=%d estimated_input_tokens=%d num_ctx=%d think=%s",
+                node, settings.ollama_model, elapsed_ms, exc,
+                payload["options"]["num_predict"], estimated_input_tokens,
+                effective_num_ctx, settings.ollama_thinking,
             )
             _last_call_metadata.set({"failure_type": "PROVIDER_FAILURE"})
             raise LLMNetworkError(f"Ollama connection failed: {exc}. Is Ollama running at {settings.ollama_base_url}?") from exc
@@ -215,8 +220,8 @@ class OllamaClient(LLMClient):
 
         if resp.status_code >= 400:
             logger.error(
-                "provider=ollama model=%s event=http_error status=%d elapsed_ms=%d failure_type=PROVIDER_FAILURE",
-                settings.ollama_model, resp.status_code, elapsed_ms,
+                "OLLAMA REQUEST FAILED node=%s model=%s failure_type=HTTP_ERROR status=%d elapsed_ms=%d",
+                node, settings.ollama_model, resp.status_code, elapsed_ms,
             )
             _last_call_metadata.set({"failure_type": "PROVIDER_FAILURE"})
             raise OllamaError(f"Ollama returned HTTP {resp.status_code}: {resp.text}")

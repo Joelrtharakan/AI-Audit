@@ -115,17 +115,23 @@ def extract_immediate_mechanism(
        treating every verified fact as "the mechanism" would misclassify
        the observation itself as its own explanation.
     """
+    from app.services.semantic_subject import naturalize_reported_claim
+
     for claim in reported_statements or []:
         polarity = classify_mechanism_polarity(claim)
         if polarity:
-            return MechanismInfo(statement=claim, status="REPORTED", polarity=polarity, source_claim=claim)
+            return MechanismInfo(
+                statement=naturalize_reported_claim(claim), status="REPORTED", polarity=polarity, source_claim=claim
+            )
     for claim in verified_facts or []:
         polarity = classify_mechanism_polarity(claim)
         if polarity:
             return MechanismInfo(statement=claim, status="VERIFIED", polarity=polarity, source_claim=claim)
     for claim in reported_statements or []:
         if claim and claim.strip():
-            return MechanismInfo(statement=claim, status="REPORTED", polarity="general", source_claim=claim)
+            return MechanismInfo(
+                statement=naturalize_reported_claim(claim), status="REPORTED", polarity="general", source_claim=claim
+            )
     return MechanismInfo()
 
 
@@ -327,6 +333,36 @@ def is_generic_non_analysis_filler(text: str | None) -> bool:
     return bool(_GENERIC_FILLER_RE.match(text.strip()))
 
 
+_EVIDENCE_BOUNDARY_ACKNOWLEDGMENT_RE = re.compile(
+    r"\b(?:not\s+established|cannot\s+be\s+determined|could\s+not\s+be\s+determined|"
+    r"insufficient\s+evidence|no\s+objective\s+evidence|not\s+confirmed|"
+    r"unclear\s+from\s+the\s+available\s+evidence|not\s+yet\s+established|"
+    r"has\s+not\s+been\s+established|does\s+not\s+establish|not\s+been\s+verified|"
+    r"no\s+evidence\s+(?:currently\s+)?(?:available|exists))\b",
+    re.IGNORECASE,
+)
+
+
+def five_why_answer_invents_mechanism_at_unknown_status(answer: str | None, status: str | None) -> bool:
+    """True if a 5-Why step is labeled UNKNOWN/REQUIRES_EVIDENCE (the chain
+    has reached the evidence boundary) but its answer text nonetheless
+    reads as a confident, specific factual claim ("There was no reminder
+    or system prompt for logging") rather than acknowledging that boundary
+    ("The reason ... is not established from the available evidence").
+
+    A status of UNKNOWN with an answer that asserts a brand-new,
+    unattributed mechanism is a content/status mismatch: the LLM has
+    silently invented an explanation for the gap instead of stating that
+    the gap is unexplained -- exactly the "assumed cause" failure mode this
+    system exists to prevent, just expressed as prose instead of a status
+    label. Detected structurally (absence of any boundary-acknowledgment
+    phrase), not by matching this finding's specific wording.
+    """
+    if not answer or status not in ("UNKNOWN", "REQUIRES_EVIDENCE"):
+        return False
+    return not _EVIDENCE_BOUNDARY_ACKNOWLEDGMENT_RE.search(answer)
+
+
 # ---------------------------------------------------------------------------
 # 5. Hypothesis causality: reject a "hypothesis" that is really just an
 #    evidence-gap/observation restatement, not a proposed explanation.
@@ -500,6 +536,107 @@ def hypothesis_attacks_statement_credibility(statement: str | None) -> bool:
     return bool(_STATEMENT_CREDIBILITY_ATTACK_RE.search(statement))
 
 
+_GENERIC_HYPOTHESIS_NAME_RE = re.compile(
+    r"^\s*(?:process\s+(?:oversight|failure|inconsistency|gap|weakness|issue)|"
+    r"(?:communication|documentation|training|system|quality|procedural|management)\s+"
+    r"(?:issue|problem|gap|inconsistency|weakness)|"
+    r"human\s+error|oversight)\s*$",
+    re.IGNORECASE,
+)
+# A name that is literally just the hypothesis's own ID pattern ("H2",
+# "HYP_003") is a raw internal identifier leaking into what's supposed to
+# be a human-readable title -- checked independent of the hypothesis's
+# actual assigned id (any LLM-produced hypothesis could echo any Hn/HYP_n
+# shape here), not tied to one specific id value.
+_BARE_HYPOTHESIS_ID_NAME_RE = re.compile(r"^\s*(?:H\d+|HYP[_-]?\d+)\s*$", re.IGNORECASE)
+
+
+def hypothesis_name_is_generic(name: str | None) -> bool:
+    """True if a hypothesis's `name`/title is either a vague relabeling of
+    the finding ("Process Oversight", "Communication Issue", "Training
+    Problem") or a raw internal identifier ("H2") rather than a precise,
+    testable causal proposition. These titles carry no discriminating
+    content -- they could be attached to almost any nonconformity in any
+    domain (or, worse, expose implementation detail directly to the
+    auditor) -- and their vagueness is itself a sign the underlying
+    statement is equally unmoored from this finding's specific evidence. A
+    hypothesis must be nameable as a specific, falsifiable mechanism (e.g.
+    REVISION_COMMUNICATION_OR_ACKNOWLEDGEMENT_GAP), not a generic category
+    label or its own ID."""
+    if not name:
+        return False
+    stripped = name.strip()
+    return bool(_GENERIC_HYPOTHESIS_NAME_RE.match(stripped) or _BARE_HYPOTHESIS_ID_NAME_RE.match(stripped))
+
+
+# A hypothesis STATEMENT (not just its name/title) can be just as vague as
+# a generic name: "Execution or task-control factors may have contributed
+# to the missed activity" replaces one invented mechanism ("shift plan")
+# with a differently-worded but equally unlicensed one -- a generic causal
+# BUCKET (execution/task-control/process/operational/human/management/
+# control factors, weakness, oversight, failure, gap) standing in for a
+# real mechanism. This is unconditional (no allowed_context to check --
+# being this vague is disqualifying regardless of what the finding says),
+# unlike the domain-specific guards above which ARE excusable given the
+# right evidence.
+_GENERIC_CAUSAL_BUCKET_RE = re.compile(
+    r"\b(?:execution|task[\s-]control|process|operational|human|management|control)\s+"
+    r"(?:factors?|weakness(?:es)?|oversight|failure|gap)\b(?:(?!\.).){0,80}?\b"
+    r"(?:may\s+have\s+|might\s+have\s+|could\s+have\s+)?contribut\w+\b",
+    re.IGNORECASE,
+)
+
+
+def hypothesis_statement_is_generic_causal_bucket(statement: str | None) -> bool:
+    """True if a hypothesis STATEMENT names only a generic causal category
+    ("execution/task-control/process/operational/human/management/control
+    factors/weakness/oversight/failure/gap ... may have contributed") in
+    place of a specific, evidence-grounded mechanism.
+
+    A hedged, broad category is not automatically safer than a specific
+    invented one -- it just moves the same defect one level of abstraction
+    up. When the evidence doesn't license a specific mechanism, the
+    correct output is zero hypotheses (with this category retained only as
+    an INVESTIGATION AREA, never as a candidate root-cause hypothesis), not
+    a vaguer hypothesis standing in for a specific one."""
+    if not statement:
+        return False
+    return bool(_GENERIC_CAUSAL_BUCKET_RE.search(statement))
+
+
+_TITLE_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "for", "to", "and", "or", "may", "might", "have",
+    "been", "was", "were", "is", "are", "not", "with", "by", "that", "this",
+    "at", "in", "on", "before", "after", "during", "could", "would", "may have",
+    "did", "does", "do", "which", "who", "its", "their", "it",
+})
+
+
+def derive_hypothesis_title_from_statement(statement: str | None, hypothesis_id: str) -> str:
+    """Build a human-readable, auditor-facing hypothesis title from the
+    hypothesis's own statement content -- used when a title must be
+    replaced (e.g. it was too generic) and there is no LLM-provided title
+    worth keeping.
+
+    Must NEVER produce an internal-looking placeholder like
+    "CANDIDATE_MECHANISM_H2" (Section 13): an auditor reading the final
+    report has no idea what that means, and it visibly leaks
+    implementation detail. Deriving the title FROM the statement instead
+    keeps it human-readable and specific to this finding, matching the
+    style of the deterministic generator's own SHORT_CODE names (e.g.
+    TRAINING_RECORD_UNAVAILABLE) without inventing new causal content --
+    it's a pure text transformation of already-vetted statement text.
+    """
+    if not statement:
+        return f"Candidate Mechanism {hypothesis_id}"
+    words = re.findall(r"[A-Za-z]+", statement)
+    meaningful = [w for w in words if w.lower() not in _TITLE_STOPWORDS and len(w) > 2]
+    picked = meaningful[:6] if meaningful else words[:6]
+    if not picked:
+        return f"Candidate Mechanism {hypothesis_id}"
+    return " ".join(w.capitalize() for w in picked)
+
+
 def is_evidence_gap_not_hypothesis(statement: str | None, source_text: str) -> bool:
     """True if `statement` is a restated fact/evidence-gap from the finding
     (e.g. "the certificate was not available during the audit") rather than
@@ -657,9 +794,35 @@ def validate_why_question(
 # 8. Hypothesis quality validation (Phase 6)
 # ---------------------------------------------------------------------------
 
+# Concept-root pattern for the scheduling/task-assignment/shift-handover
+# mechanism family, shared between the target (does the HYPOTHESIS invoke
+# this concept?) and the allowed-context (does the FINDING independently
+# license it?) checks below -- covers hyphenated/spaced variants and both
+# "plan" and "roster" phrasing so paraphrases of the same concept are
+# treated symmetrically on both sides of the check.
+_SCHEDULING_CONCEPT_PATTERN = (
+    r"\bschedul\w*\b|\bshift[\s-]plan\b|\bduty[\s-]?(?:plan|roster)\b|"
+    r"\btask\s+assignment\b|\bstaffing\s+plan\b|\bnot\s+assigned\s+to\b"
+)
+
+# Same technique for the notification/communication/distribution/
+# acknowledgement mechanism family (the revision-communication-chain
+# concepts): shared between target and allowed-context so any paraphrase
+# of "notification/communication/distribution/acknowledgement failed" is
+# treated symmetrically against whatever form of that same concept the
+# finding itself may (or may not) independently use.
+_NOTIFICATION_CONCEPT_PATTERN = (
+    r"\bnotif\w*\b|\bnotice\b|\bcommunicat\w*\b|\bdistribut\w*\b|\backnowledg\w*\b|\bannounc\w*\b"
+)
+
 _UNSUPPORTED_SPECIFICITY_CHECKS = [
     (
-        re.compile(r"\b(?:accessible\s+at\s+the\s+point\s+of\s+use|point\s+of\s+use\s+copy|workstation\s+copy|document\s+accessibility)\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:accessible\s+at\s+the\s+point\s+of\s+use|point\s+of\s+use\s+copy|workstation\s+copy|"
+            r"document\s+accessibility|(?:was|were)\s+not\s+(?:easily\s+|readily\s+)?accessible|"
+            r"\binaccessible\b)\b",
+            re.IGNORECASE,
+        ),
         re.compile(r"\b(?:access|point\s+of\s+use|workstation|physical|copy|location|retriev)\b", re.IGNORECASE),
         "Invented point-of-use procedure accessibility failure without supporting evidence",
     ),
@@ -689,8 +852,10 @@ _UNSUPPORTED_SPECIFICITY_CHECKS = [
             re.IGNORECASE,
         ),
         re.compile(
-            r"\b(?:malfunction\w*|fail\w*|fault\w*|broke|breakdown|error\s+code|alarm|drift|"
-            r"out\s+of\s+calibration|power\s+outage|power\s+loss|maintenance)\b",
+            r"\b(?:malfunction\w*|fault\w*|broke|breakdown|error\s+code|alarm|drift|"
+            r"out\s+of\s+calibration|power\s+outage|power\s+loss|"
+            r"(?:equipment|instrument|system|device|sensor)\s+fail\w*|"
+            r"maintenance\b(?:(?!\.).){0,40}?\b(?:failure|lapse|overdue|missed|was\s+not\s+performed))\b",
             re.IGNORECASE,
         ),
         "Invented equipment/system/software/maintenance malfunction mechanism with no fault, error, alarm, or outage evidence in the finding",
@@ -704,7 +869,8 @@ _UNSUPPORTED_SPECIFICITY_CHECKS = [
         re.compile(
             r"\b(?:procedural\s+clarity|procedure\s+(?:was|is)\s+(?:unclear|ambiguous|confusing)|"
             r"guidance\s+(?:weakness|gap|was\s+insufficient)|lack\s+of\s+clarity\s+in\s+the\s+procedure|"
-            r"ambiguous\s+procedure|unclear\s+instructions?)\b",
+            r"ambiguous\s+procedure|unclear\s+instructions?|"
+            r"lack(?:ed|s)?\s+clear(?:ity)?\s+(?:guidance|instructions?))\b",
             re.IGNORECASE,
         ),
         re.compile(
@@ -714,7 +880,423 @@ _UNSUPPORTED_SPECIFICITY_CHECKS = [
         ),
         "Invented procedural clarity/guidance weakness with no evidence describing the procedure's own content or clarity",
     ),
+    # "The record was unavailable during the audit" establishes exactly
+    # that -- unavailability at audit time -- and nothing about WHY: not
+    # that it was never created, not that it was mishandled, and certainly
+    # not that it was lost/destroyed/discarded (a specific, stronger claim
+    # than "not maintained/controlled as required", which is the legitimate,
+    # already-supported record-control-gap hypothesis type and is
+    # deliberately NOT targeted here -- only the sharper loss/destruction
+    # claim, which requires the finding to actually describe that event).
+    (
+        re.compile(
+            r"\b(?:records?|logs?|certificates?|documents?|attendance\s+sheets?)\b"
+            r"(?:(?!\.).){0,40}?"
+            r"(?:\b(?:was|were)\s+(?:lost|destroyed|discarded|misplaced|deleted|damaged|corrupted)\b|"
+            r"(?:could\s+not\s+be\s+|failed\s+to\s+(?:be\s+)?|was\s+unable\s+to\s+be\s+)"
+            r"(?:retrieve[d]?|locate[d]?|find|found)\b|"
+            r"retrieval\s+(?:failed|was\s+unsuccessful))",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:lost|destroyed|discarded|misplaced|deleted|damaged|corrupted)\b|"
+            r"(?:could\s+not\s+be\s+|failed\s+to\s+(?:be\s+)?|was\s+unable\s+to\s+be\s+)"
+            r"(?:retrieve[d]?|locate[d]?|find|found)\b|"
+            r"retrieval\s+(?:failed|was\s+unsuccessful)",
+            re.IGNORECASE,
+        ),
+        "Invented record-loss/retrieval-failure claim — the finding only establishes the record was unavailable during the audit, not that it was lost, destroyed, discarded, damaged, or that retrieval was attempted and failed",
+    ),
+    # TRAINING/COMPETENCY is a distinct causal domain from AWARENESS/
+    # COMMUNICATION -- "the operator was unaware of a revision" is
+    # evidence about notification/acknowledgement, never by itself
+    # evidence about whether training/retraining/qualification was
+    # required, applicable, or lacking. Eligible only when the finding
+    # itself contains training/competency vocabulary; unawareness words
+    # alone ("unaware", "did not know", "unfamiliar") never satisfy this.
+    (
+        re.compile(
+            r"\b(?:re)?train(?:ed|ing)?\b|\bcompetenc\w*\b|\bqualif(?:y|ied|ication)\w*\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:re)?train(?:ed|ing)?\b|\bcompetenc\w*\b|\bqualif(?:y|ied|ication)\w*\b|"
+            r"\bcourse\b|\brefresher\b|\battendance\b",
+            re.IGNORECASE,
+        ),
+        "Invented training/competency/qualification mechanism — the finding contains no training, retraining, competency, or qualification vocabulary; unawareness of a revision is a communication/acknowledgement signal, not evidence of a training gap",
+    ),
+    # SCHEDULING/TASK-ASSIGNMENT is a distinct causal domain from a bare
+    # "missed" report -- "the check was missed during the morning shift"
+    # names WHEN the deviation was noticed (temporal context), never HOW
+    # responsibility was assigned or transferred. Detected by CONCEPT ROOT
+    # ("schedul-", "shift plan", "duty roster", "task assignment") appearing
+    # ANYWHERE in the statement, not by enumerating phrase templates -- an
+    # LLM can paraphrase "not scheduled" a dozen ways ("wasn't included in
+    # the schedule", "scheduling controls were inadequate", "system records
+    # show the check was scheduled"), and every one of them still contains
+    # the root concept word regardless of the surrounding sentence shape.
+    # Whether the claim asserts scheduling WAS or WAS NOT done is
+    # irrelevant -- either direction is an unlicensed claim about
+    # scheduling absent real evidence. Eligible only when the finding
+    # itself contains actual scheduling/assignment/roster vocabulary; a
+    # bare time-of-day/shift reference is NOT that evidence (the allowed
+    # context below deliberately excludes bare "shift").
+    (
+        re.compile(
+            _SCHEDULING_CONCEPT_PATTERN + r"|\bnot\s+planned\b",
+            re.IGNORECASE,
+        ),
+        # Deliberately the SAME concept-root pattern as the target: whatever
+        # wording the hypothesis used for the scheduling concept, the
+        # finding is licensed to support it if the finding independently
+        # uses ANY form of that same concept (paraphrase-symmetric) --
+        # never a hand-picked list of specific excusing phrases that a
+        # differently-tensed or differently-worded finding sentence
+        # ("the schedule showed..." vs "...shows...") would silently miss.
+        # Bare "shift" (a time-of-day reference) is still excluded since it
+        # matches none of these concept roots on its own.
+        re.compile(_SCHEDULING_CONCEPT_PATTERN, re.IGNORECASE),
+        "Invented scheduling/task-assignment/shift-handover mechanism — a bare shift/time reference is temporal context, not evidence that scheduling, assignment, or handover itself was involved (in either direction)",
+    ),
+    # Same concept-root approach for reminder/notification/alert mechanisms
+    # -- "reminder"/"prompt"/"alert" appearing anywhere in the statement,
+    # not a fixed phrase list. Deliberately excludes generic "verification
+    # control" (a distinct, separately-licensed mechanism used elsewhere
+    # for record/authorization verification) so this only targets the
+    # reminder/notification/alert concept specifically.
+    (
+        re.compile(r"\breminder\b|\bprompt\b|\balert\b", re.IGNORECASE),
+        re.compile(
+            r"\breminder\s+system\b|\balert\s+log\b|\bnotification\s+system\b|"
+            r"\bprompt\s+(?:was\s+not\s+)?(?:sent|triggered|issued)\b",
+            re.IGNORECASE,
+        ),
+        "Invented reminder/notification/alert mechanism — the finding contains no evidence of a reminder, alert, or automated notification system, let alone its failure",
+    ),
 ]
+
+_SELF_ASSERTED_EVIDENCE_RE = re.compile(
+    r"\b(?:system\s+records?|records?|the\s+log|logs?|data|the\s+system)\s+"
+    r"(?:show|shows|showed|indicate|indicates|indicated|confirm|confirms|confirmed|reveal|reveals|revealed)\b",
+    re.IGNORECASE,
+)
+
+
+def hypothesis_asserts_self_referential_evidence(statement: str | None) -> bool:
+    """True if a hypothesis statement narrates its OWN supporting evidence
+    inline ("system records show...", "the log indicates...", "records
+    confirm...") instead of actually being grounded via
+    `supporting_claim_ids` in the real evidence ledger.
+
+    A hypothesis SAYING evidence exists is not the same as evidence
+    actually existing in this case's ledger -- this phrasing is a generic
+    way a claim can smuggle an unverified assertion past evidence-grounding
+    review by dressing it up as if it already cites a source, regardless of
+    which mechanism (scheduling, training, equipment, anything) it's
+    attached to. Domain-agnostic: does not name any specific mechanism
+    concept, only the self-referential "X shows/indicates/confirms" shape."""
+    if not statement:
+        return False
+    return bool(_SELF_ASSERTED_EVIDENCE_RE.search(statement))
+
+
+# A hypothesis escalates from "mechanism-level" (something happened this
+# time, to this specific case) to "systemic-level" (the organization's
+# process/system/control itself is broken) whenever it pairs a systemic
+# NOUN (process/system/control/mechanism/management) with a FAILURE VERB
+# (lacked/failed/was ineffective/did not exist/was inadequate/was
+# defective/was not in place), in either word order. This is deliberately
+# ONE domain-agnostic pattern covering training, communication, scheduling,
+# maintenance, revision-control, record-control, verification-control, or
+# any other domain -- not a separate regex per mechanism family (Section 19
+# of the governing spec explicitly requires this consolidation instead of
+# enumerating "is_training_process_failure()", "is_comms_process_failure()",
+# etc. one at a time).
+_SYSTEMIC_NOUN = r"(?:process|system|control|mechanism|management)"
+_SYSTEMIC_FAILURE_VERB = (
+    r"(?:lacked|failed|was\s+ineffective|did\s+not\s+exist|was\s+inadequate|"
+    r"was\s+defective|was\s+not\s+(?:defined|established|in\s+place))"
+)
+_SYSTEMIC_ESCALATION_RE = re.compile(
+    rf"\b{_SYSTEMIC_NOUN}\b(?:(?!\.).){{0,60}}?\b{_SYSTEMIC_FAILURE_VERB}\b|"
+    rf"\b{_SYSTEMIC_FAILURE_VERB}\b(?:(?!\.).){{0,60}}?\b{_SYSTEMIC_NOUN}\b",
+    re.IGNORECASE,
+)
+# What licenses a systemic claim: the finding must independently cite an
+# actual artifact/finding ABOUT the process (a review, audit, documentation,
+# log, or record that was consulted), not merely restate the deviation or a
+# person's report about the event itself. Also domain-agnostic -- these are
+# generic "something was actually checked/found" verbs, not a list of
+# per-domain record names.
+_SYSTEMIC_EVIDENCE_RE = re.compile(
+    r"\b(?:review\s+(?:showed|found|revealed)|audit\s+(?:showed|found|revealed)|"
+    r"documentation\s+(?:shows|showed|confirms|confirmed)|records?\s+(?:shows?|showed|confirms?|confirmed)|"
+    r"log\s+(?:shows?|showed)|investigation\s+(?:found|showed|revealed)|"
+    r"(?:process|system|control)\s+documentation\s+(?:shows?|showed|confirms?)|"
+    r"no\s+\w+\s+(?:step|control)\s+(?:was\s+)?defined)\b",
+    re.IGNORECASE,
+)
+
+
+def hypothesis_asserts_systemic_cause_without_process_evidence(statement: str | None, source_text: str) -> bool:
+    """True if a hypothesis escalates to SYSTEMIC/process-level causation
+    ("the revision process lacked a mechanism...", "the training system
+    failed...", "the record-control process was defective...") without the
+    finding independently citing any actual review/audit/documentation/
+    record finding ABOUT that process.
+
+    This is the Level 1 -> Level 4 jump the governing spec forbids: a
+    REPORTED event about what happened THIS time (e.g. "the operator was
+    unaware of a revision") never by itself establishes that the
+    organization's underlying process/system/control is broken -- that is
+    a categorically stronger, systemic claim requiring its own
+    process-level evidence, regardless of which mechanism family
+    (training/communication/scheduling/maintenance/record-control/
+    verification/anything) the hypothesis names.
+    """
+    if not statement or not _SYSTEMIC_ESCALATION_RE.search(statement):
+        return False
+    return not _SYSTEMIC_EVIDENCE_RE.search(source_text or "")
+
+
+# NOTE: an earlier version of this list also rejected the WORDING pattern
+# "X occurred but wasn't documented/recorded" outright, regardless of
+# hedging. That was an over-correction: "the activity may have been
+# completed, but objective completion evidence was unavailable" is a
+# legitimate, evidence-grounded CANDIDATE HYPOTHESIS (not an assertion of
+# fact) whenever a REPORTED claim states completion and the record is
+# independently VERIFIED unavailable/absent. The distinguishing factor is
+# NOT the underlying mechanism (record-availability-vs-completion is a
+# perfectly valid causal branch) -- it's whether the sentence ASSERTS the
+# activity occurred as settled fact ("was conducted") or preserves the
+# uncertainty ("may have been conducted"). See
+# hypothesis_asserts_unhedged_unverified_completion() below, which targets
+# only the unhedged, fact-asserting phrasing.
+_UNHEDGED_COMPLETION_BUT_UNDOCUMENTED_RE = re.compile(
+    r"\b(?:was|were)\s+(?:conducted|performed|completed|carried\s+out|done)\s+but\s+"
+    r"(?:was\s+|were\s+)?not\s+(?:properly\s+|adequately\s+)?(?:documented|recorded|retained|logged)\b",
+    re.IGNORECASE,
+)
+_HYPOTHESIS_HEDGE_WORD_RE = re.compile(
+    r"\b(?:may|might|could|possibly|perhaps|potentially)\b", re.IGNORECASE
+)
+
+
+def hypothesis_asserts_unhedged_unverified_completion(statement: str | None) -> bool:
+    """True if `statement` asserts an activity occurred as SETTLED FACT
+    (no hedging word anywhere in the sentence) paired with an unverified
+    documentation-failure claim -- e.g. "The training was conducted but not
+    properly documented." The same underlying causal branch phrased with
+    uncertainty-preserving language ("training MAY HAVE been completed, but
+    the record was unavailable") is a legitimate hypothesis and is
+    deliberately NOT flagged -- only the unhedged, fact-asserting version,
+    which silently promotes a REPORTED completion claim into an assumed
+    fact within the hypothesis's own statement."""
+    if not statement:
+        return False
+    if not _UNHEDGED_COMPLETION_BUT_UNDOCUMENTED_RE.search(statement):
+        return False
+    return not _HYPOTHESIS_HEDGE_WORD_RE.search(statement)
+
+
+def hypothesis_asserts_unhedged_notification_failure(statement: str | None, source_text: str) -> bool:
+    """True if `statement` asserts, as SETTLED FACT (no hedging word
+    anywhere in the sentence), that a notification/communication/
+    distribution/acknowledgement event did NOT occur -- e.g. "The revision
+    occurred without proper notification to the operator" -- when the
+    finding provides no independent evidence of that concept.
+
+    This is the causal-event-inversion defect: a REPORTED downstream state
+    ("the operator was unaware") can license investigating whether
+    notification/communication/acknowledgement was effective (a HEDGED
+    Level-2 candidate: "may not have been effectively communicated"), but
+    it can never establish, as settled fact, that the upstream event
+    itself did not happen -- that is a stronger, unlicensed claim
+    regardless of which concept-family word (notification/communication/
+    distribution/acknowledgement/announcement) is used.
+
+    Uses the SAME concept-root matching as the scheduling/reminder guards
+    (any paraphrase of "notification"/"communication"/etc., not a fixed
+    phrase list) combined with the SAME hedge-exemption as
+    hypothesis_asserts_unhedged_unverified_completion(): a hedged
+    formulation of the identical mechanism is a legitimate candidate
+    hypothesis and must not be rejected merely for sharing vocabulary with
+    the unhedged, unlicensed version. Licensed (regardless of hedging)
+    when the finding independently uses any form of the same concept.
+    """
+    if not statement or not re.search(_NOTIFICATION_CONCEPT_PATTERN, statement, re.IGNORECASE):
+        return False
+    if _HYPOTHESIS_HEDGE_WORD_RE.search(statement):
+        return False
+    return not re.search(_NOTIFICATION_CONCEPT_PATTERN, source_text or "", re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
+# Structural (not word-list) guard against unlicensed CHANGE-EVENT defect
+# claims.
+#
+# `hypothesis_asserts_unhedged_notification_failure` above (and its sibling
+# concept-root patterns for scheduling/reminders/malfunction/etc.) work by
+# enumerating the family of words that can express a given mechanism. That
+# approach cannot keep pace with paraphrase generation: "without prior
+# notice" gets fixed, and the next run produces "not properly documented or
+# disseminated" -- a different verb family entirely (documentation,
+# distribution) describing the exact same unlicensed inference (a REPORTED
+# downstream state -- "operator was unaware" -- promoted into a SETTLED-FACT
+# claim about an upstream event -- the revision/change process itself).
+#
+# The invariant that actually holds, regardless of vocabulary, is
+# STRUCTURAL: any hypothesis whose grammatical SUBJECT is the change event
+# itself ("the revision", "the procedure change", "the update") paired with
+# ANY unhedged negative-outcome clause ("was not X-ed", "lacked X",
+# "occurred/implemented without X") is asserting a fact about how the
+# change was handled. The finding in this recurring defect class never
+# describes the change-handling process at all -- only the operator's
+# downstream reaction to it -- so no verb-family enumeration is needed on
+# the target side; only a check that the finding independently makes some
+# claim about the change event's handling licenses it.
+_CHANGE_EVENT_SUBJECT_RE = re.compile(
+    r"\bthe\s+(?:[\w-]+\s+){0,3}?(?:revision|amendment|procedure\s+change|process\s+change|"
+    r"policy\s+change|update)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_OUTCOME_CLAUSE_RE = re.compile(
+    r"\b(?:was|were)\s+not\s+(?:properly\s+|adequately\s+|fully\s+|formally\s+)?\w+(?:ed|d)\b"
+    r"|\blacked\b"
+    r"|\b(?:occurred|implemented|issued|introduced|rolled\s+out)\s+without\b"
+    r"|\bwithout\s+(?:prior\s+|proper\s+|any\s+|formal\s+)?\w+\b"
+    r"|\bno\s+\w+\s+(?:existed|was\s+in\s+place|was\s+available)\b",
+    re.IGNORECASE,
+)
+
+
+def hypothesis_asserts_unlicensed_change_event_defect(statement: str | None, source_text: str) -> bool:
+    """True if `statement` asserts, as SETTLED FACT, that the change event
+    itself (the revision/amendment/procedure change) was handled
+    defectively -- e.g. "The checklist revision was not properly documented
+    or disseminated" -- when the finding gives no independent account of
+    how the change was handled (only, e.g., that a revision occurred and
+    that an operator reported being unaware of it).
+
+    Structural counterpart to hypothesis_asserts_unhedged_notification_failure:
+    matches on SENTENCE SHAPE (change-event subject + unhedged
+    negative-outcome clause) rather than a specific vocabulary family, so it
+    generalizes across "not documented", "not disseminated", "not
+    accessible", "occurred without notice", and any future paraphrase
+    without requiring a new word to be added. Hedged formulations ("may not
+    have been properly documented") are exempt, as with the sibling guard --
+    the mechanism itself is a legitimate candidate; only the fact-asserting
+    phrasing is unlicensed."""
+    if not statement or not _CHANGE_EVENT_SUBJECT_RE.search(statement):
+        return False
+    if not _NEGATIVE_OUTCOME_CLAUSE_RE.search(statement):
+        return False
+    if _HYPOTHESIS_HEDGE_WORD_RE.search(statement):
+        return False
+    source = source_text or ""
+    if not _CHANGE_EVENT_SUBJECT_RE.search(source):
+        return True
+    return not _NEGATIVE_OUTCOME_CLAUSE_RE.search(source)
+
+
+# High-stakes concepts a "potential effect" narrative can invent that the
+# finding/evidence never establishes -- e.g. "the operator may have
+# proceeded without confirmed qualification" when nothing in the finding
+# mentions qualification at all. Evidence-grounded, not a blind ban: each
+# concept is only rejected when NEITHER the finding text nor any evidence
+# claim independently uses it, so a finding that genuinely involves
+# qualification/contamination/etc. remains free to say so. Deliberately a
+# short list of ORGANIZATIONAL/CONSEQUENCE concepts (not verbs or a
+# specific finding's vocabulary), so it generalizes the same way across
+# any domain rather than being tuned to this one finding.
+_UNESTABLISHED_IMPACT_CONCEPT_RE = re.compile(
+    r"\b(?:qualification|qualified|authoriz\w+|certif\w+|licens\w+|"
+    r"contamination|contaminated|recall|regulatory\s+(?:violation|breach)|"
+    r"patient\s+safety|customer\s+(?:impact|complaint)|product\s+(?:impact|release|recall)|"
+    r"batch\s+(?:impact|recall|rejection)|equipment\s+damage)\b",
+    re.IGNORECASE,
+)
+
+
+def impact_asserts_unestablished_concept(text: str | None, finding_text: str, evidence_texts: list[str]) -> bool:
+    """True if `text` (typically impact.potential_effect) introduces one of
+    a set of high-stakes organizational/consequence concepts that neither
+    the finding nor any evidence claim independently establishes -- e.g.
+    inventing "qualification" for a finding that only ever discusses
+    training completion. Evidence-grounded rather than a blind word ban:
+    the SAME word is licensed the moment the finding or evidence actually
+    uses it."""
+    if not text:
+        return False
+    hits = set(m.group(0).lower() for m in _UNESTABLISHED_IMPACT_CONCEPT_RE.finditer(text))
+    if not hits:
+        return False
+    grounding = " ".join([finding_text or "", *(evidence_texts or [])]).lower()
+    for hit in hits:
+        if hit in grounding:
+            continue
+        return True
+    return False
+
+
+_CAUSAL_CONNECTOR_RE = re.compile(
+    r"\b(?:because|due\s+to|caused\s+by|resulted\s+from|as\s+a\s+result\s+of|led\s+to|leading\s+to|"
+    r"resulting\s+in|owing\s+to|failed\s+because)\b",
+    re.IGNORECASE,
+)
+
+
+def reported_claims_contain_causal_explanation(reported_claims: list[str] | None) -> bool:
+    """True if any REPORTED claim actually attributes a REASON for the
+    observed deviation (a genuine "X because Y" causal clause), as opposed
+    to merely restating that the deviation happened, optionally with added
+    temporal/contextual framing.
+
+    This is the load-bearing distinction between:
+      "The technician confirmed the check was missed during the morning
+      shift." -- a bare fact restatement (temporal context, no reason) --
+    and:
+      "The technician stated the check was missed because they had not
+      received retraining." -- a genuine reported causal explanation.
+
+    Only the second licenses generating ANY candidate hypothesis from this
+    claim. A bare restatement -- however specific, however confidently
+    reported -- contains no causal content to build a hypothesis FROM;
+    generating one anyway just substitutes a differently-worded invented
+    mechanism (e.g. a generic "execution/task-control factor" bucket) for
+    a more specific one, which is the same defect at one level of
+    abstraction removed. When this returns False, the correct behavior is
+    zero hypotheses from this claim, not a hedged placeholder."""
+    for claim in reported_claims or []:
+        if claim and _CAUSAL_CONNECTOR_RE.search(claim):
+            return True
+    return False
+
+
+def hypothesis_statement_asserts_unsupported_causation(statement: str | None, verified_facts: list[str]) -> bool:
+    """True if `statement` uses causal-connector language ("because", "due
+    to", "caused by", "resulted from", "as a result of", "led to") to
+    assert a causal link within the hypothesis's own STATEMENT.
+
+    A hypothesis statement should name a candidate mechanism, not narrate a
+    causal justification for it -- that is what `rationale` is for.
+    "The checklist was not completed due to lack of awareness" quietly
+    promotes a REPORTED explanation (the operator's account) into an
+    asserted cause merely by using "due to" instead of describing the
+    reported claim's own uncertainty. Allowed only when the causal clause
+    is itself grounded in a VERIFIED fact (i.e. citing an already-
+    established causal link, not inventing one)."""
+    if not statement or not _CAUSAL_CONNECTOR_RE.search(statement):
+        return False
+    stmt_words = significant_words(statement)
+    for fact in verified_facts or []:
+        fact_words = significant_words(fact)
+        if stmt_words and fact_words:
+            overlap = len(stmt_words & fact_words) / min(len(stmt_words), len(fact_words))
+            if overlap >= 0.6:
+                return False
+    return True
 
 
 def detect_unsupported_causal_specificity(statement: str | None, source_text: str) -> tuple[bool, str | None]:
@@ -823,6 +1405,7 @@ def determine_hypothesis_status(
     conflicts: list | None = None,
     mechanism: MechanismInfo | None = None,
     allow_verified_promotion: bool = True,
+    subject_words: frozenset | None = None,
 ) -> tuple[str, str]:
     """Authoritative deterministic evidence-to-hypothesis status policy (Requirements 1, 2, 4).
 
@@ -845,6 +1428,19 @@ def determine_hypothesis_status(
     verifies the hypothesis's OWN claim (that the action was ineffective) --
     only a dedicated effectiveness-review claim could. Word overlap with the
     precondition is not evidence of the hypothesis itself.
+
+    `subject_words` (optional): significant words from the finding's own
+    canonical subject/affected-object phrase (e.g. "daily equipment
+    inspection checklist"). Every hypothesis about this finding will
+    naturally repeat that phrase -- it's the thing the finding is about --
+    so raw word overlap between a hypothesis statement and the VERIFIED
+    deviation fact is inflated by that shared, guaranteed-to-match subject
+    phrase regardless of whether the fact actually supports the
+    hypothesis's own CAUSAL claim. Excluded from the step-3 overlap
+    calculation so promotion to SUPPORTED requires the hypothesis's
+    DISTINCTIVE (non-subject) content to be corroborated, not just
+    confirmation that the hypothesis is about the same object as the
+    finding.
     """
     if not statement:
         return "POSSIBLE", "NONE"
@@ -866,8 +1462,12 @@ def determine_hypothesis_status(
     # 3. Verified evidence match -> SUPPORTED
     if verified_facts and allow_verified_promotion:
         hyp_words = significant_words(statement)
+        if subject_words:
+            hyp_words = hyp_words - subject_words
         for fact in verified_facts:
             fact_words = significant_words(fact)
+            if subject_words:
+                fact_words = fact_words - subject_words
             if hyp_words and fact_words:
                 overlap = len(hyp_words & fact_words) / min(len(hyp_words), len(fact_words))
                 if overlap >= 0.5:

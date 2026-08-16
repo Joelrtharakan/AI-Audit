@@ -43,7 +43,7 @@ def test_five_why_fallback_never_asks_about_reporting_behavior():
     # evidence-boundary stop on why the mechanism itself occurred.
     assert len(fw.steps) == 3
     assert fw.steps[-1].status == "UNKNOWN"
-    assert "DEGRADED MODE" in fw.steps[-1].answer
+    assert "DEGRADED MODE" in fw.status_note
     assert "NOT ESTABLISHED FROM AVAILABLE EVIDENCE" in fw.steps[-1].answer
 
 

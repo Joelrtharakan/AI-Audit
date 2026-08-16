@@ -61,7 +61,6 @@ from app.models.agent import (
     CandidateHypothesis,
     CapaAnalysis,
     CapaStatus,
-    ConditionalCapaAction,
     ContributingFactor,
     EvidenceStatus,
     FiveWhyAnalysis,
@@ -77,6 +76,18 @@ from app.services.llm_json import parse_llm_json
 from app.services.taxonomy import coerce_category
 
 logger = logging.getLogger(__name__)
+
+
+def _assign_claim_ids(evidence_ledger: list) -> list[tuple[str, Any]]:
+    """ONE canonical claim-ID assignment (C1, C2, ... in evidence-ledger
+    order), reused for both the primary and recovery prompts and for
+    validating the LLM's supporting_claim_ids/contradicting_claim_ids
+    against. IDs are positional in the ORIGINAL (untrimmed) ledger, so "C3"
+    means the same claim whether it appears in the primary call's full
+    ledger or the recovery call's trimmed subset -- never re-indexed per
+    call, which would let the same ID silently mean two different claims
+    across the two prompts."""
+    return [(f"C{i + 1}", e) for i, e in enumerate(evidence_ledger)]
 
 
 def _classify_failure(exc: Exception, ollama_meta: dict) -> str:
@@ -112,6 +123,9 @@ def _classify_failure(exc: Exception, ollama_meta: dict) -> str:
     return "INVALID_JSON"
 
 
+_MAX_LLM_HYPOTHESES = 3
+
+
 def _parse_causal_fields(
     parsed: dict,
     mechanism: MechanismInfo,
@@ -121,6 +135,7 @@ def _parse_causal_fields(
     finding_text: str,
     trace: list,
     has_unresolved_conflict: bool = False,
+    claim_ids: list[tuple[str, Any]] | None = None,
 ) -> tuple[RootCauseAnalysis, FiveWhyAnalysis, list[ContributingFactor]]:
     """Parse+guard root_cause / five_why / contributing_factors from a
     core_synthesis-shaped JSON object.
@@ -143,15 +158,22 @@ def _parse_causal_fields(
     if rc_status == RootCauseStatus.NOT_ESTABLISHED:
         rc_category = "TO_BE_CONFIRMED"
 
-    valid_hyp_statuses = {"POSSIBLE", "SUPPORTED", "REFUTED", "UNVERIFIED"}
+    from app.services.status_normalizer import normalize_hypothesis_status
     verified_facts = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
+    valid_claim_ids = {cid for cid, _ in (claim_ids or [])}
+    claim_text_by_id = {cid: e.claim for cid, e in (claim_ids or [])}
+    _raw_hyp_count = len(raw_rc.get("candidate_hypotheses", []))
     cand_hypotheses = []
     for ch in raw_rc.get("candidate_hypotheses", []):
         if isinstance(ch, dict):
             rank_raw = str(ch.get("relevance_rank", "HIGH")).upper()
             rank = rank_raw if rank_raw in ("HIGH", "MEDIUM", "LOW") else "HIGH"
-            status_raw = str(ch.get("status", "POSSIBLE")).upper()
-            hyp_status = status_raw if status_raw in valid_hyp_statuses else "POSSIBLE"
+            # Single authoritative status-normalization boundary (shared with
+            # root_cause.status above) -- maps LLM synonyms like "CONFIRMED"/
+            # "REJECTED"/"TIED" onto their correct canonical status instead of
+            # collapsing every unrecognized value to a blunt "POSSIBLE"
+            # default, while still never raising on an invalid enum.
+            hyp_status = normalize_hypothesis_status(ch.get("status"))
             statement = clean_structured_leak(ch.get("statement", ""))
             # HUMAN-ERROR OVERCLAIMING (structural, not finding-specific):
             # a hypothesis that stops at "human oversight/error" without
@@ -227,6 +249,43 @@ def _parse_causal_fields(
                     "gap/fact already stated in the finding rather than proposing a causal explanation"
                 ))
                 continue
+            # PROVENANCE ENFORCEMENT: only applies when the response
+            # actually uses the structured-provenance schema (either
+            # supporting_claim_ids or contradicting_claim_ids key present)
+            # -- a response using an older/different shape that never
+            # attempts this field isn't "asserting zero provenance", it's
+            # a different (still test-covered) contract, so it is left to
+            # the existing statement-level guards above/below instead.
+            # Once a response DOES use this schema: an ID the evidence
+            # ledger never issued is always rejected (the LLM cannot
+            # invent claim IDs), and citing NEITHER a supporting NOR a
+            # contradicting claim at all is zero provenance and rejected
+            # outright, regardless of how plausible the statement reads.
+            raw_supporting_ids = ch.get("supporting_claim_ids")
+            raw_contradicting_ids = ch.get("contradicting_claim_ids")
+            provenance_schema_used = raw_supporting_ids is not None or raw_contradicting_ids is not None
+            supporting_ids: list[str] = []
+            contradicting_ids: list[str] = []
+            if provenance_schema_used and valid_claim_ids:
+                supporting_ids = [c for c in (raw_supporting_ids or []) if isinstance(c, str)]
+                contradicting_ids = [c for c in (raw_contradicting_ids or []) if isinstance(c, str)]
+                invalid_ids = [c for c in (*supporting_ids, *contradicting_ids) if c not in valid_claim_ids]
+                if invalid_ids:
+                    trace.append(AgentTraceStep.warn(
+                        f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — cited claim id(s) "
+                        f"{invalid_ids} that do not exist in the evidence ledger"
+                    ))
+                    from app.services import llm_metrics as _llm_metrics
+                    _llm_metrics.increment("hypotheses_provenance_rejected")
+                    continue
+                if not supporting_ids and not contradicting_ids:
+                    trace.append(AgentTraceStep.warn(
+                        f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — cited zero supporting "
+                        "or contradicting claim provenance"
+                    ))
+                    from app.services import llm_metrics as _llm_metrics
+                    _llm_metrics.increment("hypotheses_provenance_rejected")
+                    continue
             new_hyp = CandidateHypothesis(
                 id=str(ch.get("id", "H")),
                 name=str(ch.get("name", "HYPOTHESIS")),
@@ -239,6 +298,8 @@ def _parse_causal_fields(
                 evidence_against=clean_structured_leak(ch.get("evidence_against")) or None,
                 confirms_if=clean_structured_leak(ch.get("confirms_if")) or None,
                 refutes_if=clean_structured_leak(ch.get("refutes_if")) or None,
+                supporting_evidence=[claim_text_by_id[c] for c in supporting_ids if c in claim_text_by_id],
+                contradicting_evidence=[claim_text_by_id[c] for c in contradicting_ids if c in claim_text_by_id],
             )
             # CROSS-HYPOTHESIS SEMANTIC CONSISTENCY: reject a hypothesis
             # whose own discrimination/confirms/refutes text asserts that
@@ -252,6 +313,26 @@ def _parse_causal_fields(
                 ))
                 continue
             cand_hypotheses.append(new_hyp)
+
+    # HYPOTHESIS COUNT CAP (Phase 4/9 of the LLM-boundary rebuild): the
+    # compact prompt now asks for at most _MAX_LLM_HYPOTHESES, but this is
+    # the deterministic enforcement of that limit -- never trust prompt
+    # wording alone to bound how many a model actually returns. Highest-
+    # ranked (then first-seen) survive; this is independent of, and
+    # stricter than, the separate 4-hypothesis cap final_evidence_
+    # verification applies later as defense-in-depth.
+    if len(cand_hypotheses) > _MAX_LLM_HYPOTHESES:
+        _rank_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+        dropped = cand_hypotheses[_MAX_LLM_HYPOTHESES:]
+        cand_hypotheses = sorted(cand_hypotheses, key=lambda h: _rank_order.get(h.relevance_rank, 1))[:_MAX_LLM_HYPOTHESES]
+        trace.append(AgentTraceStep.warn(
+            f"Core Synthesis: LLM returned {len(dropped) + len(cand_hypotheses)} hypotheses — capped to "
+            f"{_MAX_LLM_HYPOTHESES} highest-ranked"
+        ))
+
+    from app.services import llm_metrics as _llm_metrics
+    _llm_metrics.increment("hypotheses_generated", len(cand_hypotheses))
+    _llm_metrics.increment("hypotheses_rejected", max(_raw_hyp_count - len(cand_hypotheses), 0))
 
     root_cause = RootCauseAnalysis(
         status=rc_status,
@@ -274,11 +355,15 @@ def _parse_causal_fields(
     raw_fw = parsed.get("five_why", {})
     fw_steps = []
     reported_facts = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
-    valid_fw_statuses = {"VERIFIED", "SUPPORTED", "REPORTED", "REPORTED_STATEMENT", "REPORTED_UNVERIFIED", "MIXED", "INFERRED", "UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED"}
+    from app.services.status_normalizer import normalize_five_why_status
     for s in raw_fw.get("steps", []):
         if isinstance(s, dict):
-            st_raw = str(s.get("status", "UNKNOWN")).upper()
-            st = st_raw if st_raw in valid_fw_statuses else ("REPORTED_UNVERIFIED" if "REPORT" in st_raw else "UNKNOWN")
+            # Single authoritative status-normalization boundary (same
+            # module used for root_cause/hypothesis statuses above) --
+            # maps LLM synonyms ("CONFIRMED", "CONFLICTING", "STATED", etc.)
+            # onto their correct canonical status instead of a blunt
+            # substring-only fallback, while never raising on an invalid enum.
+            st = normalize_five_why_status(s.get("status"))
             question = clean_structured_leak(s.get("question", ""))
             answer = clean_structured_leak(s.get("answer", ""))
 
@@ -585,18 +670,31 @@ def _derive_ca_draft_fields(root_cause, impact) -> dict:
     }
 
 
-def _trim_evidence_for_recovery(evidence_ledger: list) -> list:
+def _trim_evidence_for_recovery(claim_ids: list[tuple[str, Any]]) -> list[dict]:
     """Build a materially smaller evidence context for the recovery retry.
 
     Keeps only VERIFIED/REPORTED items (the tiers the causal reasoning
     actually leans on) and caps the count, ranked by relevance -- this is
     what makes the recovery call "compact", not just a shorter output
-    budget on the exact same input.
+    budget on the exact same input. Takes the SAME (id, EvidenceItem) pairs
+    `_assign_claim_ids` produced for the primary call, so a claim's ID is
+    identical across both prompts, and emits the same compact
+    {id, claim, status} shape the primary prompt uses -- not a full
+    `.model_dump()` (source/source_reference/relevance/notes), which is
+    both unnecessary token weight and inconsistent with the primary
+    prompt's evidence shape.
     """
     relevance_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-    candidates = [e for e in evidence_ledger if e.status in (EvidenceStatus.VERIFIED, EvidenceStatus.REPORTED)]
-    candidates.sort(key=lambda e: relevance_rank.get(getattr(e, "relevance", "MEDIUM"), 1))
-    return candidates[:6] or evidence_ledger[:6]
+    candidates = [
+        (cid, e) for cid, e in claim_ids
+        if e.status in (EvidenceStatus.VERIFIED, EvidenceStatus.REPORTED)
+    ]
+    candidates.sort(key=lambda pair: relevance_rank.get(getattr(pair[1], "relevance", "MEDIUM"), 1))
+    trimmed = candidates[:6] or claim_ids[:6]
+    return [
+        {"id": cid, "claim": e.claim, "status": getattr(e.status, "value", str(e.status))}
+        for cid, e in trimmed
+    ]
 
 
 def _derive_deterministic_impact(request_finding_text: str, canonical, observed_deviation: str) -> tuple[ImpactAssessment, str, str, str | None]:
@@ -745,9 +843,17 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
     # structured evidence ledger + evidence conflicts + mechanism/deviation
     # already resolved by understand_finding_node, never the raw finding
     # text repeated a second/third time alongside it.
+    #
+    # Every claim carries its canonical id (C1, C2, ...) so the LLM's
+    # hypotheses can cite supporting_claim_ids/contradicting_claim_ids by
+    # reference instead of restating claim text -- both more compact and
+    # the prerequisite for rejecting a hypothesis with invented provenance
+    # (a claim ID the ledger never issued) or zero provenance at all.
+    claim_ids = _assign_claim_ids(evidence_ledger)
+    valid_claim_ids = {cid for cid, _ in claim_ids}
     compact_ledger = [
-        {"claim": e.claim, "status": getattr(e.status, "value", str(e.status))}
-        for e in evidence_ledger[:6]
+        {"id": cid, "claim": e.claim, "status": getattr(e.status, "value", str(e.status))}
+        for cid, e in claim_ids[:6]
     ]
     compact_conflicts = [
         {"proposition": getattr(c, "proposition", str(c)), "status": getattr(c, "status", "UNRESOLVED")}
@@ -782,6 +888,9 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             num_ctx=ctx_tokens,
         )
 
+    from app.services import llm_metrics
+    llm_metrics.increment("llm_primary_attempted")
+
     try:
         # Section 1/2: compact schema/prompt, sufficient-not-excessive token
         # ceiling. A response that fills the whole budget and still parses
@@ -790,6 +899,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         raw = await _call(
             prompt, settings.ollama_core_synthesis_max_tokens,
             settings.ollama_primary_synthesis_timeout_seconds, "core_synthesis",
+            settings.ollama_core_synthesis_num_ctx,
         )
         from app.services.llm_router import get_last_call_metadata
         _router_meta = get_last_call_metadata()
@@ -797,72 +907,50 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         fallback_used = bool(_router_meta.get("fallback_used", False))
         provider_attempts = list(_router_meta.get("provider_attempts", []))
         parsed = parse_llm_json(raw)
+        llm_metrics.increment("llm_primary_success")
         source_text = build_source_text(request.finding_text, evidence_ledger)
 
         root_cause, five_why, contributing_factors = _parse_causal_fields(
             parsed, mechanism, evidence_ledger, source_text, observed_deviation, request.finding_text, trace,
-            has_unresolved_conflict,
+            has_unresolved_conflict, claim_ids,
         )
 
         # ---------------------------------------------------------------------
-        # Parse Impact Assessment
+        # Impact & CAPA: constructed deterministically from the already-
+        # synthesized root_cause/hypotheses, not requested from the LLM.
+        # These are the same derivation functions the recovery/fallback paths
+        # below already use (one canonical implementation, not a competing
+        # LLM-authored one) -- the LLM's job is compact causal reasoning
+        # (hypotheses, 5-Why), never CAPA/impact prose, which reduces both
+        # the schema the model must fill and the hallucination surface area.
         # ---------------------------------------------------------------------
-        raw_imp = parsed.get("impact_assessment", {})
-        impact = ImpactAssessment(
-            status=ImpactStatus.IMPACT_REQUIRES_ASSESSMENT,
-            areas=[clean_structured_leak(x) for x in raw_imp.get("areas", []) if clean_structured_leak(x)],
-            narrative=clean_structured_leak(raw_imp.get("narrative")) or "Impact requires assessment — scope unconfirmed.",
-            affected_object=clean_structured_leak(raw_imp.get("affected_object")),
-            affected_people=clean_structured_leak(raw_imp.get("affected_people")),
-            affected_period=clean_structured_leak(raw_imp.get("affected_period")),
-            process_at_risk=clean_structured_leak(raw_imp.get("process_at_risk")),
-            relevant_change=clean_structured_leak(raw_imp.get("relevant_change")),
-            potential_effect=clean_structured_leak(raw_imp.get("potential_effect")),
-            evidence_needed=clean_structured_leak(raw_imp.get("evidence_needed")),
-            impact_observed=clean_structured_leak(raw_imp.get("impact_observed")) or None,
-            impact_inferred=clean_structured_leak(raw_imp.get("impact_inferred")) or None,
-            impact_unknown=clean_structured_leak(raw_imp.get("impact_unknown")) or None,
+        impact, clean_noun, topic, actor = _derive_deterministic_impact(
+            request.finding_text, canonical, observed_deviation,
         )
-
-        # ---------------------------------------------------------------------
-        # Parse CAPA Analysis
-        # ---------------------------------------------------------------------
-        raw_capa = parsed.get("capa", {})
-        cond_actions = []
-        for ca in raw_capa.get("conditional_actions", []):
-            if isinstance(ca, dict):
-                if_cause_confirmed = clean_structured_leak(ca.get("if_cause_confirmed", ""))
-                # Same causality discipline as hypotheses/contributing
-                # factors: a CAPA branch conditioned on an evidence gap
-                # ("IF the certificate is not available") rather than an
-                # actual candidate cause creates a corrective action around
-                # something that was never a hypothesis in the first place
-                # -- CAPA must follow the causal analysis, not invent its
-                # own parallel one from a restated fact.
-                if is_evidence_gap_not_hypothesis(if_cause_confirmed, source_text):
-                    trace.append(AgentTraceStep.warn(
-                        "Core Synthesis: dropped CAPA conditional action — condition restates an "
-                        f"evidence gap rather than a candidate cause: {if_cause_confirmed!r}"
-                    ))
-                    continue
-                # A conditional action is by construction the "systemic
-                # action pending confirmation" representation: the root
-                # cause isn't established, so this can never be a
-                # completed/definitive corrective action -- deterministic,
-                # not dependent on the LLM remembering to classify it.
-                cond_actions.append(ConditionalCapaAction(
-                    if_cause_confirmed=if_cause_confirmed,
-                    recommended_action=clean_structured_leak(ca.get("recommended_action", "")),
-                    action_type="SYSTEMIC_ACTION",
-                    verification_method=clean_structured_leak(ca.get("verification_method")) or None,
-                    evidence_needed=clean_structured_leak(ca.get("evidence_needed")) or None,
-                ))
-
+        # NOTE: investigation_plan_override is deliberately left unset here
+        # (stays None). build_deterministic_investigation_plan() generates
+        # its OWN independent hypothesis set (its own H1..H4 with its own
+        # statements) purely to derive CAPA potential_areas below -- those
+        # IDs are NOT root_cause.candidate_hypotheses (the LLM's actual,
+        # validated hypotheses) and must never be surfaced as investigation
+        # questions, or the report would reference hypothesis IDs that don't
+        # exist in the displayed hypothesis list (hypothesis-ID drift).
+        # Investigation questions are derived downstream (final_evidence_
+        # verification_node) directly from root_cause.candidate_hypotheses
+        # whenever state's own investigation_plan.questions is empty --
+        # the single consistent source of hypothesis-bound questions.
+        from app.agent.nodes.plan_investigation_fallback import build_conditional_capa_actions
+        from app.agent.nodes.plan_investigation_fallback import (
+            build_deterministic_investigation_plan as _build_area_plan,
+        )
+        _, _area_plan = _build_area_plan(request.finding_text, evidence_ledger)
         capa = CapaAnalysis(
             status=CapaStatus.INVESTIGATION_REQUIRED,
-            potential_areas=[clean_structured_leak(x) for x in raw_capa.get("potential_areas", []) if clean_structured_leak(x)],
-            recommended_investigation=[clean_structured_leak(x) for x in raw_capa.get("recommended_investigation", []) if clean_structured_leak(x)],
-            conditional_actions=cond_actions,
+            potential_areas=_area_plan.areas,
+            recommended_investigation=[
+                "Verify the candidate causal hypotheses above through objective record investigation."
+            ],
+            conditional_actions=build_conditional_capa_actions(root_cause.candidate_hypotheses, clean_noun, topic),
         )
 
         # CA DRAFT: built deterministically from the already-synthesized
@@ -878,6 +966,9 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         from app.services.ollama_client import get_last_call_metadata as get_last_ollama_metadata
         primary_ollama_meta = get_last_ollama_metadata()
         primary_failure_type = _classify_failure(primary_exc, primary_ollama_meta)
+        llm_metrics.increment(
+            "llm_primary_timeout" if primary_failure_type == "TIMEOUT" else "llm_primary_invalid_json"
+        )
         logger.info(
             "node=core_synthesis failure_type=%s hit_output_limit=%s eval_count=%s max_output_tokens=%s",
             primary_failure_type,
@@ -908,12 +999,11 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         # causal-fields-only retry against a materially smaller prompt and
         # a smaller (but sufficient) output budget first.
         # -------------------------------------------------------------
+        llm_metrics.increment("llm_recovery_attempted")
         try:
             recovery_prompt = recovery_template.format(
                 finding_text=request.finding_text,
-                evidence_ledger_json=json.dumps(
-                    [e.model_dump() for e in _trim_evidence_for_recovery(evidence_ledger)], default=str
-                ),
+                evidence_ledger_json=json.dumps(_trim_evidence_for_recovery(claim_ids), default=str),
                 observed_deviation=observed_deviation,
                 immediate_mechanism=mechanism_statement or "none established",
                 immediate_mechanism_status=mechanism_status,
@@ -921,11 +1011,13 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             recovery_raw = await _call(
                 recovery_prompt, settings.ollama_recovery_max_tokens,
                 settings.ollama_recovery_synthesis_timeout_seconds, "core_synthesis_recovery",
+                settings.ollama_recovery_num_ctx,
             )
             recovery_parsed = parse_llm_json(recovery_raw)
+            llm_metrics.increment("llm_recovery_success")
             root_cause, five_why, contributing_factors = _parse_causal_fields(
                 recovery_parsed, mechanism, evidence_ledger, source_text, observed_deviation, request.finding_text, trace,
-                has_unresolved_conflict,
+                has_unresolved_conflict, claim_ids,
             )
             recovery_used = True
             trace.append(AgentTraceStep.ok(
@@ -937,6 +1029,9 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         except Exception as recovery_exc:
             recovery_meta = get_last_ollama_metadata()
             recovery_failure_type = _classify_failure(recovery_exc, recovery_meta)
+            llm_metrics.increment(
+                "llm_recovery_timeout" if recovery_failure_type == "TIMEOUT" else "llm_recovery_invalid_json"
+            )
             logger.info(
                 "node=core_synthesis_recovery failure_type=%s recovery=DETERMINISTIC_SYNTHESIS",
                 recovery_failure_type,
@@ -986,6 +1081,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             # -----------------------------------------------------------
             analysis_mode = "DETERMINISTIC"
             analysis_engine = "DETERMINISTIC"
+            llm_metrics.increment("deterministic_fallback")
 
             from app.agent.nodes.five_why_fallback import build_deterministic_five_why
             five_why = build_deterministic_five_why(request.finding_text, evidence_ledger)

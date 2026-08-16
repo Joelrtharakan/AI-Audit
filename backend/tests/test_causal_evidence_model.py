@@ -305,10 +305,306 @@ def test_case_m_multiple_equally_strong_hypotheses_tied():
 
 
 def test_case_n_no_causal_evidence():
-    """Case N: No causal evidence -> 5-Why stops cleanly, root cause NOT_ESTABLISHED."""
+    """Case N: No causal evidence -> 5-Why stops cleanly at the evidence
+    boundary, root cause NOT_ESTABLISHED. With a completely empty evidence
+    ledger there is nothing to put in a second WHY step -- the chain
+    correctly stops at 1 step (Section 14: never force steps to fill five
+    rows) and signals the boundary via status_note rather than fabricating
+    an UNKNOWN step with no content."""
     from app.agent.nodes.five_why_fallback import build_deterministic_five_why
     finding = "The cleaning checklist was missing."
     five_why = build_deterministic_five_why(finding, [])
-    assert len(five_why.steps) == 2
-    assert five_why.steps[-1].status == "UNKNOWN"
+    assert len(five_why.steps) == 1
+    assert "EVIDENCE BOUNDARY" in five_why.status_note
+
+
+# ---------------------------------------------------------------------------
+# Bare non-performance report vs. genuine reported causal explanation
+# (current-turn hardening: a "missed" report with no causal clause must
+# produce zero hypotheses but a real, non-presupposing investigation plan,
+# not a generic causal bucket, and evidence must not be lost between the
+# investigation plan and the final evidence_needed field).
+# ---------------------------------------------------------------------------
+
+
+def _reported_ledger(text: str):
+    from app.models.agent import EvidenceItem, EvidenceStatus
+    return [EvidenceItem(claim=text, source="REPORTED_STATEMENT", source_reference="x", status=EvidenceStatus.REPORTED, relevance="HIGH")]
+
+
+def _verified_ledger(text: str):
+    from app.models.agent import EvidenceItem, EvidenceStatus
+    return [EvidenceItem(claim=text, source="AUDITOR_FINDING", source_reference="x", status=EvidenceStatus.VERIFIED, relevance="HIGH")]
+
+
+def test_case_o_bare_missed_report_produces_zero_hypotheses():
+    """A: bare 'missed during shift' report (no causal clause) -> 0 hypotheses."""
+    from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+    finding = "The temperature log for refrigerator QC-REF-02 was not completed for 12 August 2026. The responsible technician confirmed that the temperature check was missed during the morning shift."
+    ledger = (
+        _verified_ledger("The temperature log for refrigerator QC-REF-02 was not completed for 12 August 2026.")
+        + _reported_ledger("technician: the temperature check was missed during the morning shift")
+    )
+    hyps, plan = build_deterministic_investigation_plan(finding, ledger)
+    assert hyps == []
+    # Zero hypotheses must still yield a real, non-presupposing investigation
+    # plan -- never "no questions generated".
+    assert len(plan.questions) >= 3
+    assert plan.evidence_to_collect
+
+
+def test_case_p_reported_causal_explanation_allowed():
+    """B: 'missed because not trained' -> one hypothesis reflecting the
+    reported reason, status POSSIBLE (never SUPPORTED/VERIFIED from a
+    reported statement alone)."""
+    from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+    finding = "The temperature log was not completed. The technician stated the check was missed because they had not received retraining."
+    ledger = _reported_ledger("technician: the check was missed because they had not received retraining")
+    hyps, _ = build_deterministic_investigation_plan(finding, ledger)
+    assert len(hyps) == 1
+    assert hyps[0].status == "POSSIBLE"
+    assert "retraining" in hyps[0].statement.lower()
+
+
+def test_case_q_no_generic_causal_bucket_hypothesis():
+    """E: bare 'missed' report -> no generic execution/task-control/human/
+    process/management-factor hypothesis substituted in."""
+    from app.agent.causal_guard import hypothesis_statement_is_generic_causal_bucket
+    for statement in (
+        "Execution or task-control factors may have contributed to the missed check.",
+        "Human factors may have contributed to the missed activity.",
+        "Process factors may have contributed to the deviation.",
+        "Management oversight may have contributed to the missed check.",
+    ):
+        assert hypothesis_statement_is_generic_causal_bucket(statement)
+
+
+# ---------------------------------------------------------------------------
+# LOW-specificity generic-allegation findings: zero hypotheses, but a real
+# foundational investigation plan (never "no questions generated"), and no
+# hallucinated 5-Why mechanism, affected object, or evidence-needed field.
+# ---------------------------------------------------------------------------
+
+_LOW_SPECIFICITY_FINDINGS = [
+    "The department is not following the required procedure correctly.",
+    "The team is not following the procedure.",
+    "The department is not complying with the required process.",
+    "Staff are not following procedures correctly.",
+    "The process is not being followed as required.",
+    "Required procedures are not being followed.",
+    "The department is failing to comply with the procedure.",
+]
+
+
+@pytest.mark.parametrize("finding", _LOW_SPECIFICITY_FINDINGS)
+def test_low_specificity_generic_allegation_classified_low(finding):
+    from app.services.semantic_subject import classify_finding_specificity
+    assert classify_finding_specificity(finding, [], None) == "LOW"
+
+
+def test_low_specificity_five_why_answer_never_hallucinates_mechanism():
+    """The core-reported bug: a 5-Why answer like 'Because staff may lack
+    training or awareness' must never survive final verification, even
+    when the LLM labeled the step MIXED rather than UNKNOWN."""
+    from app.agent.causal_guard import detect_unsupported_causal_specificity, hypothesis_statement_asserts_unsupported_causation
+    finding = "The department is not following the required procedure correctly."
+    bad_answers = [
+        "Because staff may lack training or awareness.",
+        "Because training records are not available for verification.",
+        "Because documentation may be outdated or incomplete.",
+    ]
+    for answer in bad_answers:
+        unsupported, _ = detect_unsupported_causal_specificity(answer, finding)
+        unsupported_causation = hypothesis_statement_asserts_unsupported_causation(answer, [])
+        assert unsupported or unsupported_causation, f"expected rejection for 5-Why answer: {answer!r}"
+
+
+# ---------------------------------------------------------------------------
+# Systemic-cause escalation (Level 1 -> Level 4 jump): a hypothesis pairing
+# a systemic noun (process/system/control/mechanism/management) with a
+# failure verb must be rejected unless the finding independently cites a
+# review/audit/documentation/record finding about that process -- checked
+# with ONE domain-agnostic pattern, verified across multiple mechanism
+# families (training, scheduling, maintenance, calibration, document
+# control) rather than one regex per domain.
+# ---------------------------------------------------------------------------
+
+_SYSTEMIC_ESCALATION_CASES = [
+    ("The daily equipment inspection checklist was not completed for three consecutive days. The operator stated that they were unaware that the checklist procedure had been revised.",
+     "The revision process lacked a mechanism to ensure operator awareness."),
+    ("The temperature log was incomplete.", "The scheduling system failed to assign the check."),
+    ("The equipment maintenance was overdue.", "The maintenance management process failed."),
+    ("The training record was unavailable.", "The training system lacked a verification mechanism."),
+    ("The calibration certificate was not available.", "The calibration control was not established."),
+    ("The document was not communicated.", "The document distribution process was defective."),
+]
+
+
+@pytest.mark.parametrize("finding,hypothesis_statement", _SYSTEMIC_ESCALATION_CASES)
+def test_systemic_escalation_rejected_without_process_evidence(finding, hypothesis_statement):
+    from app.agent.causal_guard import hypothesis_asserts_systemic_cause_without_process_evidence
+    assert hypothesis_asserts_systemic_cause_without_process_evidence(hypothesis_statement, finding)
+
+
+def test_systemic_hypothesis_allowed_with_genuine_process_evidence():
+    from app.agent.causal_guard import hypothesis_asserts_systemic_cause_without_process_evidence
+    finding = "Change-control review showed no acknowledgement step was defined for procedure revisions."
+    statement = "The revision-control process may have lacked an acknowledgement control."
+    assert not hypothesis_asserts_systemic_cause_without_process_evidence(statement, finding)
+
+
+# ---------------------------------------------------------------------------
+# Causal-event inversion: a REPORTED downstream state (e.g. "operator was
+# unaware") cannot establish that an upstream event (notification/
+# communication/distribution/acknowledgement) did NOT occur. An unhedged
+# assertion of that upstream event's absence must be rejected; the SAME
+# mechanism, hedged, is a legitimate candidate hypothesis and must survive.
+# ---------------------------------------------------------------------------
+
+_EVENT_INVERSION_FINDING = (
+    "The daily equipment inspection checklist was not completed for three consecutive days. "
+    "The operator stated that they were unaware that the checklist procedure had been revised."
+)
+
+
+def test_reported_awareness_cannot_establish_notice_failure_as_fact():
+    """'notice' is a synonym of 'notification' not covered by the notif\\w*
+    root alone -- confirms the concept pattern catches the synonym, and
+    that a compound hypothesis (notice + documentation clauses) is
+    rejected via either clause independently."""
+    from app.agent.causal_guard import hypothesis_asserts_unhedged_notification_failure
+    statement = "The checklist revision was implemented without prior notice or documentation."
+    assert hypothesis_asserts_unhedged_notification_failure(statement, _EVENT_INVERSION_FINDING)
+
+
+def test_reported_awareness_cannot_establish_notification_failure_as_fact():
+    """The exact reported bug: 'occurred without proper notification' is
+    an unhedged, unlicensed causal-event-inversion claim."""
+    from app.agent.causal_guard import hypothesis_asserts_unhedged_notification_failure
+    statement = "The checklist revision occurred without proper notification to the operator."
+    assert hypothesis_asserts_unhedged_notification_failure(statement, _EVENT_INVERSION_FINDING)
+
+
+def test_hedged_communication_hypothesis_survives_notification_guard():
+    """The legitimate Level-2 candidate must NOT be caught by the same
+    guard that rejects the unhedged Level-3 claim -- hedging distinguishes
+    a candidate hypothesis from an asserted fact."""
+    from app.agent.causal_guard import hypothesis_asserts_unhedged_notification_failure
+    statement = (
+        "The revision affecting daily equipment inspection checklist may not have been "
+        "effectively communicated to or acknowledged by the affected personnel."
+    )
+    assert not hypothesis_asserts_unhedged_notification_failure(statement, _EVENT_INVERSION_FINDING)
+
+
+# ---------------------------------------------------------------------------
+# Structural change-event-defect guard: catches paraphrases the concept-root
+# notification guard misses entirely ("documented", "disseminated",
+# "accessible" are not notification/communication/distribution/
+# acknowledgement/announcement roots) by matching SENTENCE SHAPE (change-
+# event subject + unhedged negative-outcome clause) instead of vocabulary.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("statement", [
+    "The checklist revision was not properly documented or accessible to the operator.",
+    "The checklist revision was not properly documented or disseminated.",
+    "The checklist revision was implemented without prior notice or documentation.",
+    "The procedure change lacked a formal review before rollout.",
+])
+def test_unhedged_change_event_defect_claims_are_rejected_regardless_of_vocabulary(statement):
+    from app.agent.causal_guard import hypothesis_asserts_unlicensed_change_event_defect
+    assert hypothesis_asserts_unlicensed_change_event_defect(statement, _EVENT_INVERSION_FINDING)
+
+
+def test_hedged_change_event_defect_claim_survives_structural_guard():
+    from app.agent.causal_guard import hypothesis_asserts_unlicensed_change_event_defect
+    statement = (
+        "The revision affecting daily equipment inspection checklist may not have been "
+        "effectively communicated to or acknowledged by the affected personnel."
+    )
+    assert not hypothesis_asserts_unlicensed_change_event_defect(statement, _EVENT_INVERSION_FINDING)
+
+
+def test_change_event_defect_claim_licensed_when_finding_independently_establishes_it():
+    from app.agent.causal_guard import hypothesis_asserts_unlicensed_change_event_defect
+    finding = (
+        "The checklist revision was not properly documented in the change control log. "
+        "The operator stated they were unaware the procedure had been revised."
+    )
+    statement = "The checklist revision was not properly documented."
+    assert not hypothesis_asserts_unlicensed_change_event_defect(statement, finding)
+
+
+@pytest.mark.parametrize("finding,statement", [
+    ("The calibration procedure for scale SC-04 was updated. "
+     "The technician stated they were not aware of the update.",
+     "The calibration procedure update was not properly rolled out without any prior communication."),
+    ("The supplier qualification policy was amended in March. "
+     "The reviewer said they had not seen the amended version.",
+     "The policy amendment was not adequately disseminated to reviewers."),
+])
+def test_change_event_defect_guard_generalizes_across_domains(finding, statement):
+    from app.agent.causal_guard import hypothesis_asserts_unlicensed_change_event_defect
+    assert hypothesis_asserts_unlicensed_change_event_defect(statement, finding)
+
+
+@pytest.mark.parametrize("finding,statement", [
+    ("The document-control record shows the checklist revision was not approved prior to issue. "
+     "The operator stated they were unaware the procedure had been revised.",
+     "The checklist revision was not approved through the document-control process before issue."),
+    ("The change-control log shows the checklist revision update was not reviewed by quality "
+     "before release. The operator stated they were unaware of the revision.",
+     "The checklist revision update was not reviewed before release."),
+])
+def test_change_event_defect_hypothesis_allowed_when_finding_names_the_control_record(finding, statement):
+    """Item 9/22: a hedged or unhedged change-event defect claim grounded in
+    a VERIFIED record the finding itself names (document-control / change-
+    control log) must NOT be rejected -- the guard targets UNLICENSED
+    inference from a downstream awareness report, not every statement about
+    the change event. Over-correcting to reject evidence-grounded claims
+    would violate Section 22 (evidence-grounded specificity, not maximum
+    conservatism)."""
+    from app.agent.causal_guard import hypothesis_asserts_unlicensed_change_event_defect
+    assert not hypothesis_asserts_unlicensed_change_event_defect(statement, finding)
+
+
+@pytest.mark.parametrize("finding,statement", [
+    ("The operator stated they were unaware of the retraining.",
+     "The technician was not notified of the retraining requirement."),
+    ("The technician confirmed they did not know about the revised procedure.",
+     "Management failed to communicate the change."),
+    ("The operator stated they had not been informed.",
+     "The department did not distribute the updated checklist."),
+])
+def test_causal_event_inversion_rejected_across_domains(finding, statement):
+    from app.agent.causal_guard import hypothesis_asserts_unhedged_notification_failure
+    assert hypothesis_asserts_unhedged_notification_failure(statement, finding)
+
+
+@pytest.mark.parametrize("finding,statement", [
+    ("Distribution log shows the operator was omitted from the checklist distribution.",
+     "The revision may not have been distributed to the operator."),
+    ("Change-control procedure requires acknowledgement and no acknowledgement record exists.",
+     "The required acknowledgement may not have been obtained."),
+])
+def test_notification_hypothesis_allowed_with_explicit_evidence(finding, statement):
+    from app.agent.causal_guard import hypothesis_asserts_unhedged_notification_failure
+    assert not hypothesis_asserts_unhedged_notification_failure(statement, finding)
+
+
+def test_investigation_question_split_into_independent_branches():
+    """Section 5: the unrecorded-performance and documented-event branches
+    must be two separate questions, not one combined either/or question."""
+    from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+    finding = "The temperature log for refrigerator QC-REF-02 was not completed for 12 August 2026. The responsible technician confirmed that the temperature check was missed during the morning shift."
+    ledger = (
+        _verified_ledger("The temperature log for refrigerator QC-REF-02 was not completed for 12 August 2026.")
+        + _reported_ledger("technician: the temperature check was missed during the morning shift")
+    )
+    _, plan = build_deterministic_investigation_plan(finding, ledger)
+    question_texts = [q.question.lower() for q in plan.questions]
+    assert any("performed but not recorded" in q for q in question_texts)
+    assert any("documented event" in q for q in question_texts)
+    # Never combined into one question via "or"
+    assert not any("performed but not recorded" in q and "documented event" in q for q in question_texts)
 

@@ -142,6 +142,95 @@ def declarative_to_why_question(text: str) -> str:
     return f"Why {clause[0].lower()}{clause[1:]}?"
 
 
+_PLURAL_SUBJECT_TAIL_RE = re.compile(
+    r"\b(?:records?|logs?|entries|checks?|inspections?|reports?|certificates?|documents?|"
+    r"attendance\s+sheets?|results?)\b\s*$",
+    re.IGNORECASE,
+)
+
+
+def format_deviation_why_question(
+    subject: str | None, condition: str | None, temporal: str | None = None
+) -> str:
+    """Deterministically build a grammatically correct "Why was/were
+    <subject> <condition> [<temporal>]?" question from canonical
+    subject/condition/temporal fields.
+
+    Exists specifically so 5-Why repair code never falls back to naive
+    string interpolation of a dash-joined `observed_deviation` field (e.g.
+    "daily equipment inspection checklist — not completed"), which produces
+    ungrammatical output like "Why did daily equipment inspection checklist
+    — not completed occur?" A deviation is always "<subject> <condition>",
+    never "<subject> — <condition> occur" — the condition already IS the
+    predicate, so it must be embedded directly after was/were, not tacked
+    onto a generic "occur?" template.
+    """
+    raw_subj = (subject or "").strip()
+    # Prepend "the" unless the subject already carries its own leading
+    # article/possessive/demonstrative -- "Why was daily equipment
+    # inspection checklist not completed?" drops the article a fluent
+    # question needs; "Why was the daily equipment inspection checklist
+    # not completed?" is the grammatical form.
+    if raw_subj and not re.match(r"^(?:the|a|an|my|your|his|her|its|our|their|this|that)\b", raw_subj, re.IGNORECASE):
+        subj = f"the {raw_subj}"
+    else:
+        subj = raw_subj
+    cond = (condition or "").strip()
+    # Strip a leading was/were from the condition itself (e.g. "was
+    # incomplete") -- the aux verb is supplied once, by this function, not
+    # duplicated from a condition phrase that already includes one.
+    cond_aux_match = re.match(r"^(?:was|were)\s+(.+)$", cond, re.IGNORECASE)
+    if cond_aux_match:
+        cond = cond_aux_match.group(1)
+    temporal_suffix = f" {temporal.strip()}" if temporal and temporal.strip() else ""
+    if not subj:
+        return "Why did this deviation occur?"
+    if not cond or cond.upper() == "UNKNOWN":
+        return f"Why did {subj[0].lower()}{subj[1:]} deviate from the applicable requirement{temporal_suffix}?"
+    aux = "were" if _PLURAL_SUBJECT_TAIL_RE.search(subj) else "was"
+    return f"Why {aux} {subj[0].lower()}{subj[1:]} {cond}{temporal_suffix}?"
+
+
+_SPEAKER_CLAIM_RE = re.compile(r"^([A-Za-z][\w\s]{0,40}?):\s*(.+)$")
+_WAS_WERE_LEAD_RE = re.compile(r"^(?:was|were)\s+(.+)$", re.IGNORECASE)
+_HAD_LEAD_RE = re.compile(r"^had\s+(.+)$", re.IGNORECASE)
+_DID_LEAD_RE = re.compile(r"^did\s+not\s+(.+)$", re.IGNORECASE)
+
+
+def naturalize_reported_claim(text: str | None) -> str | None:
+    """Convert a raw internal "speaker: claim" evidence-ledger fragment
+    (e.g. "operator: were unaware that the checklist procedure had been
+    revised") into a natural-language sentence ("The operator reported
+    being unaware that the checklist procedure had been revised.") suitable
+    for direct display as a 5-Why answer or mechanism statement.
+
+    The "speaker: claim" format is an internal representation built when
+    attributed statements are added to the evidence ledger -- it must never
+    leak into report-facing text verbatim (Problem 9: "operator: were
+    unaware..." is not a sentence). No-op (returns input unchanged) when
+    the text doesn't match the speaker-prefixed shape, so this is always
+    safe to apply defensively wherever a reported claim might reach a
+    user-facing field.
+    """
+    if not text:
+        return text
+    m = _SPEAKER_CLAIM_RE.match(text.strip())
+    if not m:
+        return text
+    speaker, claim = m.group(1).strip(), m.group(2).strip()
+    if not speaker or not claim:
+        return text
+    speaker_phrase = (strip_leading_article(speaker) or speaker).strip().lower()
+    for lead_re, gerund in ((_WAS_WERE_LEAD_RE, "being"), (_HAD_LEAD_RE, "having")):
+        m2 = lead_re.match(claim)
+        if m2:
+            return f"The {speaker_phrase} reported {gerund} {m2.group(1)}.".replace("..", ".")
+    m3 = _DID_LEAD_RE.match(claim)
+    if m3:
+        return f"The {speaker_phrase} reported not {m3.group(1)}.".replace("..", ".")
+    return f"The {speaker_phrase} reported that {claim}.".replace("..", ".")
+
+
 def _clean_subject(raw: str) -> str:
     s = raw.strip().strip("\"'").strip()
     s = re.sub(r"^(?:that|which|who)\s+", "", s, flags=re.IGNORECASE).strip()
@@ -264,19 +353,45 @@ _TEMPORAL_CLAUSE_RE = re.compile(
     r"(?=[.,;]|\s+(?:and|but|however)\b|$)",
     re.IGNORECASE,
 )
+# Bounded-duration expressions actually stated in the finding (never
+# fabricated): "for three consecutive days", "during the morning shift",
+# etc. -- a distinct shape from the relative-clause patterns above (those
+# anchor to another EVENT, e.g. "before the procedure became effective";
+# these anchor to a stated DURATION or named period). Checked in priority
+# order below -- "during the audit" is a fallback, not preferred, since it
+# describes when the finding was NOTICED, not the period the deviation
+# itself actually spans (e.g. "for three consecutive days" is the
+# meaningful affected period; "during the audit" is just framing).
+_TEMPORAL_DURATION_RE = re.compile(
+    r"\bfor\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"consecutive\s+(?:day|days|week|weeks|month|months|shift|shifts)\b|"
+    r"\bduring\s+the\s+(?:morning|afternoon|evening|night|day)\s+shift\b",
+    re.IGNORECASE,
+)
+_TEMPORAL_DURING_AUDIT_RE = re.compile(
+    r"\bduring\s+the\s+(?:current\s+)?audit(?:\s+period)?\b", re.IGNORECASE,
+)
 
 
 def extract_temporal_clause(text: str) -> str | None:
-    """Extract a relative temporal clause already stated in the finding
-    (e.g. "before the procedure became effective") when no absolute date is
-    present. Never fabricates a date — returns None if nothing is stated."""
+    """Extract a relative temporal clause or stated duration already
+    present in the finding (e.g. "before the procedure became effective",
+    "for three consecutive days") when no absolute date is present. Never
+    fabricates a date/period — returns None if nothing is stated."""
     if not text:
         return None
     m = _TEMPORAL_CLAUSE_RE.search(text)
-    if not m:
-        return None
-    clause = m.group(1).strip().rstrip(".,;")
-    return clause or None
+    if m:
+        clause = m.group(1).strip().rstrip(".,;")
+        if clause:
+            return clause
+    m2 = _TEMPORAL_DURATION_RE.search(text)
+    if m2:
+        return m2.group(0).strip().rstrip(".,;")
+    m3 = _TEMPORAL_DURING_AUDIT_RE.search(text)
+    if m3:
+        return m3.group(0).strip().rstrip(".,;")
+    return None
 
 
 # Generic stopwords stripped when deriving a short topic word from a subject
@@ -366,8 +481,17 @@ def split_topic_and_tail(subject: str | None, topic: str) -> str | None:
     (nothing safe to strip)."""
     if not subject or not topic:
         return subject
+    # The optional middle word must be an actual status/compliance-type
+    # word (matching this function's own docstring), never an arbitrary
+    # word -- allowing ANY word here (the previous `\s+\w+`) wrongly
+    # matched record-shaped subjects like "temperature log for refrigerator
+    # QC-REF-02" (where "log" filled that slot), misclassifying a
+    # record/document subject as an activity/qualification one and
+    # producing "<role> <topic> status for <tail>" nonsense like
+    # "Technician temperature status for refrigerator QC-REF-02" instead
+    # of treating the subject as already a clean, specific affected object.
     pattern = re.compile(
-        rf"^{re.escape(topic)}\b(?:\s+\w+)?\s*(?:for|of)\s+", re.IGNORECASE
+        rf"^{re.escape(topic)}\b(?:\s+(?:status|compliance))?\s*(?:for|of)\s+", re.IGNORECASE
     )
     m = pattern.match(subject)
     if m:

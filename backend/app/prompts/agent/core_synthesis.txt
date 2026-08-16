@@ -1,76 +1,51 @@
-Perform evidence-grounded investigation analysis on the following finding.
+Propose CANDIDATE causal reasoning only. You do not decide final status, root cause, impact, or CAPA —
+those are validated/derived deterministically downstream. Cite claim ids; never invent one.
 
-CANONICAL CASE STATE (single source of truth — do not re-derive or repeat the raw finding text):
+CASE STATE:
 DEVIATION: {observed_deviation}
 MECHANISM: {immediate_mechanism} ({immediate_mechanism_status})
-EVIDENCE (claim + status): {evidence_ledger_json}
+CLAIMS (id, claim, status): {evidence_ledger_json}
 CONFLICTS: {evidence_conflicts_json}
-FINDING (context only, for wording — do not restate it verbatim in your answer): {finding_text}
+FINDING (context only, do not restate): {finding_text}
 
 RULES:
-1. Evidence hierarchy: Verified > Supported > Reported. Never promote a reported claim to verified root cause.
-2. If root cause is not established: status="NOT_ESTABLISHED", statement=null, category="TO_BE_CONFIRMED".
-3. Provide 2-3 plausible candidate hypotheses explaining WHY the deviation occurred.
-4. If evidence conflicts exist, do not select one side as fact; keep competing hypotheses POSSIBLE.
-5. 5-Why: 1-3 causal steps. Stop with UNKNOWN or MIXED at the evidence boundary.
-6. CAPA: conditional_actions mapping "IF confirmed THEN action" — the action must be an organizational
-   corrective/preventive step, never a record name (put record names in evidence_needed instead).
+1. Verified > Reported. Never call a reported claim verified.
+2. Every hypothesis MUST cite supporting_claim_ids and/or contradicting_claim_ids using ONLY the ids
+   listed above. A hypothesis with no citable claim is not a hypothesis -- omit it.
+3. Max 3 hypotheses. Fewer, evidence-grounded ones beat padding the count.
+4. If evidence conflicts, keep competing hypotheses POSSIBLE -- do not pick a side.
+5. 5-Why: 1-3 steps, stop with UNKNOWN/MIXED at the evidence boundary.
+6. If root cause is not established: status="NOT_ESTABLISHED", statement=null.
+7. Every string is ONE short sentence. No markdown, no prose outside the JSON.
 
-OUTPUT DISCIPLINE (compact JSON, not prose):
-- Every string field is ONE concise sentence (roughly 15-25 words). No paragraphs, no markdown, no lists
-  inside a string field.
-- Name the subject/topic ONCE per field; refer to it briefly afterward (e.g. "it", "the record") rather
-  than repeating the full subject phrase in every field.
-- discrimination_evidence/confirms_if/refutes_if state exactly what evidence would distinguish this
-  hypothesis from the others — not a vague "distinguishes X from Y" label.
-- Do not include narrative, headings, or commentary outside the JSON object below.
-
-Return valid JSON matching this schema:
+Return ONLY this JSON:
 {{
   "root_cause": {{
     "status": "NOT_ESTABLISHED",
     "category": "TO_BE_CONFIRMED",
     "statement": null,
-    "leading_hypothesis": null,
-    "root_cause_basis": "string, 1 sentence",
-    "evidence_required": ["string, concrete record name"],
+    "root_cause_basis": "1 sentence",
+    "evidence_required": ["record name"],
     "candidate_hypotheses": [
       {{
         "id": "H1",
         "name": "SHORT_CODE",
         "statement": "1 sentence: the specific plausible cause",
-        "rationale": "1 sentence: why this finding's own evidence makes it plausible",
+        "causal_level": "CONTRIBUTING_CAUSE",
+        "supporting_claim_ids": ["C1"],
+        "contradicting_claim_ids": [],
         "status": "POSSIBLE",
-        "relevance_rank": "HIGH",
-        "evidence_needed": "concrete record name, not a sentence",
-        "confirms_if": "1 sentence: the specific result that would confirm this",
-        "refutes_if": "1 sentence: the specific result that would refute this"
+        "evidence_needed": "concrete record name",
+        "confirms_if": "1 sentence",
+        "refutes_if": "1 sentence"
       }}
     ],
-    "risk_of_recurrence": "NOT_ASSESSABLE",
     "narrative": "1-2 sentences"
   }},
   "five_why": {{
-    "steps": [
-      {{"question": "1 concise sentence", "answer": "1 concise sentence", "status": "MIXED"}}
-    ],
+    "steps": [{{"question": "1 sentence", "answer": "1 sentence", "status": "MIXED"}}],
     "is_complete": false,
-    "status_note": "1 short phrase"
-  }},
-  "impact_assessment": {{
-    "affected_object": "the status/qualification/process affected — not the record itself",
-    "process_at_risk": "short phrase",
-    "potential_effect": "1 sentence: plausible consequence, not a restatement of the finding",
-    "evidence_needed": "concrete record name",
-    "narrative": "1 sentence"
-  }},
-  "capa": {{
-    "potential_areas": ["short phrase"],
-    "recommended_investigation": ["1 sentence"],
-    "conditional_actions": [
-      {{"if_cause_confirmed": "IF <hypothesis id/name> confirmed", "recommended_action": "1 sentence: organizational action", "verification_method": "1 sentence", "evidence_needed": "concrete record name"}}
-    ]
+    "status_note": "short phrase"
   }},
   "contributing_factors": []
 }}
-

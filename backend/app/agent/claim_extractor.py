@@ -297,7 +297,52 @@ def detect_evidence_conflicts(claims: list[EvidenceClaim]) -> list[EvidenceConfl
                     resolution_required=True,
                 ))
 
-    return conflicts
+    return _merge_same_proposition_conflicts(conflicts)
+
+
+def _merge_same_proposition_conflicts(conflicts: list[EvidenceConflict]) -> list[EvidenceConflict]:
+    """Merge conflicts that describe the SAME underlying proposition under
+    different wording into one conflict with all claims attached.
+
+    A REPORTED-vs-REPORTED pass and a VERIFIED-vs-REPORTED pass run
+    independently above and can each form their own conflict object around
+    a shared claim (e.g. "supervisor says training completed") -- one
+    phrased as "whether X received training", the other as "whether the
+    required activity was completed" -- which is the same disagreement, not
+    two. Conflict identity must be the semantic proposition, not the
+    surface wording that happened to generate it (Section 6).
+    """
+    merged: list[EvidenceConflict] = []
+    for conf in conflicts:
+        prop_words = significant_words(conf.proposition)
+        match = None
+        for existing in merged:
+            # Sharing a claim ID is the stronger signal: the two detection
+            # passes above (REPORTED-vs-REPORTED, then VERIFIED-vs-REPORTED)
+            # only ever pair claims _claims_conflict() already judged to be
+            # about the same subject -- if a claim recurs across two
+            # resulting conflict objects, both are already independently
+            # anchored to the same underlying disagreement even when their
+            # generated proposition wording uses different vocabulary (e.g.
+            # "training" vs. "the required activity").
+            if set(conf.claims) & set(existing.claims):
+                match = existing
+                break
+            existing_words = significant_words(existing.proposition)
+            if prop_words and existing_words:
+                overlap = len(prop_words & existing_words) / min(len(prop_words), len(existing_words))
+                if overlap >= 0.4:
+                    match = existing
+                    break
+        if match:
+            for cid in conf.claims:
+                if cid not in match.claims:
+                    match.claims.append(cid)
+        else:
+            merged.append(conf)
+    for idx, conf in enumerate(merged, start=1):
+        conf.conflict_id = f"CONF{idx}"
+    return merged
 
 
 def _stem(w: str) -> str:

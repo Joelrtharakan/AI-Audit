@@ -15,9 +15,14 @@ from app.agent.causal_guard import (
     MechanismInfo,
     answer_asserts_verified_but_is_reported,
     classify_mixed_evidence_answer,
+    derive_hypothesis_title_from_statement,
+    detect_unsupported_causal_specificity,
     extract_immediate_mechanism,
+    hypothesis_asserts_self_referential_evidence,
     hypothesis_contradicts_mechanism,
+    hypothesis_name_is_generic,
     hypothesis_overclaims_human_error,
+    hypothesis_statement_asserts_unsupported_causation,
     is_circular_why_answer,
     is_evidence_gap_not_hypothesis,
     is_generic_non_analysis_filler,
@@ -509,3 +514,194 @@ def test_purely_factual_answer_is_not_mixed():
 def test_mixed_detection_generalizes_to_unrelated_domain():
     answer = "The supervisor reported that training had been completed, but the certificate was not on file."
     assert classify_mixed_evidence_answer(answer) == "MIXED"
+
+
+# ---------------------------------------------------------------------------
+# Causal-domain eligibility: awareness/unawareness of a revision must never
+# license training, procedure-clarity, or accessibility hypotheses on its
+# own -- those are distinct causal domains each requiring their own
+# evidence trigger. (current-turn Sections 1-9, 27 test requirements A-H)
+# ---------------------------------------------------------------------------
+
+AWARENESS_ONLY_FINDING = (
+    "The daily equipment inspection checklist was not completed for three consecutive days. "
+    "The operator stated that they were unaware that the checklist procedure had been revised."
+)
+
+
+def test_a_awareness_alone_rejects_training_hypothesis():
+    """Awareness statement without training evidence -> no training hypothesis."""
+    statement = "The operator was not retrained after the checklist revision."
+    is_unsupported, reason = detect_unsupported_causal_specificity(statement, AWARENESS_ONLY_FINDING)
+    assert is_unsupported
+    assert "training" in reason.lower()
+
+
+def test_b_training_hypothesis_eligible_with_training_evidence():
+    """Awareness statement WITH explicit training evidence -> training
+    hypothesis may be eligible."""
+    finding = AWARENESS_ONLY_FINDING + " Retraining is required whenever a checklist procedure is revised."
+    statement = "The operator may not have completed the required retraining after the checklist revision."
+    is_unsupported, _ = detect_unsupported_causal_specificity(statement, finding)
+    assert not is_unsupported
+
+
+def test_c_explicit_unclear_procedure_is_eligible():
+    """Explicit unclear-procedure evidence -> procedure clarity hypothesis eligible."""
+    finding = "The operator stated the revised checklist instructions were confusing and contradictory."
+    statement = "The revised checklist procedure was unclear to operators."
+    is_unsupported, _ = detect_unsupported_causal_specificity(statement, finding)
+    assert not is_unsupported
+
+
+def test_d_awareness_alone_rejects_procedure_clarity_hypothesis():
+    """Awareness without unclear-procedure evidence -> procedure clarity hypothesis rejected."""
+    statement = "The revised checklist procedure was unclear to operators."
+    is_unsupported, reason = detect_unsupported_causal_specificity(statement, AWARENESS_ONLY_FINDING)
+    assert is_unsupported
+    assert "clarity" in reason.lower() or "guidance" in reason.lower()
+
+
+def test_e_explicit_document_access_failure_is_eligible():
+    """Explicit document-access failure -> accessibility hypothesis eligible."""
+    finding = "The controlled checklist copy was not accessible at the operator's workstation."
+    statement = "The revised checklist was not easily accessible to operators at their workstation."
+    is_unsupported, _ = detect_unsupported_causal_specificity(statement, finding)
+    assert not is_unsupported
+
+
+def test_f_awareness_alone_rejects_accessibility_hypothesis():
+    """Awareness without access evidence -> accessibility hypothesis rejected."""
+    statement = "The revised checklist was not easily accessible to operators."
+    is_unsupported, reason = detect_unsupported_causal_specificity(statement, AWARENESS_ONLY_FINDING)
+    assert is_unsupported
+    assert "accessib" in reason.lower()
+
+
+def test_g_explicit_equipment_malfunction_is_eligible():
+    """Explicit equipment malfunction evidence -> equipment hypothesis eligible."""
+    finding = "An error code was displayed on the refrigeration unit during the affected period."
+    statement = "The refrigeration unit's monitoring system malfunctioned during the affected period."
+    is_unsupported, _ = detect_unsupported_causal_specificity(statement, finding)
+    assert not is_unsupported
+
+
+def test_scheduling_hypothesis_rejected_from_bare_shift_reference():
+    """A: 'temperature check missed during morning shift' -> reject
+    scheduling/handover hypothesis; a bare shift/time reference is
+    temporal context, not scheduling evidence."""
+    finding = "The temperature check was missed during the morning shift."
+    statement = "Responsibility for executing the temperature check was not effectively scheduled or transferred across operational shifts."
+    is_unsupported, reason = detect_unsupported_causal_specificity(statement, finding)
+    assert is_unsupported
+    assert "scheduling" in reason.lower() or "handover" in reason.lower()
+
+
+def test_scheduling_hypothesis_allowed_when_finding_names_shift_plan():
+    """B: 'temperature check missed because shift plan omitted it' -> allow
+    the scheduling hypothesis, since the finding itself supplies the
+    evidence rather than the hypothesis inventing it."""
+    finding = "The temperature check was missed because the shift plan omitted it."
+    statement = "The temperature check may not have been scheduled or documented in the shift plan."
+    is_unsupported, _ = detect_unsupported_causal_specificity(statement, finding)
+    assert not is_unsupported
+
+
+def test_reminder_hypothesis_rejected_without_reminder_system_evidence():
+    """No reminder/notification-system vocabulary in the finding -> reject
+    a reminder/verification-control hypothesis."""
+    finding = "The temperature check was missed during the morning shift."
+    statement = "The operational workflow lacked an effective reminder or supervisory verification control."
+    is_unsupported, reason = detect_unsupported_causal_specificity(statement, finding)
+    assert is_unsupported
+    assert "reminder" in reason.lower()
+
+
+_SCHEDULING_PARAPHRASES_NO_EVIDENCE = [
+    "The temperature check was not scheduled.",
+    "The check wasn't included in the schedule.",
+    "No shift-plan entry existed.",
+    "The task was absent from the duty plan.",
+    "The check was not planned.",
+    "Scheduling controls may have failed.",
+    "The system did not schedule the check.",
+    "The scheduling process was inadequate.",
+    "The check was omitted from the morning schedule.",
+    "Records show the check was scheduled.",
+]
+
+
+@pytest.mark.parametrize("statement", _SCHEDULING_PARAPHRASES_NO_EVIDENCE)
+def test_adversarial_scheduling_paraphrases_all_rejected(statement):
+    """Concept-root detection must catch every paraphrase of the same
+    unsupported scheduling mechanism, not just the specific phrasings
+    originally observed -- this is the paraphrase-resistance requirement:
+    the finding here contains only a bare time-of-day/shift reference,
+    never real scheduling evidence, regardless of how the hypothesis
+    phrases the (unlicensed) scheduling claim."""
+    finding = "The technician missed the temperature check during the morning shift."
+    unsupported, _ = detect_unsupported_causal_specificity(statement, finding)
+    self_ref = hypothesis_asserts_self_referential_evidence(statement)
+    assert unsupported or self_ref, f"expected rejection for: {statement!r}"
+
+
+def test_scheduling_hypothesis_allowed_with_real_evidence_variant_wording():
+    """Positive controls: when the finding genuinely describes scheduling/
+    assignment status -- in whatever tense/wording -- the concept-root
+    allowed-context check (paraphrase-symmetric with the target) must
+    license the hypothesis rather than requiring an exact phrase match."""
+    cases = [
+        "The technician stated that the check was missed because it was not included in the shift schedule.",
+        "The shift schedule for the affected period showed no temperature check assigned to any technician.",
+    ]
+    for finding in cases:
+        unsupported, reason = detect_unsupported_causal_specificity(finding, finding)
+        assert not unsupported, f"expected allowance for: {finding!r} (reason={reason})"
+
+
+def test_self_referential_evidence_assertion_rejected():
+    """Section 6: a hypothesis narrating its OWN 'supporting evidence'
+    inline ('system records show...') is a claim, not evidence -- must be
+    rejected regardless of which mechanism it's attached to."""
+    for statement in (
+        "System records show the check was scheduled.",
+        "The log indicates the technician was not trained.",
+        "Records confirm the procedure was unclear.",
+    ):
+        assert hypothesis_asserts_self_referential_evidence(statement)
+    # A statement that doesn't narrate its own evidence source is unaffected.
+    assert not hypothesis_asserts_self_referential_evidence(
+        "The procedure revision may not have been effectively communicated to the affected operator."
+    )
+
+
+def test_h_missing_equipment_evidence_rejects_malfunction_hypothesis():
+    """Missing equipment-malfunction evidence -> equipment hypothesis rejected."""
+    statement = "The temperature monitoring system malfunctioned during the affected period."
+    finding = "The temperature log for refrigerator QC-REF-02 was not completed for 12 August 2026."
+    is_unsupported, reason = detect_unsupported_causal_specificity(statement, finding)
+    assert is_unsupported
+    assert "malfunction" in reason.lower()
+
+
+def test_i_causal_verb_without_evidence_rejected():
+    statement = "The checklist was not completed because the revision was not communicated to operators."
+    assert hypothesis_statement_asserts_unsupported_causation(statement, [])
+
+
+def test_i_hedged_communication_hypothesis_not_causal_overclaim():
+    statement = "The procedure revision may not have been effectively communicated to or acknowledged by the affected operator."
+    assert not hypothesis_statement_asserts_unsupported_causation(statement, [])
+
+
+def test_k_generic_hypothesis_title_flagged_and_never_leaks_internal_id():
+    assert hypothesis_name_is_generic("Process Oversight")
+    assert hypothesis_name_is_generic("Training Problem")
+    assert not hypothesis_name_is_generic("REVISION_COMMUNICATION_OR_ACKNOWLEDGEMENT_GAP")
+    # Renaming must derive a human-readable title from the statement, never
+    # an internal-looking placeholder such as "CANDIDATE_MECHANISM_H2".
+    title = derive_hypothesis_title_from_statement(
+        "The procedure revision may not have been effectively communicated to the affected operator.", "H2"
+    )
+    assert "CANDIDATE_MECHANISM" not in title
+    assert "H2" not in title or title == "Candidate Mechanism H2"  # only the no-statement fallback may include the id

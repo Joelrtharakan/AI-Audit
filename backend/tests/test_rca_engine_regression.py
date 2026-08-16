@@ -136,7 +136,10 @@ def test_regression_case_g_training_conflict():
         confirms_if="Attendance sheet is signed but LMS record is missing",
         refutes_if="Neither attendance sheet nor LMS record exists",
     )
-    valid, reason = validate_hypothesis_quality(h1.statement, "The operator stated...")
+    valid, reason = validate_hypothesis_quality(
+        h1.statement,
+        "The operator stated that they attended the training session, but the LMS training record could not be located.",
+    )
     assert valid
 
 

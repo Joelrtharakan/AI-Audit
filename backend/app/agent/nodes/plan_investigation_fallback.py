@@ -90,10 +90,6 @@ def build_deterministic_investigation_plan(
             getattr(c, "text", str(c)) for c in claims
             if getattr(c, "status", None) == EvidenceStatus.REPORTED
         ]
-        verified_texts = [
-            getattr(c, "text", str(c)) for c in claims
-            if getattr(c, "status", None) == EvidenceStatus.VERIFIED
-        ]
         claim_a = (
             conflict_claims_by_id.get(conflict_claim_ids[0]) if len(conflict_claim_ids) > 0 and conflict_claim_ids[0] in conflict_claims_by_id
             else (reported_texts[0] if reported_texts else f"one party reported that {subject} was not completed")
@@ -126,238 +122,240 @@ def build_deterministic_investigation_plan(
         stripped_actor = strip_leading_article(actor)
         actor_phrase = f"the {stripped_actor.lower()}" if stripped_actor else "the responsible person"
 
-        missing_record_claim = verified_texts[0] if verified_texts else f"no {topic} record was available during the audit"
-
-        # STRICT HYPOTHESIS SEMANTIC CONSISTENCY: each hypothesis describes
-        # exactly ONE causal mechanism, and every one of its fields
-        # (statement / evidence_needed / discrimination_evidence /
-        # confirms_if / refutes_if) stays about that SAME mechanism:
-        #   H1 - the record exists but couldn't be located/retrieved
-        #   H2 - the activity itself was not completed
-        #   H3 - the record was never created/retained (a record-control
-        #        process failure, distinct from H1's retrieval problem)
-        #   H4 - the activity may have occurred, but the organization's
-        #        verification/authorization control didn't confirm it
-        # Never a hypothesis about whether a PERSON'S STATEMENT was
-        # accurate/honest -- a statement is evidence, not a mechanism.
+        # CAUSAL LEVEL SEPARATION: only a genuine CAUSAL/EXECUTION-level
+        # proposition (did the required activity actually happen?) is a
+        # root-cause CANDIDATE HYPOTHESIS. Record-availability ("the record
+        # wasn't there to check") and record-CONTROL-process propositions
+        # ("the creation/retention/retrieval/verification process may be
+        # weak") are a different causal LEVEL entirely -- an EVIDENCE-STATE
+        # fact and a SYSTEMIC investigation area, respectively -- and must
+        # never be pooled into `hypotheses` as competing root causes
+        # alongside the execution-level one. They still matter, so their
+        # content survives as investigation areas/questions; they just
+        # never compete for "leading hypothesis" or generate their own
+        # unconditional CAPA branch, since nothing here establishes WHICH
+        # (if any) of them is the actual failure mode.
         h1 = CandidateHypothesis(
             id="H1",
-            name=f"{topic.upper()}_RECORD_UNAVAILABLE",
-            statement=(
-                f"The required {topic} record for {tail} may exist but was unavailable or could not be "
-                "retrieved during the audit."
-            ),
-            status="POSSIBLE",
-            evidence_needed=f"Authenticated {topic} record from the LMS, archive, or {topic} repository",
-            confirms_if=f"A located, authenticated {topic} record confirms completion despite its initial unavailability",
-            refutes_if=f"No {topic} record exists in any repository, archived or otherwise",
-            discrimination_evidence=(
-                f"An authenticated {topic} record located after the audit that confirms completion supports "
-                "H1; if no such record can be located anywhere, H1 is refuted."
-            ),
-            rationale=f"Plausible because {claim_b}, while {missing_record_claim}.",
-            relevance_rank="HIGH",
-        )
-        h2 = CandidateHypothesis(
-            id="H2",
             name=f"{topic.upper()}_NOT_COMPLETED",
-            statement=f"Required {topic} for {tail} was not completed{temporal_suffix}.",
+            statement=f"Required {topic} for {tail} may not have been completed{temporal_suffix}.",
             status="POSSIBLE",
             evidence_needed=f"Authenticated {topic} attendance/completion record",
             confirms_if=f"No approved {topic} completion record exists for the affected period",
             refutes_if=f"An approved {topic} completion record confirms timely completion",
             discrimination_evidence=(
-                f"A record showing completion {effective_ref} weakens H2. Absence of a record alone does "
-                "not prove H2 — see H1 and H3."
+                f"A record showing completion {effective_ref} weakens H1. Absence of a record alone does "
+                "not prove H1 -- see the record-availability and record-control investigation areas below."
             ),
             rationale=f"Plausible because {claim_a}.",
             relevance_rank="HIGH",
+            supporting_evidence=[claim_a],
+            contradicting_evidence=[claim_b] if claim_b != claim_a else [],
         )
-        h3 = CandidateHypothesis(
-            id="H3",
-            name=f"{topic.upper()}_RECORD_CONTROL_GAP",
-            statement=f"The required {topic} record for {tail} was not created, maintained, or controlled as required.",
-            status="POSSIBLE",
-            evidence_needed=f"{topic_cap} record-control procedure, retention requirements, and record audit trail",
-            confirms_if=(
-                f"Applicable record-control requirements show a {topic} record should have existed, but no "
-                "such record was ever created or retained"
-            ),
-            refutes_if=f"The record-control audit trail confirms the {topic} record was properly created and retained",
-            discrimination_evidence=(
-                "Evidence that the record-control process itself failed to create or retain the record "
-                "supports H3; evidence that a record was properly created and retained (even if temporarily "
-                "hard to locate) weakens H3 in favor of H1."
-            ),
-            rationale=f"Plausible because {missing_record_claim}, which is consistent with a record-control failure and not distinguishable from H1 without further investigation.",
-            relevance_rank="HIGH",
-        )
-        h4 = CandidateHypothesis(
-            id="H4",
-            name=f"{topic.upper()}_VERIFICATION_CONTROL_GAP",
-            statement=(
-                f"Required {topic} for {tail} may have been completed, but the organization's verification "
-                f"or authorization control failed to ensure completion was confirmed{temporal_suffix}."
-            ),
-            status="POSSIBLE",
-            evidence_needed=f"{topic_cap} authorization requirements and verification/sign-off records",
-            confirms_if=f"No verification or authorization step exists confirming {topic} completion before use",
-            refutes_if=f"A documented verification/authorization step confirms {topic} completion was checked before use",
-            discrimination_evidence=(
-                f"Evidence that {topic} was completed but required verification or authorization was absent "
-                "or ineffective supports H4. Evidence that verification and authorization were correctly "
-                "performed weakens H4."
-            ),
-            rationale=(
-                "Plausible because conflicting completion claims could indicate insufficient verification "
-                "controls, but this is not established."
-            ),
-            relevance_rank="HIGH",
-        )
-        hypotheses.extend([h1, h2, h3, h4])
+        hypotheses.append(h1)
 
         questions.append(InvestigationQuestion(
-            question=f"Can an authenticated {topic} record be located in the approved {topic} repository or archive?",
-            purpose="Resolves H1 — whether the record exists but was unavailable during the audit",
-            evidence=f"Authenticated {topic} record from the LMS, archive, or {topic} repository",
+            question=f"Do authenticated {topic} records show that {actor_phrase} completed the required {topic}{temporal_suffix}?",
+            purpose="Resolves H1 — whether the required activity was actually completed",
+            evidence=f"Authenticated {topic} attendance/completion record",
             hypothesis_tested="H1",
             confirms_if=h1.confirms_if,
             refutes_if=h1.refutes_if,
             possible_outcomes=[
-                "Record is located and confirms completion → H1 strengthened.",
-                "No record exists in any repository → H1 refuted.",
+                f"Record confirms completion {effective_ref} → H1 weakened.",
+                "Record shows no completion → H1 strengthened.",
             ],
         ))
+
+        # EVIDENCE-STATE investigation (not a hypothesis, not scored against
+        # H1): the record was unavailable AT AUDIT TIME. That fact alone
+        # cannot confirm OR refute H1 -- failing to locate a record never
+        # establishes the record never existed, was lost, or that
+        # retrieval failed (those are separate, evidence-requiring claims).
+        # `hypothesis_tested` deliberately left unset -- this question does
+        # not test a candidate hypothesis; it resolves an antecedent
+        # evidence-availability question the hypothesis's own discrimination
+        # depends on.
         questions.append(InvestigationQuestion(
-            question=f"Do authenticated {topic} records show that {actor_phrase} completed the required {topic}{temporal_suffix}?",
-            purpose="Resolves H2 — whether the required activity was actually completed",
-            evidence=f"Authenticated {topic} attendance/completion record",
-            hypothesis_tested="H2",
-            confirms_if=h2.confirms_if,
-            refutes_if=h2.refutes_if,
+            question=f"Can an authenticated {topic} record be located in the approved {topic} repository or archive?",
+            purpose=(
+                "Resolves the antecedent evidence-availability question: whether the record exists and "
+                "can be located, prior to evaluating what it shows"
+            ),
+            evidence=f"Authenticated {topic} record from the LMS, archive, or {topic} repository",
+            confirms_if=f"A located, authenticated {topic} record confirms completion despite its initial unavailability",
+            refutes_if=(
+                f"No {topic} record can be located after a documented, thorough search of every applicable "
+                "repository — this alone still does not establish the activity did not occur; see the "
+                "record-control investigation area if that remains unresolved"
+            ),
             possible_outcomes=[
-                f"Record confirms completion {effective_ref} → H2 weakened.",
-                "Record shows no completion → H2 strengthened.",
+                "Record is located and confirms completion → H1 weakened.",
+                "Record is located and does not confirm completion → H1 strengthened.",
+                "No record can be located → availability remains unresolved unless record-control evidence "
+                "establishes why.",
             ],
         ))
+
+        # SYSTEMIC investigation area (record-control process): deliberately
+        # NOT a single bundled hypothesis combining creation/retention/
+        # retrieval/verification into one statement (that conflates four
+        # distinct control points into one unfalsifiable claim) and
+        # deliberately NOT a candidate hypothesis at all -- this is a
+        # process-level investigation target, evaluated only if the
+        # evidence-availability question above leaves the record
+        # genuinely unresolved.
         questions.append(InvestigationQuestion(
             question=(
-                f"Do the applicable record-control requirements show that a {topic} record should have been "
-                f"created and retained for {tail}, and is there evidence that this control failed?"
+                f"Do the applicable record-control requirements establish whether a {topic} record should "
+                f"have been created and retained for {tail}, and does the record-control audit trail show "
+                "whether that requirement was met?"
             ),
-            purpose="Resolves H3 — whether record creation/retention was itself defective",
+            purpose="Determine whether the record-control process (creation/retention) itself has a control weakness",
             evidence=f"{topic_cap} record-control procedure, retention requirements, and record audit trail",
-            hypothesis_tested="H3",
-            confirms_if=h3.confirms_if,
-            refutes_if=h3.refutes_if,
             possible_outcomes=[
-                "Record-control audit trail shows the record was never created → H3 strengthened.",
-                "Record-control audit trail confirms proper creation and retention → H3 weakened.",
+                "Audit trail shows the record was never created or retained as required → record-control "
+                "weakness supported.",
+                "Audit trail confirms proper creation and retention → record-control weakness refuted.",
             ],
         ))
         questions.append(InvestigationQuestion(
             question=(
-                f"Was {topic} completion required to be verified or authorized{temporal_suffix}, and is "
-                "there evidence that this control was executed?"
+                f"Was {topic} completion required to be verified or authorized{temporal_suffix}, and does "
+                "the applicable record show whether that verification step was executed?"
             ),
-            purpose="Resolves H4 — whether a verification/authorization control failed",
+            purpose="Determine whether a completion-verification/authorization control failed to catch the gap",
             evidence=f"{topic_cap} authorization requirements and verification/sign-off records",
-            hypothesis_tested="H4",
-            confirms_if=h4.confirms_if,
-            refutes_if=h4.refutes_if,
             possible_outcomes=[
-                "Verification/authorization step was required but not executed → H4 strengthened.",
-                "Verification/authorization step was executed and documented → H4 weakened.",
+                "Verification/authorization step was required but not executed → verification-control "
+                "weakness supported.",
+                "Verification/authorization step was executed and documented → verification-control "
+                "weakness refuted.",
             ],
         ))
         evidence_items.extend([
-            f"Authenticated {topic} record from the LMS, archive, or {topic} repository",
             f"Authenticated {topic} attendance/completion record",
+            f"Authenticated {topic} record from the LMS, archive, or {topic} repository",
             f"{topic_cap} record-control procedure and retention requirements",
             f"{topic_cap} authorization/sign-off record",
         ])
-        # INVESTIGATION AREAS (Section 7 & 9): one per hypothesis, so every
-        # area traces to a live candidate hypothesis — never a fixed generic
-        # label, and explicitly investigation-oriented (not a confirmed CAPA
-        # scope) since root cause remains NOT_ESTABLISHED at this point.
+        # INVESTIGATION AREAS (Section 7 & 9): the causal hypothesis's own
+        # area, plus the evidence-availability and systemic record-control
+        # areas that exist independently of whether H1 itself survives.
         plan_areas = [
             f"{topic_cap} completion verification",
-            f"{topic_cap} record retrieval",
-            f"{topic_cap} record control",
-            f"{topic_cap} verification and authorization",
+            f"{topic_cap} record availability",
+            f"{topic_cap} record-control process",
         ]
 
-    # 2. Knowledge / Revision Gap Branch
+    # 2. Knowledge / Revision Gap Branch (awareness/communication only --
+    # "X was unaware of a revision" is evidence about notification/
+    # acknowledgement, never by itself evidence about training/competency
+    # or about the procedure's own clarity. Training and procedural-clarity
+    # hypotheses are DELIBERATELY not generated here regardless of rank --
+    # each is its own distinct causal domain requiring its own evidence
+    # trigger (training/competency vocabulary; unclear/ambiguous/confusing
+    # vocabulary respectively), neither of which this branch's trigger
+    # condition (an unaware-of-revision statement) establishes on its own.
     elif mechanism.polarity == "knowledge_gap" or ("unaware" in text_low and "revision" in text_low):
         h1 = CandidateHypothesis(
             id="H1",
-            name="REQUIREMENT_COMMUNICATION_OR_ACKNOWLEDGEMENT_GAP",
-            statement=f"Requirements or revisions affecting {subject} were not effectively communicated to or acknowledged by responsible personnel.",
+            name="REVISION_COMMUNICATION_OR_ACKNOWLEDGEMENT_GAP",
+            statement=f"The revision affecting {subject} may not have been effectively communicated to or acknowledged by the affected personnel.",
             status="POSSIBLE",
-            evidence_needed=f"{subject} distribution records, training acknowledgement logs, change control file",
-            confirms_if=f"Acknowledgement records confirm personnel were not trained on or notified of the requirement",
-            refutes_if=f"Signed acknowledgement confirms personnel completed notification/training prior to execution",
-            discrimination_evidence="Distinguishes communication/training delivery breakdown from intentional noncompliance",
+            evidence_needed=f"{subject} revision distribution records, change notification records, acknowledgement records",
+            confirms_if="No distribution, notification, or acknowledgement record exists confirming personnel received the revision",
+            refutes_if="Distribution, notification, or acknowledgement records confirm personnel received and acknowledged the revision",
+            discrimination_evidence="Distinguishes a communication/acknowledgement delivery gap from other causes of the deviation",
             relevance_rank="HIGH",
         )
-        h2 = CandidateHypothesis(
-            id="H2",
-            name="PROCEDURAL_CLARITY_OR_GUIDANCE_WEAKNESS",
-            statement=f"The written instructions or operational controls for {subject} lacked clear guidance on required execution steps.",
-            status="POSSIBLE",
-            evidence_needed=f"Current approved procedure for {subject}, operator feedback logs",
-            confirms_if="Procedure wording is ambiguous or omits required execution triggers",
-            refutes_if="Procedure provides unambiguous, step-by-step execution instructions",
-            discrimination_evidence="Distinguishes procedural ambiguity from communication delivery failure",
-            relevance_rank="HIGH",
-        )
-        hypotheses.extend([h1, h2])
+        hypotheses.append(h1)
 
         questions.append(InvestigationQuestion(
-            question=f"Do training and acknowledgment records show that responsible personnel received the applicable requirements for {subject} prior to execution?",
-            purpose="Determine whether communication or training delivery contributed to the knowledge gap",
-            evidence=f"{subject} training records, change notification logs, distribution matrix",
+            question=f"Do revision distribution, notification, or acknowledgement records show whether the affected personnel received and acknowledged the revision affecting {subject}?",
+            purpose="Determine whether the revision was effectively communicated to and acknowledged by affected personnel",
+            evidence=f"{subject} revision distribution records, change notification records, acknowledgement records",
             hypothesis_tested="H1",
             confirms_if=h1.confirms_if,
             refutes_if=h1.refutes_if,
         ))
-        evidence_items.extend([f"{subject} training acknowledgement log", f"{subject} approved procedure copy"])
+        evidence_items.extend([f"{subject} revision distribution records", f"{subject} acknowledgement records"])
 
-    # 3. Non-performance Branch
+    # 3. Non-performance Branch: fires on any REPORTED "X was missed/not
+    # performed" claim. CRITICAL DISTINCTION: a bare report that something
+    # was missed (even with specific temporal/contextual framing, e.g.
+    # "during the morning shift") contains NO causal content -- it restates
+    # the deviation, it does not explain it. Generating ANY hypothesis from
+    # a bare restatement just substitutes a differently-worded invented
+    # mechanism (a generic "execution/task-control factor" bucket) for a
+    # more specific one (e.g. "shift plan"); both are unlicensed. Only a
+    # genuine reported causal clause ("...because they had not received
+    # retraining") licenses building a hypothesis -- from THAT reported
+    # reason specifically, not from a generic category.
     elif mechanism.polarity == "non_performance":
-        h1 = CandidateHypothesis(
-            id="H1",
-            name="TASK_ASSIGNMENT_OR_HANDOVER_OMISSION",
-            statement=f"Responsibility for executing {subject} was not effectively scheduled or transferred across operational shifts.",
-            status="POSSIBLE",
-            evidence_needed=f"{subject} shift handover logs, duty rosters, task assignment records",
-            confirms_if="Duty roster or handover log shows no personnel assigned to the activity",
-            refutes_if="Duty roster confirms designated personnel signed for task execution",
-            discrimination_evidence="Distinguishes task assignment breakdown from procedural clarity weakness",
-            relevance_rank="HIGH",
-        )
-        h2 = CandidateHypothesis(
-            id="H2",
-            name="WORKFLOW_REMINDER_OR_VERIFICATION_CONTROL_GAP",
-            statement=f"The operational workflow for {subject} lacked an effective reminder or supervisory verification control.",
-            status="POSSIBLE",
-            evidence_needed=f"{subject} operating procedure, notification setup, execution log",
-            confirms_if="Procedure contains no scheduled trigger or supervisory verification step",
-            refutes_if="Procedure specifies clear scheduled controls with supervisory sign-off",
-            discrimination_evidence="Distinguishes control design gap from personnel handover failure",
-            relevance_rank="HIGH",
-        )
-        hypotheses.extend([h1, h2])
+        from app.agent.causal_guard import reported_claims_contain_causal_explanation
+        if reported_claims_contain_causal_explanation(reported_claims):
+            # A genuine reported reason exists -- reflect it directly
+            # (hedged) rather than inventing a separate generic bucket.
+            nonperf_topic = topic_word(subject)
+            h1 = CandidateHypothesis(
+                id="H1",
+                name="REPORTED_CAUSE_REQUIRES_VERIFICATION",
+                statement=f"{mechanism.statement.rstrip('.')}, which may have contributed to the missed {subject} activity, but this has not been independently verified.",
+                status="POSSIBLE",
+                evidence_needed=f"Objective records capable of confirming or refuting the reported reason for {subject}",
+                confirms_if="Objective records are consistent with the reported reason and no contradicting evidence exists",
+                refutes_if="Objective records contradict the reported reason",
+                discrimination_evidence="Distinguishes whether the specific reported reason is independently supported by objective evidence",
+                relevance_rank="HIGH",
+            )
+            hypotheses.append(h1)
 
-        questions.append(InvestigationQuestion(
-            question=f"Did shift handover and task assignment logs assign responsibility for {subject} during the affected period?",
-            purpose="Distinguish task assignment/handover breakdown from workflow reminder control weakness",
-            evidence=f"{subject} shift handover log, duty roster, operating procedure",
-            hypothesis_tested="H1",
-            confirms_if=h1.confirms_if,
-            refutes_if=h1.refutes_if,
-        ))
-        evidence_items.extend([f"{subject} duty roster", "shift handover log", "standard operating procedure"])
+            questions.append(InvestigationQuestion(
+                question=f"Do objective records confirm or contradict the reported reason for the missed {subject} activity?",
+                purpose="Independently verify the specific reason reported for the deviation",
+                evidence=f"Applicable {nonperf_topic} procedure and objective records relevant to the reported reason",
+                hypothesis_tested="H1",
+                confirms_if=h1.confirms_if,
+                refutes_if=h1.refutes_if,
+            ))
+            evidence_items.append(f"Objective records relevant to the reported reason for {subject}")
+        else:
+            # No causal content in the reported claim -- correctly zero
+            # hypotheses. Still contribute neutral, non-presupposing
+            # investigation areas/evidence so the plan isn't empty; these
+            # areas are investigation candidates, not asserted mechanisms.
+            plan_areas = [
+                f"Applicable requirement and responsibility controls for {subject}",
+                f"Task assignment/scheduling controls for {subject}",
+                f"Completion and secondary-record verification for {subject}",
+            ]
+            questions.append(InvestigationQuestion(
+                question=f"What requirement and responsibility applied to {subject} during the affected period?",
+                purpose="Establish the applicable requirement and responsibility/assignment/scheduling controls before any specific mechanism can be investigated",
+                evidence=f"Applicable procedure, responsibility matrix, duty/shift assignment records for {subject}",
+                hypothesis_tested=None,
+            ))
+            # Two independent causal branches (unrecorded performance vs. a
+            # separate execution-affecting event) never share one question --
+            # each is its own discriminating test with its own evidence.
+            questions.append(InvestigationQuestion(
+                question=f"Is there objective evidence that {subject} was performed but not recorded?",
+                purpose="Distinguishes non-performance from an unrecorded performance",
+                evidence=f"Secondary records, electronic/instrument audit trail, supervisory verification for {subject}",
+                hypothesis_tested=None,
+            ))
+            questions.append(InvestigationQuestion(
+                question=f"Is there a documented event that could have affected completion of {subject} during the affected period?",
+                purpose="Identifies whether a contemporaneous event could explain the missed activity",
+                evidence=f"Deviation, incident, equipment alarm, maintenance, or staffing records for {subject}, where applicable",
+                hypothesis_tested=None,
+            ))
+            evidence_items.extend([
+                f"Applicable procedure and responsibility matrix for {subject}",
+                f"Secondary/independent verification records for {subject}",
+                f"Deviation/incident/contemporaneous records for {subject}",
+            ])
 
     # 4. Non-recording Branch
     elif mechanism.polarity == "non_recording":
@@ -493,9 +491,18 @@ def build_conditional_capa_actions(
             ))
             actions.append(ConditionalCapaAction(
                 if_cause_confirmed=condition,
+                # Deliberately a distinct CONTROL/PROCESS fix, not a
+                # restatement of the immediate correction above (Section 5:
+                # immediate correction and systemic CAPA must never be
+                # mixed into one recommendation, but they must also not be
+                # the same recommendation worded twice) -- the immediate
+                # action fixes THIS case; this fixes the process gap that
+                # let it go undetected, where required by the applicable
+                # procedure.
                 recommended_action=(
-                    f"Ensure required {topic} is completed and verified before personnel are authorized "
-                    f"to proceed with {tail}."
+                    f"Where required by the applicable procedure, implement or strengthen a "
+                    f"{topic}-completion verification step ahead of {tail} so future gaps are caught "
+                    f"before personnel proceed, rather than discovered afterward."
                 ),
                 action_type="SYSTEMIC_ACTION",
                 verification_method=f"{topic_cap} completion is documented and verified before authorization.",
@@ -549,11 +556,26 @@ def build_conditional_capa_actions(
             verification = "TO_BE_DEFINED — revised effectiveness criterion to be defined given the prior verification did not hold."
             evidence_needed = "Previous corrective action effectiveness review and current recurrence evidence"
         else:
-            action = (
-                f"Address the condition identified in {h.id} "
-                f"({h.name.replace('_', ' ').lower()}) with a targeted corrective action once confirmed."
-            )
-            verification = f"Re-verification confirms the condition described in {h.id} no longer recurs."
+            # No fixed name pattern matched -- this is the common case for
+            # an LLM-authored hypothesis, whose `name` is free-form rather
+            # than this module's deterministic naming convention. Derive the
+            # action from the hypothesis's OWN statement/refutes_if content
+            # instead of a generic "address the condition in H2" template,
+            # which names nothing about what would actually be done.
+            statement_clause = (h.statement or "").strip().rstrip(".")
+            if statement_clause and not statement_clause.split()[0].isupper():
+                statement_clause = statement_clause[0].lower() + statement_clause[1:]
+            if statement_clause:
+                action = f"Implement corrective and preventive controls addressing the confirmed cause: {statement_clause}."
+            else:
+                action = f"Address the condition identified in {h.id} with a targeted corrective action once confirmed."
+            refutes_clause = (h.refutes_if or "").strip().rstrip(".")
+            if refutes_clause and not refutes_clause.split()[0].isupper():
+                refutes_clause = refutes_clause[0].lower() + refutes_clause[1:]
+            if refutes_clause:
+                verification = f"Verification confirms {refutes_clause}."
+            else:
+                verification = f"Re-verification confirms the condition described in {h.id} no longer recurs."
             evidence_needed = h.evidence_needed
         is_recurrence_action = name.startswith("PREVIOUS_CAPA_") or "_PREVIOUS_CAPA_" in name
         actions.append(ConditionalCapaAction(

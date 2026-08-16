@@ -23,7 +23,7 @@ def build_deterministic_five_why(
     """
     from app.agent.causal_guard import extract_immediate_mechanism, repeats_previous_why_answer
     from app.agent.claim_extractor import detect_evidence_conflicts, extract_claims
-    from app.services.semantic_subject import resolve_deviation, topic_word
+    from app.services.semantic_subject import extract_temporal_clause, format_deviation_why_question, resolve_deviation, topic_word
 
     steps: list[FiveWhyStep] = []
 
@@ -141,12 +141,21 @@ def build_deterministic_five_why(
 
     # 2. Single Reported Mechanism (e.g. Case 1, Case 2, Case 3)
     if mechanism.status == "REPORTED" and mechanism.statement:
+        # WHY#1 must be a grammatical question built from subject/condition
+        # (never the raw dash-joined "subject — condition" deviation string
+        # interpolated into "Why did X occur?"), and its answer should be
+        # the finding's own VERIFIED sentence when one exists -- not that
+        # same dash-joined fragment repeated back as prose.
+        why1_question = format_deviation_why_question(
+            resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+        )
+        why1_answer = fact_claims[0] if fact_claims else deviation_desc
         steps.append(FiveWhyStep(
-            question=f"Why did {deviation_desc} occur?",
-            answer=deviation_desc,
+            question=why1_question,
+            answer=why1_answer,
             status="VERIFIED" if fact_claims else "REPORTED",
         ))
-        if not repeats_previous_why_answer(deviation_desc, mechanism.statement):
+        if not repeats_previous_why_answer(why1_answer, mechanism.statement):
             steps.append(FiveWhyStep(
                 question=f"What immediate mechanism explains the nonconformity in {noun_sub}?",
                 answer=mechanism.statement,
@@ -154,13 +163,13 @@ def build_deterministic_five_why(
             ))
         steps.append(FiveWhyStep(
             question=f"Why did this breakdown occur in the process for {noun_sub}?",
-            answer="Objective verification required to confirm underlying cause — root cause not established from initial evidence.",
+            answer="NOT ESTABLISHED FROM AVAILABLE EVIDENCE — objective verification required to confirm underlying cause.",
             status="UNKNOWN",
         ))
         return FiveWhyAnalysis(
             steps=steps,
             is_complete=False,
-            status_note="CHAIN STOPPED AT EVIDENCE BOUNDARY — Mechanism is reported; objective root cause requires investigation.",
+            status_note="DEGRADED MODE — CHAIN STOPPED AT EVIDENCE BOUNDARY — Mechanism is reported; objective root cause requires investigation.",
         )
 
     # 3. Verified Mechanism
@@ -172,29 +181,25 @@ def build_deterministic_five_why(
         ))
         steps.append(FiveWhyStep(
             question=f"Why did this breakdown occur in the process for {noun_sub}?",
-            answer="Objective verification required to confirm underlying root cause.",
+            answer="NOT ESTABLISHED FROM AVAILABLE EVIDENCE — objective verification required to confirm underlying root cause.",
             status="UNKNOWN",
         ))
         return FiveWhyAnalysis(
             steps=steps,
             is_complete=False,
-            status_note="CHAIN STOPPED AT EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
+            status_note="DEGRADED MODE — CHAIN STOPPED AT EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
         )
 
     # 4. General fallback when no mechanism is present
     steps.append(FiveWhyStep(
-        question=f"Why was {noun_sub} nonconforming or unverified?",
-        answer=deviation_desc,
+        question=format_deviation_why_question(
+            resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+        ),
+        answer=fact_claims[0] if fact_claims else deviation_desc,
         status="REPORTED" if not fact_claims else "VERIFIED",
     ))
-    steps.append(FiveWhyStep(
-        question=f"Why did this nonconforming condition in {noun_sub} occur?",
-        answer="Root cause not established from initial evidence — auditor investigation required.",
-        status="UNKNOWN",
-    ))
-
     return FiveWhyAnalysis(
         steps=steps,
         is_complete=False,
-        status_note="CHAIN STOPPED AT EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
+        status_note="DEGRADED MODE — CHAIN STOPPED AT EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
     )

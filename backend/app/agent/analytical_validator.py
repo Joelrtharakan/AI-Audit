@@ -51,12 +51,24 @@ def select_leading_hypothesis(candidate_hypotheses: list) -> str | None:
     - No SUPPORTED hypothesis and all POSSIBLE ones share the same
       relevance_rank -> use structural scoring to break ties. If scoring
       still can't differentiate (scores within 0.1), return None.
+    - No SUPPORTED hypothesis and only ONE non-refuted hypothesis exists ->
+      None. "Leading" means materially stronger than the alternatives; a
+      lone unresolved/possible hypothesis has no alternatives to be
+      stronger than -- it survived filtering (or was the only one
+      generated), not evidence competition. Calling it "leading" merely
+      because nothing else remains manufactures a false sense of causal
+      progress out of a single untested guess.
     """
     if not candidate_hypotheses:
         return None
 
     supported = [h for h in candidate_hypotheses if h.status == "SUPPORTED"]
-    pool = supported if supported else [h for h in candidate_hypotheses if h.status != "REFUTED"]
+    if supported:
+        pool = supported
+    else:
+        pool = [h for h in candidate_hypotheses if h.status != "REFUTED"]
+        if len(pool) <= 1:
+            return None
     if not pool:
         return None
 
@@ -469,6 +481,47 @@ def deduplicate_investigation_questions(questions: list) -> list:
     return kept
 
 
+def deduplicate_capa_actions(actions: list) -> list:
+    """Drops near-duplicate CAPA actions WITHIN the same hypothesis
+    condition (Section 24: semantic, not exact-string, deduplication).
+
+    Scoped to `if_cause_confirmed` groups deliberately -- an
+    IMMEDIATE_CORRECTION and a SYSTEMIC_ACTION for the SAME hypothesis are
+    legitimately meant to be two different kinds of recommendation (fix
+    this case vs. fix the control that let it happen), so only actions
+    that turn out to be near-restatements of each other (same words, same
+    intent) despite that distinction are merged -- never actions for
+    different hypotheses, which may coincidentally share vocabulary
+    without being the same action. Keeps the LONGER (more complete)
+    `recommended_action` text of any merged pair, per Section 10.
+    """
+    if not actions:
+        return actions
+    kept: list = []
+    # Parallel list: (condition, words, index_into_kept) for each kept action.
+    kept_meta: list[tuple[str, frozenset, int]] = []
+    for a in actions:
+        condition = getattr(a, "if_cause_confirmed", None) or ""
+        text = getattr(a, "recommended_action", None) or ""
+        words = frozenset(significant_words(text))
+        merged = False
+        for seen_condition, seen_words, kept_idx in kept_meta:
+            if seen_condition != condition or not words or not seen_words:
+                continue
+            overlap = len(words & seen_words) / max(len(words | seen_words), 1)
+            if overlap >= 0.55:
+                existing_text = getattr(kept[kept_idx], "recommended_action", None) or ""
+                if len(text) > len(existing_text):
+                    kept[kept_idx] = a
+                merged = True
+                break
+        if merged:
+            continue
+        kept_meta.append((condition, words, len(kept)))
+        kept.append(a)
+    return kept
+
+
 def validate_investigation_question(question: str | None) -> bool:
     """Deterministic structural quality gate for a generated investigation
     question (Phase 4/11 of the RCA quality pass). True if the question is
@@ -608,12 +661,31 @@ def repair_five_why_with_mechanism(five_why_steps: list, mechanism: MechanismInf
     status -- not a fabricated explanation. Returns a NEW list of FiveWhyStep
     objects; caller is responsible for updating the FiveWhyAnalysis."""
     from app.models.agent import FiveWhyStep
+    from app.services.semantic_subject import declarative_to_why_question, format_deviation_why_question
 
     if not mechanism or not mechanism.statement:
         return five_why_steps
 
+    # `observed_deviation` is usually the canonical "<subject> — <condition>"
+    # form (understanding_node's dash-joined field) -- naive interpolation
+    # of that into "Why did <X> occur?" produces ungrammatical output like
+    # "Why did daily equipment inspection checklist — not completed occur?"
+    # since the condition IS the predicate, not something that "occurs" on
+    # top of a dash-joined label. Split it and build a proper "Why was/were
+    # <subject> <condition>?" question instead; fall back to the
+    # declarative-clause formatter for a plain full-sentence deviation
+    # string (no dash), and to a generic phrasing only when nothing at all
+    # is available.
+    if observed_deviation and " — " in observed_deviation:
+        subj, _, cond = observed_deviation.partition(" — ")
+        question_text = format_deviation_why_question(subj, cond)
+    elif observed_deviation:
+        question_text = declarative_to_why_question(observed_deviation)
+    else:
+        question_text = "Why did the observed condition occur?"
+
     mechanism_step = FiveWhyStep(
-        question=f"Why did {observed_deviation or 'the observed condition'} occur?",
+        question=question_text,
         answer=mechanism.statement,
         status="REPORTED" if mechanism.status == "REPORTED" else "VERIFIED",
     )

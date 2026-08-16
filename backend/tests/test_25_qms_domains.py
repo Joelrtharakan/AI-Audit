@@ -128,9 +128,21 @@ async def test_human_error_regression_case():
     rc = res["root_cause"]
     ca = res["ca_draft"]
 
-    # 1. Verify candidate hypotheses generated dynamically from investigation questions
-    assert len(rc.candidate_hypotheses) >= 2, "Candidate hypotheses were not generated dynamically"
-    
+    # 1. The pipeline must NOT fabricate candidate hypotheses by keyword-
+    # matching investigation QUESTION text (the inverted question->hypothesis
+    # pipeline this test originally asserted was itself the defect: an
+    # investigation area/question is licensed to exist without a matching
+    # hypothesis when no evidence establishes one — Section 4/9/23 of the
+    # causal-proposition architecture). The pre-existing investigation
+    # questions/areas must survive untouched since nothing here disqualifies
+    # them from being valid investigation targets.
+    assert rc.candidate_hypotheses == [], "Hypotheses must not be invented from investigation-question keywords"
+    # Investigation content is still present -- either the original questions
+    # or a deterministic, non-presupposing backfill plan since no hypothesis
+    # exists to attach them to -- but never fabricated hypotheses.
+    inv = res["investigation_plan"]
+    assert inv.questions
+
     # 2. Verify no ungrounded training CAPA, customer impact, or operator restriction survived
     ca_action = ca.immediate_action.lower()
     ca_prev = ca.preventive_action.lower()
@@ -277,8 +289,10 @@ async def test_generalization_regression_case_25():
     rc = res["root_cause"]
     ca = res["ca_draft"]
 
-    # 1. Verify dynamic candidate hypotheses derived from investigation questions
-    assert len(rc.candidate_hypotheses) >= 2, "Candidate hypotheses were not dynamically derived"
+    # 1. Hypotheses must not be fabricated by keyword-matching investigation
+    # QUESTION text -- an investigation area/question may legitimately exist
+    # without a corresponding hypothesis when no evidence establishes one.
+    assert rc.candidate_hypotheses == [], "Hypotheses must not be invented from investigation-question keywords"
 
     # 2. Verify generic filler text was sanitized into specific wording
     ca_action = ca.immediate_action.lower()

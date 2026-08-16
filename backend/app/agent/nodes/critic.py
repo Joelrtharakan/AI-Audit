@@ -107,7 +107,7 @@ async def critic_node(state: AgentState) -> AgentState:
     # wasted input tokens. Evidence is trimmed the same way the compact
     # synthesis-recovery path trims it (top VERIFIED/REPORTED items only) --
     # the critic needs enough to judge grounding, not the full ledger.
-    from app.agent.nodes.core_synthesis import _trim_evidence_for_recovery
+    from app.agent.nodes.core_synthesis import _assign_claim_ids, _trim_evidence_for_recovery
     reason_parts = []
     if root_cause and not root_cause.candidate_hypotheses:
         reason_parts.append("no candidate hypotheses were generated")
@@ -122,7 +122,7 @@ async def critic_node(state: AgentState) -> AgentState:
     prompt = template.format(
         finding_text=state["request"].finding_text,
         evidence_ledger_json=json.dumps(
-            [e.model_dump() for e in _trim_evidence_for_recovery(evidence_ledger)], default=str
+            _trim_evidence_for_recovery(_assign_claim_ids(evidence_ledger)), default=str
         ),
         root_cause_narrative=root_cause.narrative if root_cause else "Not established.",
         candidate_hypotheses_json=json.dumps(
