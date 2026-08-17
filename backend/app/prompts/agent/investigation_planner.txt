@@ -49,25 +49,25 @@ RULES:
 
 QUESTION QUALITY — THIS IS THE MOST IMPORTANT PART:
 A question is only useful if it is:
-  (1) SPECIFIC: Names the actual object/record/period from THIS finding — not a generic category.
-  (2) PURPOSEFUL: States which hypothesis it would confirm or refute (the "purpose" field).
-  (3) EVIDENCE-TARGETED: Names the specific document/record type that would answer it (the "evidence" field).
+  (1) SINGLE DECISION: Evaluates exactly ONE decision point. Never combine multiple independent checks (BAD: "Was X required AND did they do it?").
+  (2) SPECIFIC: Names the actual object/record/period from THIS finding — not a generic category.
+  (3) PURPOSEFUL: States which proposition / unknown it resolves (the "purpose" / "objective" field).
+  (4) EVIDENCE-TARGETED: Names the specific document/record type that would answer it (the "evidence" field).
+  (5) CONDITIONAL STRUCTURE: If a question depends on an antecedent outcome, specify "activation_condition" and "depends_on".
 
-Each question must be constructed from three components:
-  QUESTION: A specific, answerable question about an unresolved fact in this finding.
-  PURPOSE: Which hypothesis (H1, H2, ...) or unknown this question would confirm/refute.
-  EVIDENCE: The specific record/log/document type that would answer this question.
+Priority rules:
+  P1: Resolve direct evidence conflicts.
+  P2: Establish whether the alleged deviation/event actually occurred.
+  P3: Establish applicable requirement/control.
+  P4: Establish operational consequence / hypothesis discrimination.
+  P5: Identify causal mechanism (never before event/requirement is established).
+  P6: Investigate systemic/recurrence cause.
 
-BAD example: "Review relevant records." — Not a question, not specific, no stated purpose.
-BAD example: "Was the device working?" — Too vague, no stated purpose, no specific evidence named.
-GOOD example: "Did the calibration records for [instrument ID from this finding] show any
-  out-of-tolerance readings in the 30 days preceding [period from this finding]?" — PURPOSE: to
-  confirm or refute the equipment-malfunction hypothesis. EVIDENCE: Calibration log for that
-  specific instrument.
+BAD example: "Was acknowledgement mandatory and was it completed?" — Double question.
+GOOD example: "Did the applicable procedure require acknowledgement before work commenced?" — Single decision.
+Then, conditional: "Do authenticated records establish that affected personnel acknowledged the revision before activity occurred?" — Activation condition: "If acknowledgement was required".
 
 - Questions must NOT ask for facts already established in the finding text.
-- Questions must be PRIORITIZED: HIGH for questions that directly resolve the causal gap;
-  MEDIUM for secondary verification; LOW for administrative detail.
 - Do NOT ask about training, authorization, or communication unless the finding explicitly mentions them.
 
 Respond with JSON. The placeholder text <<like this>> describes what belongs in that slot —
@@ -85,9 +85,14 @@ Replace every <<...>> with real, finding-specific content, or omit the item if n
     ],
     "questions": [
       {{
-        "question": "<<a specific, answerable question about an unresolved fact in THIS finding, naming its own entities/period>>",
-        "purpose": "<<which hypothesis (H1, H2, ...) or unknown this question would confirm or refute>>",
-        "evidence": "<<the specific record/log/document type that would answer this question>>"
+        "question_id": "Q1",
+        "question": "<<a specific single-decision question about an unresolved fact in THIS finding>>",
+        "purpose": "<<which proposition or unknown this question resolves>>",
+        "evidence": "<<the specific record/log/document type that would answer this question>>",
+        "priority": "P1",
+        "activation_condition": null,
+        "depends_on": null,
+        "possible_outcomes": ["<<outcome A → next step>>", "<<outcome B → next step>>"]
       }}
     ],
     "evidence_to_collect": [

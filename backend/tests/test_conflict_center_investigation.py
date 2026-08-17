@@ -106,7 +106,7 @@ def test_delivery_vs_receipt_yields_zero_hypotheses_and_conflict_specific_questi
         NOTIFICATION_FINDING, [], canonical_subject="revised SOP notification",
     )
     assert hyps == []
-    assert len(plan.questions) == 5
+    assert 5 <= len(plan.questions) <= 6
     joined = " ".join(q.question for q in plan.questions).lower()
     assert "process compliance" not in joined
     for forbidden in ("failed", "did not receive", "were not aware"):

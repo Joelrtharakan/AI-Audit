@@ -189,63 +189,141 @@ def build_deterministic_investigation_plan(
             subject_cap = subject[0].upper() + subject[1:] if subject else "the affected communication"
             dr_questions = [
                 InvestigationQuestion(
-                    question_id="Q1_DELIVERY_COMPLETED",
+                    question_id="Q1_DELIVERY_CONFIRMED",
+                    id="Q1_DELIVERY_CONFIRMED",
                     question=(
-                        f"Do system records establish that delivery of {subject} was completed, "
-                        "including recipient identity, destination address, timestamp, and delivery status?"
+                        f"Do authenticated system records establish successful delivery of {subject} "
+                        "to each affected recipient?"
                     ),
                     purpose="Verify delivery-side completion details",
-                    evidence=f"System delivery log for {subject}, including per-recipient status",
+                    objective="Verify delivery-side completion details",
+                    evidence=f"Per-recipient delivery logs for {subject}, including recipient, destination, timestamp, and status",
+                    evidence_required=f"Per-recipient delivery logs for {subject}, including recipient, destination, timestamp, and status",
                     target_type="PROPOSITION",
                     target_proposition_id="P_DELIVERY",
+                    priority="P1",
+                    status="ACTIVE",
+                    next_question_if_true="Q2_RECEIPT_VERIFIED",
+                    next_question_if_false="Q5_FAILURE_MECHANISM",
+                    possible_outcomes=[
+                        "Authenticated logs establish successful delivery to all recipients → proceed to verify receipt/access.",
+                        "Logs show delivery failure or missing transmission records → investigate delivery failure mechanism.",
+                    ],
                 ),
                 InvestigationQuestion(
                     question_id="Q2_RECEIPT_VERIFIED",
+                    id="Q2_RECEIPT_VERIFIED",
                     question=(
-                        f"Do independent records establish whether the affected recipients actually received "
-                        f"or accessed {subject}{temporal_suffix}?"
+                        f"Do independent records establish actual receipt or access by the affected recipients{temporal_suffix}?"
                     ),
                     purpose="Establish whether delivery resulted in actual recipient receipt or access",
-                    evidence=f"Independent receipt/access confirmation for {subject} (e.g. read receipts, access logs)",
+                    objective="Establish whether delivery resulted in actual recipient receipt or access",
+                    evidence=f"Independent receipt, access, or read records for {subject}",
+                    evidence_required=f"Independent receipt, access, or read records for {subject}",
                     target_type="PROPOSITION",
                     target_proposition_id="P_RECEIPT",
+                    priority="P2",
+                    depends_on="Q1_DELIVERY_CONFIRMED",
+                    activation_condition="If delivery is confirmed",
+                    status="CONDITIONAL",
+                    next_question_if_true="Q3_ACKNOWLEDGEMENT_REQUIRED",
+                    next_question_if_false="Q5_FAILURE_MECHANISM",
+                    possible_outcomes=[
+                        "Access or read records confirm actual receipt → proceed to verify acknowledgement requirement.",
+                        "No receipt or access confirmed → investigate mechanism preventing receipt.",
+                    ],
                 ),
                 InvestigationQuestion(
-                    question_id="Q3_ACKNOWLEDGEMENT_STATUS",
-                    question=f"Was acknowledgement or confirmation mandatory before proceeding with tasks governed by {subject}, and do read, access, or acknowledgement records confirm it was completed?",
-                    purpose="Establish whether formal acknowledgement was required and completed",
-                    evidence=f"Applicable procedure and acknowledgement/confirmation records for {subject}",
+                    question_id="Q3_ACKNOWLEDGEMENT_REQUIRED",
+                    id="Q3_ACKNOWLEDGEMENT_REQUIRED",
+                    question=f"Did the applicable procedure require acknowledgement before performing work under {subject}?",
+                    purpose="Establish whether formal acknowledgement was required before work",
+                    objective="Establish whether formal acknowledgement was required before work",
+                    evidence=f"Applicable SOP/procedure and acknowledgement requirements for {subject}",
+                    evidence_required=f"Applicable SOP/procedure and acknowledgement requirements for {subject}",
                     target_type="PROPOSITION",
                     target_proposition_id="P_REQ_ACK",
+                    priority="P3",
+                    depends_on="Q2_RECEIPT_VERIFIED",
+                    activation_condition="If receipt/access is confirmed",
+                    status="CONDITIONAL",
+                    next_question_if_true="Q4_ACKNOWLEDGEMENT_COMPLETED",
+                    next_question_if_false=None,
+                    possible_outcomes=[
+                        "Procedure required prior acknowledgement → proceed to verify completed acknowledgement records.",
+                        "Acknowledgement was not mandatory before work → acknowledgement investigation not required.",
+                    ],
                 ),
                 InvestigationQuestion(
-                    question_id="Q5_ACTION_PRIOR_TO_ACK",
-                    question=(
-                        f"Were the affected recipients required or permitted to act on {subject} before "
-                        "receipt or acknowledgement was confirmed?"
-                    ),
-                    purpose="Determine whether operational activity occurred prior to confirmed receipt",
-                    evidence=f"Records of activity performed by the affected recipients relative to {subject}",
+                    question_id="Q4_ACKNOWLEDGEMENT_COMPLETED",
+                    id="Q4_ACKNOWLEDGEMENT_COMPLETED",
+                    question=f"Do authenticated records establish that affected personnel acknowledged {subject} before performing the relevant activity?",
+                    purpose="Verify timely completion of required acknowledgement",
+                    objective="Verify timely completion of required acknowledgement",
+                    evidence=f"Signed or electronic acknowledgement and activity records for {subject}",
+                    evidence_required=f"Signed or electronic acknowledgement and activity records for {subject}",
                     target_type="PROPOSITION",
-                    target_proposition_id="P_ACTION",
+                    target_proposition_id="P_ACK_EXECUTION",
+                    priority="P4",
+                    depends_on="Q3_ACKNOWLEDGEMENT_REQUIRED",
+                    activation_condition="If acknowledgement was required",
+                    status="CONDITIONAL",
+                    possible_outcomes=[
+                        "Authenticated records confirm timely acknowledgement before work.",
+                        "No acknowledgement recorded prior to activity execution.",
+                    ],
                 ),
                 InvestigationQuestion(
                     question_id="Q5_FAILURE_MECHANISM",
+                    id="Q5_FAILURE_MECHANISM",
                     question=(
-                        "If non-delivery or non-receipt occurred, do channel error logs or recipient account records "
-                        f"establish the specific technical or administrative mechanism{temporal_suffix}?"
+                        "What objective evidence establishes the mechanism that prevented or interrupted delivery or receipt"
+                        f"{temporal_suffix}?"
                     ),
                     purpose="Identify an established mechanism if receipt did not occur",
-                    evidence="Channel error logs, transmission diagnostics, and recipient account configuration",
+                    objective="Identify an established mechanism if receipt did not occur",
+                    evidence="Channel diagnostics, recipient account configuration, transmission errors, and related technical records",
+                    evidence_required="Channel diagnostics, recipient account configuration, transmission errors, and related technical records",
                     target_type="PROPOSITION",
                     target_proposition_id="P_MECHANISM",
+                    priority="P5",
+                    depends_on="Q2_RECEIPT_VERIFIED",
+                    activation_condition="If non-receipt is confirmed",
+                    status="CONDITIONAL",
+                    possible_outcomes=[
+                        "Diagnostic logs establish technical transmission or filtering failure.",
+                        "Account configuration or server logs explain non-receipt.",
+                    ],
+                ),
+                InvestigationQuestion(
+                    question_id="Q6_ACTION_PRIOR_TO_CONFIRMATION",
+                    id="Q6_ACTION_PRIOR_TO_CONFIRMATION",
+                    question=(
+                        f"Did affected personnel perform work governed by {subject} before receipt or "
+                        "acknowledgement was confirmed?"
+                    ),
+                    purpose="Determine whether operational activity occurred prior to confirmed receipt",
+                    objective="Determine whether operational activity occurred prior to confirmed receipt",
+                    evidence=f"Operational activity records, batch records, or system execution logs relative to {subject}",
+                    evidence_required=f"Operational activity records, batch records, or system execution logs relative to {subject}",
+                    target_type="PROPOSITION",
+                    target_proposition_id="P_ACTION",
+                    priority="P4",
+                    depends_on="Q2_RECEIPT_VERIFIED",
+                    activation_condition="If operational activity could have occurred before confirmation",
+                    status="CONDITIONAL",
+                    possible_outcomes=[
+                        "Activity performed prior to confirmed receipt/acknowledgement → assess scope and compliance impact.",
+                        "No operational activity occurred prior to confirmation.",
+                    ],
                 ),
             ]
             dr_evidence = [
-                f"System delivery log for {subject}",
-                f"Independent receipt/access confirmation for {subject}",
-                f"Acknowledgement/confirmation records for {subject}",
-                "Channel error logs and transmission diagnostics",
+                f"Per-recipient delivery logs for {subject}",
+                f"Independent receipt, access, or read records for {subject}",
+                f"Applicable SOP/procedure and acknowledgement requirements for {subject}",
+                f"Relevant operator activity records relative to {subject}",
+                "Transmission diagnostics, account configuration, and error logs",
             ]
             dr_areas = [
                 f"{subject_cap} delivery, receipt and acknowledgement control",
@@ -365,31 +443,41 @@ def build_deterministic_investigation_plan(
         # evidence-availability question above leaves the record
         # genuinely unresolved.
         questions.append(InvestigationQuestion(
+            question_id="Q_RECORD_CONTROL_REQUIREMENT",
+            id="Q_RECORD_CONTROL_REQUIREMENT",
             question=(
-                f"Do the applicable record-control requirements establish whether a {topic} record should "
-                f"have been created and retained for {tail}, and does the record-control audit trail show "
-                "whether that requirement was met?"
+                f"Does the record-control audit trail establish whether the {topic} record for {tail} "
+                "was created and retained in accordance with applicable requirements?"
             ),
             purpose="Determine whether the record-control process (creation/retention) itself has a control weakness",
+            objective="Determine whether the record-control process (creation/retention) itself has a control weakness",
             evidence=f"{topic_cap} record-control procedure, retention requirements, and record audit trail",
+            evidence_required=f"{topic_cap} record-control procedure, retention requirements, and record audit trail",
+            target_type="PROPOSITION",
+            target_proposition_id="P_RECORD_CONTROL",
+            priority="P3",
             possible_outcomes=[
-                "Audit trail shows the record was never created or retained as required → record-control "
-                "weakness supported.",
+                "Audit trail shows the record was never created or retained as required → record-control weakness supported.",
                 "Audit trail confirms proper creation and retention → record-control weakness refuted.",
             ],
         ))
         questions.append(InvestigationQuestion(
+            question_id="Q_VERIFICATION_AUTHORIZATION",
+            id="Q_VERIFICATION_AUTHORIZATION",
             question=(
-                f"Was {topic} completion required to be verified or authorized{temporal_suffix}, and does "
-                "the applicable record show whether that verification step was executed?"
+                f"Do verification records establish whether {topic} completion was authorized or verified "
+                f"before {actor_phrase} performed the relevant activity{temporal_suffix}?"
             ),
             purpose="Determine whether a completion-verification/authorization control failed to catch the gap",
+            objective="Determine whether a completion-verification/authorization control failed to catch the gap",
             evidence=f"{topic_cap} authorization requirements and verification/sign-off records",
+            evidence_required=f"{topic_cap} authorization requirements and verification/sign-off records",
+            target_type="PROPOSITION",
+            target_proposition_id="P_VERIFICATION",
+            priority="P3",
             possible_outcomes=[
-                "Verification/authorization step was required but not executed → verification-control "
-                "weakness supported.",
-                "Verification/authorization step was executed and documented → verification-control "
-                "weakness refuted.",
+                "Verification/authorization step was required but not executed → verification-control weakness supported.",
+                "Verification/authorization step was executed and documented → verification-control weakness refuted.",
             ],
         ))
         evidence_items.extend([
@@ -431,32 +519,41 @@ def build_deterministic_investigation_plan(
         hypotheses.append(h1)
 
         questions.append(InvestigationQuestion(
+            question_id="Q_REVISION_COMMUNICATION",
+            id="Q_REVISION_COMMUNICATION",
             question=f"Do revision distribution, notification, or acknowledgement records show whether the affected personnel received and acknowledged the revision affecting {subject}?",
             purpose="Determine whether the revision was effectively communicated to and acknowledged by affected personnel",
+            objective="Determine whether the revision was effectively communicated to and acknowledged by affected personnel",
             evidence=f"{subject} revision distribution records, change notification records, acknowledgement records",
+            evidence_required=f"{subject} revision distribution records, change notification records, acknowledgement records",
             hypothesis_tested="H1",
+            target_type="HYPOTHESIS",
+            target_proposition_id="P_H1",
+            priority="P4",
             confirms_if=h1.confirms_if,
             refutes_if=h1.refutes_if,
         ))
-        # NEUTRAL questions deliberately NOT bound to H1 (no
-        # hypothesis_tested): H1 itself is a hedged, evidence-thin
-        # candidate that the causal-proposition eligibility layer
-        # downstream may correctly demote when no claim directly supports
-        # it (Section 3/9 of the final hardening pass) -- if that happens,
-        # the hypothesis-ID-consistency firewall strips any question bound
-        # to the now-missing H1, which previously left ZERO investigation
-        # questions even though real uncertainty remains (Property 6: zero
-        # hypotheses must not mean zero investigation). These survive that
-        # demotion because they were never hypothesis-bound to begin with.
         questions.append(InvestigationQuestion(
+            question_id="Q_COMMUNICATION_METHOD",
+            id="Q_COMMUNICATION_METHOD",
             question=f"What records establish how the revision affecting {subject} was communicated to affected personnel?",
             purpose="Establish what communication, if any, is documented, without presupposing it failed",
+            objective="Establish what communication, if any, is documented, without presupposing it failed",
             evidence=f"{subject} revision distribution and communication records",
+            evidence_required=f"{subject} revision distribution and communication records",
+            target_proposition_id="P_COMM",
+            priority="P2",
         ))
         questions.append(InvestigationQuestion(
-            question=f"Was acknowledgement of the revision affecting {subject} required, and if so, what record establishes whether it occurred?",
+            question_id="Q_ACKNOWLEDGEMENT_REQUIREMENT",
+            id="Q_ACKNOWLEDGEMENT_REQUIREMENT",
+            question=f"Did the applicable procedure require acknowledgement of the revision affecting {subject} before work commenced?",
             purpose="Establish whether an acknowledgement requirement existed and was documented",
+            objective="Establish whether an acknowledgement requirement existed and was documented",
             evidence=f"{subject} acknowledgement requirement and records",
+            evidence_required=f"{subject} acknowledgement requirement and records",
+            target_proposition_id="P_REQ_ACK",
+            priority="P3",
         ))
         evidence_items.extend([f"{subject} revision distribution records", f"{subject} acknowledgement records"])
 
@@ -648,60 +745,120 @@ def build_deterministic_investigation_plan(
             ]
             questions.extend([
                 InvestigationQuestion(
+                    question_id="Q_OPERATING_SPECIFICATION",
+                    id="Q_OPERATING_SPECIFICATION",
                     question=f"What approved validation or qualification record defines the permitted operating range for {subject}?",
                     purpose="Establish the approved specification and validated range requirements before assessing operation",
+                    objective="Establish the approved specification and validated range requirements before assessing operation",
                     evidence=f"Approved validation protocol/report and qualification records for {subject}",
+                    evidence_required=f"Approved validation protocol/report and qualification records for {subject}",
+                    priority="P3",
+                    target_proposition_id="P_SPEC",
                 ),
                 InvestigationQuestion(
+                    question_id="Q_OPERATING_RECORDS",
+                    id="Q_OPERATING_RECORDS",
                     question=f"What objective operating records establish the actual operating condition of {subject} during the affected period?",
                     purpose="Establish the objective operating parameter records, not merely what the finding text states",
+                    objective="Establish the objective operating parameter records, not merely what the finding text states",
                     evidence=f"Equipment operating logs, SCADA/historian records, and batch execution records for {subject}",
+                    evidence_required=f"Equipment operating logs, SCADA/historian records, and batch execution records for {subject}",
+                    priority="P2",
+                    target_proposition_id="P_ACTUAL_OPERATING_RECORDS",
                 ),
                 InvestigationQuestion(
+                    question_id="Q_APPROVED_EXCEPTION",
+                    id="Q_APPROVED_EXCEPTION",
                     question=f"Was any approved exception, deviation, extension, or authorization applicable to operation of {subject} outside the validated range?",
                     purpose="Determine whether an authorized departure from standard operating limits existed",
+                    objective="Determine whether an authorized departure from standard operating limits existed",
                     evidence=f"Approved deviation, waiver, or planned exception records for {subject}",
+                    evidence_required=f"Approved deviation, waiver, or planned exception records for {subject}",
+                    priority="P3",
+                    target_proposition_id="P_EXCEPTION",
                 ),
                 InvestigationQuestion(
-                    question=f"What control was required to prevent or detect operation of {subject} outside the validated range, and what records show that control operated?",
+                    question_id="Q_CONTROL_INTERLOCK_FUNCTION",
+                    id="Q_CONTROL_INTERLOCK_FUNCTION",
+                    question=f"Do control system audit trails establish whether the required interlock or alarm for {subject} operated as intended?",
                     purpose="Identify the active operational interlock, alarm, or procedural control point",
+                    objective="Identify the active operational interlock, alarm, or procedural control point",
                     evidence=f"Control system logs, interlock verification records, and alarm audit trails for {subject}",
+                    evidence_required=f"Control system logs, interlock verification records, and alarm audit trails for {subject}",
+                    priority="P3",
+                    target_proposition_id="P_CONTROL",
                 ),
                 InvestigationQuestion(
+                    question_id="Q_OPERATIONAL_MECHANISM",
+                    id="Q_OPERATIONAL_MECHANISM",
                     question=f"What objective evidence establishes the mechanism that allowed {subject} to be operated outside the validated range?",
                     purpose="Identify the specific operational or mechanical mechanism if operation outside limits occurred",
+                    objective="Identify the specific operational or mechanical mechanism if operation outside limits occurred",
                     evidence=f"Parameter trends, operator run logs, and control failure records for {subject}",
+                    evidence_required=f"Parameter trends, operator run logs, and control failure records for {subject}",
+                    priority="P5",
+                    target_proposition_id="P_MECHANISM",
+                    depends_on="Q_OPERATING_RECORDS",
+                    activation_condition="If operation outside validated range is confirmed",
+                    status="CONDITIONAL",
                 ),
             ])
         else:
             questions.extend([
                 InvestigationQuestion(
-                    question=f"What procedure or requirement governs {subject}, and what does it require in the "
-                    "circumstances described in this finding?",
+                    question_id="Q_GOVERNING_REQUIREMENT",
+                    id="Q_GOVERNING_REQUIREMENT",
+                    question=f"What approved procedure or requirement governs {subject} during the relevant period?",
                     purpose="Establish the applicable requirement before evaluating whether it was met",
+                    objective="Establish the applicable requirement before evaluating whether it was met",
                     evidence=f"Applicable procedure/requirement governing {subject}",
+                    evidence_required=f"Applicable procedure/requirement governing {subject}",
+                    priority="P3",
+                    target_proposition_id="P_GOV",
                 ),
                 InvestigationQuestion(
+                    question_id="Q_STATUS_HISTORY",
+                    id="Q_STATUS_HISTORY",
                     question=f"What records establish the actual status of {subject_bare} at the time relevant to this finding?",
                     purpose="Establish the objective status/history, not merely what the finding itself states",
+                    objective="Establish the objective status/history, not merely what the finding itself states",
                     evidence=f"Status/history records for {subject}",
+                    evidence_required=f"Status/history records for {subject}",
+                    priority="P2",
+                    target_proposition_id="P_STATUS",
                 ),
                 InvestigationQuestion(
-                    question=f"Did any approved exception, extension, waiver, or deviation apply to {subject} "
-                    "during the relevant period?",
+                    question_id="Q_AUTHORIZED_EXCEPTION",
+                    id="Q_AUTHORIZED_EXCEPTION",
+                    question=f"Did any approved exception, extension, waiver, or deviation apply to {subject} during the relevant period?",
                     purpose="Determine whether an authorized departure from the normal requirement existed",
+                    objective="Determine whether an authorized departure from the normal requirement existed",
                     evidence=f"Exception/waiver/deviation records for {subject}",
+                    evidence_required=f"Exception/waiver/deviation records for {subject}",
+                    priority="P3",
+                    target_proposition_id="P_EXCEPTION",
                 ),
                 InvestigationQuestion(
+                    question_id="Q_PROCESS_RESPONSIBILITY",
+                    id="Q_PROCESS_RESPONSIBILITY",
                     question=f"What process or role was responsible for monitoring and controlling {subject}?",
                     purpose="Identify the control point relevant to further investigation, without presupposing it failed",
+                    objective="Identify the control point relevant to further investigation, without presupposing it failed",
                     evidence=f"Process ownership and responsibility records for {subject}",
+                    evidence_required=f"Process ownership and responsibility records for {subject}",
+                    priority="P3",
+                    target_proposition_id="P_RESPONSIBILITY",
                 ),
                 InvestigationQuestion(
-                    question=f"What downstream activities, decisions, or outputs depended on {subject}, and would "
-                    "require assessment if the condition described in this finding is confirmed?",
+                    question_id="Q_DOWNSTREAM_DEPENDENCIES",
+                    id="Q_DOWNSTREAM_DEPENDENCIES",
+                    question=f"What downstream activities, decisions, or outputs depended on {subject} during the relevant period?",
                     purpose="Scope potential downstream impact for assessment, without asserting impact occurred",
+                    objective="Scope potential downstream impact for assessment, without asserting impact occurred",
                     evidence=f"Records of activities/decisions dependent on {subject}",
+                    evidence_required=f"Records of activities/decisions dependent on {subject}",
+                    priority="P4",
+                    target_proposition_id="P_SCOPE",
                 ),
             ])
         evidence_items.extend([
@@ -916,11 +1073,13 @@ def build_recurrence_investigation_questions(
         InvestigationQuestion(
             id="Q_REC_2",
             target_proposition_id="P_REC_2",
-            question=f"Did the previous {topic} CAPA require an effectiveness review, and what effectiveness criterion was defined?",
+            question=f"Did the previous {topic} CAPA require a formal effectiveness review with defined success criteria?",
             purpose="Establish whether effectiveness verification was mandatory and what specific success criterion governed it",
+            objective="Establish whether effectiveness verification was mandatory and what specific success criterion governed it",
             resolves="Effectiveness verification requirement and criterion",
             evidence=f"Previous {topic} CAPA plan, procedure requirements, and approved effectiveness criteria",
             evidence_required=f"Previous {topic} CAPA plan and approved effectiveness criteria",
+            priority="P3",
             decision_rule="If effectiveness review was not required → do not evaluate effectiveness failure; if required → proceed to verification records.",
             possible_outcomes=[
                 "Effectiveness criterion defined → evaluate verification records against criterion.",

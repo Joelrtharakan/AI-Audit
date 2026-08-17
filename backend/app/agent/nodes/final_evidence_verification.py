@@ -177,9 +177,16 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # Question uniqueness (Section 5): two hypotheses must never be tested
     # with what is effectively the same question. Applied regardless of
     # which path populated inv.questions (derived above, or a real
+    # Question uniqueness (Section 5): two hypotheses must never be tested
+    # with what is effectively the same question. Applied regardless of
+    # which path populated inv.questions (derived above, or a real
     # tool-based LLM plan).
     if inv is not None and inv.questions:
-        from app.agent.analytical_validator import deduplicate_investigation_questions
+        from app.agent.analytical_validator import (
+            deduplicate_investigation_questions,
+            normalize_investigation_decision_tree,
+            rank_questions_by_information_gain,
+        )
         deduped_questions = deduplicate_investigation_questions(inv.questions)
         if len(deduped_questions) != len(inv.questions):
             trace.append(AgentTraceStep.warn(
@@ -188,12 +195,12 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             ))
             inv.questions = deduped_questions
 
-    # Information-gain ordering (Section 7): conflict/event-establishing
-    # questions before discrimination/mechanism/recurrence/impact ones,
-    # regardless of which producer (LLM plan, hypothesis-derived, or
-    # deterministic fallback) contributed each question.
-    if inv is not None and inv.questions:
-        from app.agent.analytical_validator import rank_questions_by_information_gain
+        # Normalize decision tree node properties (status, activation_condition, IDs, objectives)
+        inv.questions = normalize_investigation_decision_tree(inv.questions)
+
+        # Information-gain ordering (Section 7): conflict/event-establishing
+        # questions before discrimination/mechanism/recurrence/impact ones,
+        # respecting tree dependencies.
         inv.questions = rank_questions_by_information_gain(inv.questions)
 
     # Cap investigation questions: max 5 current-event + max 5 recurrence questions
@@ -1151,10 +1158,18 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # rather than silently trusting whichever causal wording the LLM
         # happened to use.
         from app.agent.causal_guard import hypothesis_statement_asserts_unsupported_causation
-        _EVIDENCE_BOUNDARY_WHY = (
-            "The available evidence establishes the observed deviation and any reported statements "
-            "about it, but does not establish the causal relationship between them."
-        )
+        _conflicts = getattr(canonical, "evidence_conflicts", []) if canonical else []
+        if _conflicts:
+            _EVIDENCE_BOUNDARY_WHY = (
+                "Available evidence establishes a conflict between recorded and reported information. "
+                "The causal mechanism cannot yet be established. The investigation plan identifies the "
+                "objective evidence required to resolve the conflict."
+            )
+        else:
+            _EVIDENCE_BOUNDARY_WHY = (
+                "The available evidence establishes the observed deviation and any reported statements "
+                "about it, but does not establish the causal relationship between them."
+            )
         for _field in ("narrative", "root_cause_basis"):
             _text = getattr(rc, _field, None)
             if _text and hypothesis_statement_asserts_unsupported_causation(_text, verified_facts):

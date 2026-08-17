@@ -368,7 +368,7 @@ def derive_investigation_questions(candidate_hypotheses: list) -> list:
     from app.models.agent import InvestigationQuestion
 
     questions = []
-    for h in candidate_hypotheses:
+    for idx, h in enumerate(candidate_hypotheses):
         if getattr(h, "status", None) == "REFUTED":
             continue
         evidence = h.evidence_needed or "the relevant record for this hypothesis"
@@ -379,13 +379,26 @@ def derive_investigation_questions(candidate_hypotheses: list) -> list:
             question = f"Is there evidence that {clause}?"
         if not validate_investigation_question(question):
             continue
+        outcomes = []
+        if getattr(h, "confirms_if", None):
+            outcomes.append(f"Confirmed → {h.id} supported.")
+        if getattr(h, "refutes_if", None):
+            outcomes.append(f"Refuted → {h.id} refuted.")
         questions.append(InvestigationQuestion(
+            question_id=f"Q_HYP_{h.id}",
             question=question,
             purpose=purpose,
+            objective=purpose,
             evidence=evidence,
+            evidence_required=evidence,
             hypothesis_tested=getattr(h, "id", None),
+            target_proposition_id=f"P_{h.id}",
+            target_type="HYPOTHESIS",
+            priority="P4",
+            status="ACTIVE",
             confirms_if=getattr(h, "confirms_if", None),
             refutes_if=getattr(h, "refutes_if", None),
+            possible_outcomes=outcomes,
         ))
     return questions
 
@@ -687,29 +700,44 @@ def derive_investigation_areas(
 
 
 # Priority tiers for information-gain ordering (Section 7): lower number =
-# resolved earlier. Mechanism/recurrence/impact questions are deliberately
-# ranked after event/requirement/discrimination questions -- asking "was the
-# system misconfigured" before "did delivery/receipt actually occur" invites
-# an unsupported mechanism guess ahead of establishing the underlying event.
+# resolved earlier.
+# P1: Resolve direct evidence conflicts.
+# P2: Establish whether the alleged deviation/event actually occurred.
+# P3: Establish applicable requirement/control.
+# P4: Establish operational consequence / hypothesis discrimination.
+# P5: Identify causal mechanism (never before P1-P3).
+# P6: Investigate systemic/recurrence cause.
 _ASPECT_PRIORITY_TIER = {
     "delivery": 1, "receipt": 1,
-    "requirement": 2, "record_availability": 2,
-    "completion": 3, "acknowledgement": 3, "authorization": 3, "record_control": 3, "activity": 3,
+    "record_availability": 2, "completion": 2,
+    "requirement": 3, "exception": 3,
+    "acknowledgement": 3, "authorization": 3, "record_control": 3, "activity": 4,
     "mechanism": 5,
-    "effectiveness": 7, "scope": 7,
-    "exception": 3,
+    "effectiveness": 6, "scope": 6,
+}
+
+_PRIORITY_STRING_MAP = {
+    "P1": 1, "P1_CONFLICT": 1, "CRITICAL": 1,
+    "P2": 2, "P2_EVENT": 2,
+    "P3": 3, "P3_REQUIREMENT": 3, "HIGH": 3,
+    "P4": 4, "P4_CONSEQUENCE": 4, "MEDIUM": 4,
+    "P5": 5, "P5_MECHANISM": 5, "LOW": 5,
+    "P6": 6, "P6_RECURRENCE": 6,
 }
 
 
 def _question_priority_tier(q) -> int:
-    target_id = getattr(q, "target_proposition_id", None) or ""
-    # NOTE: matches the "REC_<n>" recurrence-proposition ID convention only
-    # ("REC" as a bare substring would false-positive on e.g. "P_RECEIPT").
+    target_id = getattr(q, "target_proposition_id", None) if not isinstance(q, dict) else q.get("target_proposition_id")
+    target_id = target_id or ""
+    # Recurrence-proposition ID convention
     if _RECURRENCE_TARGET_RE.search(target_id):
-        # Recurrence-mechanism questions only make sense once the current
-        # finding's own event/requirement is established.
         return 6
-    if getattr(q, "hypothesis_tested", None):
+
+    explicit_priority = getattr(q, "priority", None) if not isinstance(q, dict) else q.get("priority")
+    if explicit_priority and str(explicit_priority).upper() in _PRIORITY_STRING_MAP:
+        return _PRIORITY_STRING_MAP[str(explicit_priority).upper()]
+
+    if getattr(q, "hypothesis_tested", None) if not isinstance(q, dict) else q.get("hypothesis_tested"):
         return 4
     aspect = _question_aspect(q)
     return _ASPECT_PRIORITY_TIER.get(aspect, 3)
@@ -719,13 +747,41 @@ def rank_questions_by_information_gain(questions: list) -> list:
     """Orders surviving investigation questions by their ability to resolve
     the current uncertainty (Section 7) -- conflict/event-establishing
     questions first, discrimination/mechanism/recurrence/impact questions
-    last. A stable sort: ties (same tier) keep their original relative
-    order, so an already-well-ordered producer (e.g. the DELIVERY_VS_RECEIPT
-    fallback plan, whose questions are already authored in dependency order)
-    is never needlessly reshuffled."""
+    last. Enforces dependency constraints so dependent questions never
+    precede their prerequisite."""
     if not questions:
         return questions
-    return sorted(questions, key=_question_priority_tier)
+
+    # Initial sort by priority tier
+    sorted_qs = sorted(questions, key=_question_priority_tier)
+
+    # Reorder to respect depends_on if any prerequisite question is in the list
+    id_to_idx = {}
+    for i, q in enumerate(sorted_qs):
+        qid = getattr(q, "question_id", None) or getattr(q, "id", None) or (q.get("question_id") if isinstance(q, dict) else None)
+        if qid:
+            id_to_idx[str(qid)] = i
+
+    # Stable topological adjustment: push child after parent if needed
+    for i in range(len(sorted_qs)):
+        q = sorted_qs[i]
+        dep = getattr(q, "depends_on", None) if not isinstance(q, dict) else q.get("depends_on")
+        if dep:
+            dep_ids = [dep] if isinstance(dep, str) else list(dep)
+            parent_indices = [id_to_idx[d] for d in dep_ids if d in id_to_idx]
+            if parent_indices:
+                max_parent_idx = max(parent_indices)
+                if i < max_parent_idx:
+                    # Move q after max_parent_idx
+                    item = sorted_qs.pop(i)
+                    sorted_qs.insert(max_parent_idx, item)
+                    # Rebuild indices
+                    id_to_idx = {
+                        str(getattr(q_item, "question_id", None) or getattr(q_item, "id", None) or i_idx): i_idx
+                        for i_idx, q_item in enumerate(sorted_qs)
+                    }
+
+    return sorted_qs
 
 
 def normalize_and_dedupe_evidence_items(items: list[str], max_items: int = 6) -> list[str]:
@@ -755,40 +811,46 @@ def normalize_and_dedupe_evidence_items(items: list[str], max_items: int = 6) ->
 
 
 def deduplicate_investigation_questions(questions: list) -> list:
-    """Drops near-duplicate investigation questions (Section 5/6: every
-    question must have a distinct investigative objective -- two questions
-    must never test what is effectively the same evidence gap, even when
-    worded completely differently, e.g. "Verify notification delivery." /
-    "Establish whether notification was delivered." / "Reconcile
-    notification delivery records.").
+    """Drops duplicate and semantically equivalent investigation questions
+    (Section 10: deduplicate by target proposition, objective, evidence target,
+    causal decision, and normalized semantic representation).
 
-    Two structural checks, applied in order (never an LLM call --
-    Section 6: "avoid introducing an LLM call solely for deduplication"):
-
-    1. Same generic investigative ASPECT (see `classify_investigation_aspect`
-       -- delivery, receipt, acknowledgement, etc.) plus a modest amount of
-       shared vocabulary. The aspect match already establishes the two
-       questions target the same kind of control point, so a much lower
-       word-overlap bar than (2) is enough to confirm they're asking about
-       the same underlying object rather than two different ones that
-       happen to share an aspect.
-    2. No aspect match (or aspects differ): fall back to raw significant-
-       word overlap with a high threshold, catching near-identical
-       restatements this codebase's other aspect-agnostic questions might
-       produce.
-
-    Keeps the first occurrence (earlier questions are assumed to already be
-    in priority order)."""
+    Two questions must never test what is effectively the same evidence gap,
+    even when worded differently."""
     if not questions:
         return questions
     kept: list = []
     seen_word_sets: list[frozenset] = []
     seen_aspects: list[str | None] = []
+    seen_target_props: set[str] = set()
+    seen_objectives: list[frozenset] = []
+
     for q in questions:
         q_text = getattr(q, "question", None) or (q.get("question") if isinstance(q, dict) else None)
         if not q_text:
             kept.append(q)
             continue
+
+        target_prop = getattr(q, "target_proposition_id", None) or (q.get("target_proposition_id") if isinstance(q, dict) else None)
+        purpose_text = getattr(q, "purpose", None) or getattr(q, "objective", None) or (q.get("purpose") if isinstance(q, dict) else "") or ""
+        evidence_text = getattr(q, "evidence", None) or getattr(q, "evidence_required", None) or (q.get("evidence") if isinstance(q, dict) else "") or ""
+
+        # 1. Target proposition ID exact match (if structured target is present and non-generic)
+        if target_prop and target_prop in seen_target_props and not target_prop.startswith("OTHER"):
+            continue
+
+        # 2. Objective / Purpose semantic overlap check
+        obj_words = frozenset(significant_words(purpose_text)) if purpose_text else frozenset()
+        is_obj_duplicate = False
+        if obj_words:
+            for seen_obj in seen_objectives:
+                if seen_obj and len(obj_words & seen_obj) / max(len(obj_words | seen_obj), 1) >= 0.70:
+                    is_obj_duplicate = True
+                    break
+        if is_obj_duplicate:
+            continue
+
+        # 3. Question text & Aspect semantic overlap check
         words = frozenset(significant_words(q_text))
         aspect = _question_aspect(q)
         is_duplicate = False
@@ -804,14 +866,21 @@ def deduplicate_investigation_questions(questions: list) -> list:
                 if not words or not seen:
                     continue
                 overlap = len(words & seen) / max(len(words | seen), 1)
-                if overlap >= 0.75:
+                if overlap >= 0.70:
                     is_duplicate = True
                     break
+
         if is_duplicate:
             continue
+
+        if target_prop:
+            seen_target_props.add(target_prop)
+        if obj_words:
+            seen_objectives.append(obj_words)
         seen_word_sets.append(words)
         seen_aspects.append(aspect)
         kept.append(q)
+
     return kept
 
 
@@ -856,17 +925,40 @@ def deduplicate_capa_actions(actions: list) -> list:
     return kept
 
 
+def is_compound_decision_question(question: str) -> bool:
+    """Detects questions containing multiple independent decision points (Section 4).
+    Reject: 'Was acknowledgement mandatory and was it completed?'
+    Reject: 'Was X required, and do records confirm it occurred?'
+    Reject: 'Was retraining completed by the technician, and was the training record signed off by quality assurance?'
+    One question = one decision.
+    """
+    if not question:
+        return False
+    q_low = question.lower().strip()
+
+    # Pattern 1: Requirement joined with execution/completion
+    if re.search(r"\b(?:was|were|is|are|did|does)\b.+\b(?:mandatory|required|procedure|governed|stipulated)\b.+\band\b.+(?:completed|executed|acknowledged|performed|done|occurred|signed|confirmed)\b", q_low):
+        return True
+
+    # Pattern 2: "and whether" or "and if" joining two decision clauses
+    if re.search(r"\b(?:whether|if)\b.+\band\b\s+(?:whether|if)\b", q_low):
+        return True
+
+    # Pattern 3: Two full interrogative clauses joined by ', and (was/were/did/do/does/is/are/have/has)'
+    if re.search(r",\s*and\s+(?:do|did|does|was|were|is|are|have|has)\s+.+\b(?:confirm|establish|show|verify|show whether|signed off|completed|executed|authorized|performed|approved)\b", q_low):
+        return True
+
+    # Pattern 4: Conjunction of 'require authorization and whether...'
+    if re.search(r"\b(?:require|mandatory|authorization|verification)\b.+\band\s+(?:whether|if)\b", q_low):
+        return True
+
+    return False
+
+
 def validate_investigation_question(question: str | None) -> bool:
     """Deterministic structural quality gate for a generated investigation
-    question (Phase 4/11 of the RCA quality pass). True if the question is
-    well-formed; False if it should be rejected/regenerated. Domain-generic
-    -- every check is about sentence SHAPE, never specific vocabulary:
-
-    - must end with '?' and have enough words to be a real question
-    - must not contain the "confirm or refute:" concatenation pattern that
-      previously leaked raw evidence-list text into the question
-    - must not ask about reporting behavior instead of causal mechanism
-      (reuses the same guard 5-Why questions are held to)
+    question (Phase 4/11 of the RCA quality pass, Section 4 of Investigation-Plan Hardening).
+    True if the question is well-formed; False if it should be rejected/regenerated.
     """
     if not question:
         return False
@@ -880,7 +972,60 @@ def validate_investigation_question(question: str | None) -> bool:
     from app.agent.causal_guard import is_reporting_why_question
     if is_reporting_why_question(q):
         return False
+    if is_compound_decision_question(q):
+        return False
     return True
+
+
+def normalize_investigation_decision_tree(questions: list) -> list:
+    """Ensures each investigation question is represented as a structured
+    decision node with valid ID, objective, evidence, priority, dependency,
+    activation condition, and status (Section 2 & 5)."""
+    if not questions:
+        return []
+
+    normalized = []
+    for idx, q in enumerate(questions):
+        if not q:
+            continue
+        if isinstance(q, dict):
+            from app.models.agent import InvestigationQuestion
+            q = InvestigationQuestion(**q)
+
+        # Sync IDs
+        q_id = getattr(q, "question_id", None) or getattr(q, "id", None) or f"Q{idx + 1}"
+        setattr(q, "question_id", q_id)
+        if not getattr(q, "id", None):
+            setattr(q, "id", q_id)
+
+        # Sync objective / purpose
+        purpose = getattr(q, "purpose", None)
+        objective = getattr(q, "objective", None)
+        if not objective and purpose:
+            setattr(q, "objective", purpose)
+        elif not purpose and objective:
+            setattr(q, "purpose", objective)
+
+        # Sync evidence / evidence_required
+        ev = getattr(q, "evidence", None)
+        ev_req = getattr(q, "evidence_required", None)
+        if not ev_req and ev:
+            setattr(q, "evidence_required", ev)
+        elif not ev and ev_req:
+            setattr(q, "evidence", ev_req)
+
+        # Status & activation condition
+        activation = getattr(q, "activation_condition", None)
+        depends = getattr(q, "depends_on", None)
+        if activation or depends:
+            setattr(q, "status", "CONDITIONAL")
+        else:
+            if not getattr(q, "status", None):
+                setattr(q, "status", "ACTIVE")
+
+        normalized.append(q)
+
+    return normalized
 
 
 def hypothesis_confidence(hypothesis) -> str:

@@ -551,33 +551,56 @@ class ContributingFactor(BaseModel):
 
 
 class InvestigationQuestion(BaseModel):
-    """A structured investigation question with explicit purpose, target proposition, and discriminating evidence.
+    """A structured investigation question represented as a conditional decision tree node.
 
-    Each question must specify what proposition it will resolve, what specific records are required,
-    its priority, and its structured resolution rule — never merely ask whether an evidence document exists.
+    Each node specifies its target proposition, objective, required evidence, possible outcomes,
+    priority (P1-P6), activation condition, prerequisites (depends_on), branching next steps,
+    and activation status.
     """
     id: str | None = None
     question_id: str | None = None
     question: str
-    purpose: str = ""  # which proposition / unknown this resolves
-    evidence: str = ""  # specific document/record type that would answer this
+    purpose: str = ""  # which proposition / unknown this resolves (synced with objective)
+    objective: str = ""  # investigative objective / target
+    evidence: str = ""  # specific document/record type that would answer this (synced with evidence_required)
+    evidence_required: str | None = None
     target_type: Literal["HYPOTHESIS", "CONFLICT", "DOCUMENT", "OBSERVATION", "PROPOSITION", "OTHER"] = "PROPOSITION"
     target_id: str | None = None
     target_proposition_id: str | None = None
     question_type: str = "PROPOSITION_VERIFICATION"
     resolves: str | None = None
     decision_rule: str | None = None
-    evidence_required: str | None = None
     hypothesis_tested: str | None = None  # optional link to candidate hypothesis, never authoritative identity
     confirms_if: str | None = None
     supports_if: str | None = None
     refutes_if: str | None = None
-    priority: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"] = "HIGH"
+    priority: str = "HIGH"  # P1-P6 or CRITICAL/HIGH/MEDIUM/LOW
     blocking: bool = True
+    depends_on: str | list[str] | None = None
+    activation_condition: str | None = None
+    next_question_if_true: str | None = None
+    next_question_if_false: str | None = None
+    status: str = "ACTIVE"  # ACTIVE, CONDITIONAL, INACTIVE, RESOLVED
     resolution_rule: dict[str, str] = {}  # e.g. {"supports": "...", "weakens": "...", "remains_unresolved": "..."}
     presupposes_cause: bool = False
     presupposes_outcome: bool = False
     possible_outcomes: list[str] = []
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.question_id and self.id:
+            self.question_id = self.id
+        elif not self.id and self.question_id:
+            self.id = self.question_id
+        if not self.objective and self.purpose:
+            self.objective = self.purpose
+        elif not self.purpose and self.objective:
+            self.purpose = self.objective
+        if not self.evidence_required and self.evidence:
+            self.evidence_required = self.evidence
+        elif not self.evidence and self.evidence_required:
+            self.evidence = self.evidence_required
+        if self.activation_condition and self.status == "ACTIVE":
+            self.status = "CONDITIONAL"
 
 
 class InvestigationPlan(BaseModel):

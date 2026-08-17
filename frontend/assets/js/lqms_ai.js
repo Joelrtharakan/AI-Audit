@@ -332,19 +332,50 @@
         var invEvidence = (inv.evidence_to_collect && inv.evidence_to_collect.length) ? inv.evidence_to_collect : [];
         
         if (invQuestions.length) {
-            html += "<div style='display:flex; flex-direction:column; gap:12px; margin-bottom:16px;'>";
+            html += "<div style='display:flex; flex-direction:column; gap:14px; margin-bottom:16px;'>";
+            var lastCondition = null;
+            var isFirstActive = true;
             invQuestions.forEach(function(q, idx) {
-                html += "<div style='background:#faf5ff; border:1px solid #f3e8ff; border-left:4px solid #9333ea; border-radius:10px; padding:14px 16px;'>";
-                if (q && typeof q === 'object') {
-                    html += "<div style='font-weight:700; font-size:14px; color:#4c1d95; margin-bottom:6px; line-height:1.4;'>" + (idx + 1) + ". " + escapeHtml(q.question || '') + "</div>";
-                    if (q.purpose && q.purpose !== 'not specified') {
-                        html += "<div style='font-size:12px; color:#6b21a8; margin-bottom:4px; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f3e8ff;'>↳ <strong style='font-weight:700; color:#7e22ce;'>Resolves:</strong> " + escapeHtml(q.purpose) + "</div>";
+                var isObj = q && typeof q === 'object';
+                var condition = isObj ? (q.activation_condition || null) : null;
+                var status = isObj ? (q.status || 'ACTIVE') : 'ACTIVE';
+                var priority = isObj ? (q.priority || 'P1') : 'P1';
+
+                // Render Branch Header if condition changes or for Priority 1 initial branch
+                if (condition && condition !== lastCondition) {
+                    html += "<div style='margin-top:8px; margin-bottom:-4px; display:flex; align-items:center; gap:8px;'>";
+                    html += "<span style='font-size:12px; font-weight:800; color:#475569; background:#f1f5f9; padding:4px 10px; border-radius:6px; border:1px solid #e2e8f0; text-transform:uppercase; letter-spacing:0.4px;'>↳ " + escapeHtml(condition) + "</span>";
+                    html += "</div>";
+                    lastCondition = condition;
+                } else if (!condition && isFirstActive) {
+                    var pLabel = (priority === 'P1' || priority === 'CRITICAL') ? "Priority 1 — Foundational / Conflict Resolution" : "Priority 1 — Initial Investigation";
+                    html += "<div style='margin-bottom:-4px; display:flex; align-items:center; gap:8px;'>";
+                    html += "<span style='font-size:12px; font-weight:800; color:#0f172a; background:#f8fafc; padding:4px 10px; border-radius:6px; border:1px solid #e2e8f0; letter-spacing:0.2px;'>" + escapeHtml(pLabel) + "</span>";
+                    html += "</div>";
+                    isFirstActive = false;
+                }
+
+                var cardBg = (status === 'CONDITIONAL') ? "#fbfbfe" : "#faf5ff";
+                var borderLeftColor = (status === 'CONDITIONAL') ? "#6366f1" : "#9333ea";
+                var titleColor = (status === 'CONDITIONAL') ? "#3730a3" : "#4c1d95";
+
+                html += "<div style='background:" + cardBg + "; border:1px solid #e2e8f0; border-left:4px solid " + borderLeftColor + "; border-radius:10px; padding:14px 16px;'>";
+                if (isObj) {
+                    html += "<div style='display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px;'>";
+                    html += "<div style='font-weight:700; font-size:14px; color:" + titleColor + "; line-height:1.4; flex-grow:1;'>" + (idx + 1) + ". " + escapeHtml(q.question || '') + "</div>";
+                    if (status === 'CONDITIONAL') {
+                        html += "<span style='font-size:10px; font-weight:800; background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; margin-left:8px; flex-shrink:0;'>CONDITIONAL</span>";
                     }
-                    if (q.evidence && q.evidence !== 'not specified') {
-                        html += "<div style='font-size:12px; color:#475569; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f1f5f9;'>↳ <strong style='font-weight:700; color:#334155;'>Evidence required:</strong> " + escapeHtml(q.evidence) + "</div>";
+                    html += "</div>";
+                    if (q.purpose && q.purpose !== 'not specified') {
+                        html += "<div style='font-size:12px; color:#6b21a8; margin-bottom:4px; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f3e8ff;'>↳ <strong style='font-weight:700; color:#7e22ce;'>Objective:</strong> " + escapeHtml(q.purpose) + "</div>";
+                    }
+                    var evText = q.evidence_required || q.evidence;
+                    if (evText && evText !== 'not specified') {
+                        html += "<div style='font-size:12px; color:#475569; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f1f5f9;'>↳ <strong style='font-weight:700; color:#334155;'>Evidence required:</strong> " + escapeHtml(evText) + "</div>";
                     }
                     if (q.possible_outcomes && q.possible_outcomes.length) {
-                        html += "<div style='font-size:12px; color:#475569; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f1f5f9; margin-top:4px;'>↳ <strong style='font-weight:700; color:#334155;'>Possible outcomes:</strong><ul style='margin:4px 0 0 18px; padding:0;'>";
+                        html += "<div style='font-size:12px; color:#475569; background:#ffffff; padding:6px 10px; border-radius:6px; border:1px solid #f1f5f9; margin-top:4px;'>↳ <strong style='font-weight:700; color:#334155;'>Decision outcomes:</strong><ul style='margin:4px 0 0 18px; padding:0;'>";
                         q.possible_outcomes.forEach(function(o) {
                             html += "<li style='margin-bottom:2px;'>" + escapeHtml(o) + "</li>";
                         });
