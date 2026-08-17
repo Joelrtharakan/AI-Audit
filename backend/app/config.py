@@ -44,7 +44,13 @@ class Settings(BaseSettings):
     ollama_critic_max_tokens: int = 250
     ollama_critic_num_ctx: int = 4096
 
-    # Optional provider timeouts (for fallback router tests)
+    # Optional provider timeouts & keys (for fallback router tests)
+    google_api_key: str = ""
+    groq_api_key: str = ""
+    openrouter_api_key: str = ""
+    gemini_model: str = "gemini-1.5-flash"
+    groq_model: str = "llama-3.3-70b-versatile"
+    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct"
     groq_timeout_seconds: float = 15.0
     openrouter_timeout_seconds: float = 20.0
     gemini_timeout_seconds: float = 25.0

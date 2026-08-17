@@ -12,7 +12,7 @@ import logging
 import re
 
 from app.agent.state import AgentState
-from app.models.agent import AgentTraceStep, EvidenceStatus, RootCauseStatus
+from app.models.agent import AgentTraceStep, EvidenceStatus, RootCauseStatus, SupportLevel
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     errors = list(state.get("errors", []))
     evidence_ledger = state.get("evidence_ledger", [])
     finding_text = state["request"].finding_text
+    canonical = state.get("canonical_finding_state")
 
     # Extract all SOP / Document identifiers from finding text and evidence ledger
     allowed_terms = set(re.findall(r"\bSOP-[\w-]+\b", finding_text, re.IGNORECASE))
@@ -107,8 +108,14 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # Requirement 23 & 5: Clean verb-clause / pronoun-led subject contamination fragments
         canonical = state.get("canonical_finding_state")
         canon_sub = canonical.finding_subject if (canonical and canonical.finding_subject != "UNKNOWN") else "the affected process"
-        text = re.sub(r"\b(?:associated\s+with|verification\s+for|controls\s+for)\s+(?:they\s+(?:had|were|did)|the\s+operator\s+stated|the\s+technician\s+reported)\s+[a-z0-9\s-]+?\b(?=\s+(?:were|was|failed|lacked|are|is)\b)", f"associated with {canon_sub}", text, flags=re.IGNORECASE)
-        text = re.sub(r"\b(?:Why\s+did\s+the\s+following\s+occur:\s+)(?:they\s+(?:had|were|did)|the\s+operator\s+stated)\s+[a-z0-9\s-]+?\?", f"Why did the nonconformity in {canon_sub} occur?", text, flags=re.IGNORECASE)
+        # Synthetic artifact name sanitization (Section I & J)
+        text = re.sub(r"\bSOP-[\w-]+\s+(?:execution\s+records?|maintenance/?status\s+logs?)\b", "approved procedure revision and distribution records", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(?:[A-Z0-9-]+(?:-[A-Z0-9]+)+)\s+execution\s+records?\b", "operational monitoring logs and execution records", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b([A-Za-z0-9_-]+)\s+execution\s+records?\b", r"\1 logs and records", text, flags=re.IGNORECASE)
+
+        # Phantom hypothesis reference scrubbing (Section D)
+        text = re.sub(r"\bResolves\s+H\d+\s*[-—:]\s*", "Resolves: ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bResolves\s+H\d+\b", "Resolves target proposition", text, flags=re.IGNORECASE)
 
         return text
 
@@ -143,16 +150,29 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # deployment it's usually fast-pathed to an empty plan entirely (no
     # ASP.NET tool endpoints configured). If synthesis produced live
     # hypotheses but the plan still has no questions, derive them
-    # deterministically from those hypotheses now rather than shipping a
+    # deterministically from those hypotheses or fallback plan now rather than shipping a
     # report with real candidate causes and an empty investigation plan.
     rc_for_questions = state.get("root_cause")
-    if inv is not None and not inv.questions and rc_for_questions and rc_for_questions.candidate_hypotheses:
-        from app.agent.analytical_validator import derive_investigation_questions
-        inv.questions = derive_investigation_questions(rc_for_questions.candidate_hypotheses)
-        trace.append(AgentTraceStep.ok(
-            f"Investigation plan: derived {len(inv.questions)} discriminating question(s) from "
-            "candidate hypotheses (investigation planning ran before synthesis existed)"
-        ))
+    if inv is not None and not inv.questions:
+        if rc_for_questions and rc_for_questions.candidate_hypotheses:
+            from app.agent.analytical_validator import derive_investigation_questions
+            inv.questions = derive_investigation_questions(rc_for_questions.candidate_hypotheses)
+            trace.append(AgentTraceStep.ok(
+                f"Investigation plan: derived {len(inv.questions)} discriminating question(s) from "
+                "candidate hypotheses (investigation planning ran before synthesis existed)"
+            ))
+        else:
+            from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+            _, fallback_plan = build_deterministic_investigation_plan(
+                state["request"].finding_text,
+                evidence_ledger,
+                canonical_subject=getattr(canonical, "finding_subject", None),
+            )
+            inv.questions = fallback_plan.questions
+            if not inv.areas:
+                inv.areas = fallback_plan.areas
+            if not inv.evidence_to_collect:
+                inv.evidence_to_collect = fallback_plan.evidence_to_collect
 
     # Question uniqueness (Section 5): two hypotheses must never be tested
     # with what is effectively the same question. Applied regardless of
@@ -168,27 +188,41 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             ))
             inv.questions = deduped_questions
 
-    # Cap investigation questions: max 3 current-event + max 1 recurrence
-    # question. Generating one question per hypothesis regardless of
-    # overlap misrepresents evidence-constrained investigation planning as
-    # exhaustive; a single well-formed discriminating question usually
-    # resolves several hypotheses at once (Section 10/17).
+    # Information-gain ordering (Section 7): conflict/event-establishing
+    # questions before discrimination/mechanism/recurrence/impact ones,
+    # regardless of which producer (LLM plan, hypothesis-derived, or
+    # deterministic fallback) contributed each question.
+    if inv is not None and inv.questions:
+        from app.agent.analytical_validator import rank_questions_by_information_gain
+        inv.questions = rank_questions_by_information_gain(inv.questions)
+
+    # Cap investigation questions: max 5 current-event + max 5 recurrence questions
+    # to ensure all independent target propositions are preserved.
     if inv is not None and inv.questions:
         from app.agent.recurrence_guard import is_previous_capa_mechanism_hypothesis
         hyp_by_id = {h.id: h for h in (rc_for_questions.candidate_hypotheses if rc_for_questions else [])}
 
+        import re as _re
+        _recurrence_target_re = _re.compile(r"REC_\d+")
+
         def _is_recurrence_question(q) -> bool:
             tested_id = getattr(q, "hypothesis_tested", None)
+            target_id = getattr(q, "target_proposition_id", None) or ""
+            # NOTE: matches the "REC_<n>" recurrence-proposition ID
+            # convention only -- a bare "REC" substring check false-
+            # positives on e.g. "P_RECEIPT" (the DELIVERY_VS_RECEIPT
+            # investigation plan's own target-proposition ID).
+            if _recurrence_target_re.search(target_id):
+                return True
             hyp = hyp_by_id.get(tested_id) if tested_id else None
             return bool(hyp and is_previous_capa_mechanism_hypothesis(hyp.statement))
 
         current_qs = [q for q in inv.questions if not _is_recurrence_question(q)]
         recurrence_qs = [q for q in inv.questions if _is_recurrence_question(q)]
-        capped_questions = current_qs[:3] + recurrence_qs[:1]
+        capped_questions = current_qs[:5] + recurrence_qs[:5]
         if len(capped_questions) != len(inv.questions):
             trace.append(AgentTraceStep.warn(
-                f"Investigation plan: capped to {len(capped_questions)} question(s) "
-                f"(max 3 current-event + max 1 recurrence), dropped "
+                f"Investigation plan: capped to {len(capped_questions)} question(s), dropped "
                 f"{len(inv.questions) - len(capped_questions)}"
             ))
             inv.questions = capped_questions
@@ -600,6 +634,14 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 ))
                 _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
                 continue
+            from app.agent.causal_guard import is_evidence_state_not_hypothesis
+            if is_evidence_state_not_hypothesis(h.statement, h.name):
+                trace.append(AgentTraceStep.warn(
+                    f"Final Evidence Verification: removed hypothesis {h.id} — describes an evidence state "
+                    "or investigation uncertainty rather than proposing a concrete causal mechanism"
+                ))
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
+                continue
             if hypothesis_asserts_referenced_document_content(h.statement, _referenced_docs):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — asserts content of a "
@@ -885,26 +927,15 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 inv.areas = backfill_plan.areas
                 inv.evidence_to_collect = backfill_plan.evidence_to_collect
 
-        # Hypothesis-ID consistency firewall: every hypothesis ID referenced
-        # by an investigation question or a CAPA conditional action must
-        # exist in the FINAL, post-filtering candidate_hypotheses list above
-        # -- a question or CAPA branch built earlier (or from a separate
-        # deterministic generator's own independent hypothesis set) against
-        # an ID that didn't survive filtering must never reach the report as
-        # a dangling reference. Never invents a replacement; only removes.
+        # Hypothesis-ID consistency: investigation questions test independent propositions (Section 6).
+        # A question MUST NOT disappear merely because its related hypothesis was demoted or rejected.
+        # Clear the dangling hypothesis_tested field if the hypothesis is not in candidate_hypotheses,
+        # but the question and its target_proposition_id MUST SURVIVE.
         valid_hyp_ids = {h.id for h in rc.candidate_hypotheses}
         if inv is not None and inv.questions:
-            kept_questions = [
-                q for q in inv.questions
-                if not getattr(q, "hypothesis_tested", None) or q.hypothesis_tested in valid_hyp_ids
-            ]
-            if len(kept_questions) != len(inv.questions):
-                trace.append(AgentTraceStep.warn(
-                    f"Final Evidence Verification: removed {len(inv.questions) - len(kept_questions)} "
-                    "investigation question(s) referencing a hypothesis ID absent from the final "
-                    "hypothesis set (hypothesis-ID drift)"
-                ))
-                inv.questions = kept_questions
+            for q in inv.questions:
+                if getattr(q, "hypothesis_tested", None) and q.hypothesis_tested not in valid_hyp_ids:
+                    q.hypothesis_tested = None
         if capa is not None and capa.conditional_actions:
             _hyp_id_re = re.compile(r"\bH\d+\b")
             kept_actions = []
@@ -929,18 +960,20 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # these are investigation areas, not a confirmed CAPA scope --
         # rendering that distinction is the report generator's job; this
         # only guarantees the CONTENT traces to a real hypothesis.
-        if filtered_final_hyps:
-            from app.agent.analytical_validator import derive_investigation_areas
-            derived_areas = derive_investigation_areas(filtered_final_hyps)
-            if derived_areas:
-                if capa and capa.potential_areas != derived_areas:
-                    trace.append(AgentTraceStep.warn(
-                        "Final Evidence Verification: potential_areas replaced with areas derived from "
-                        f"candidate hypotheses (was {capa.potential_areas!r})"
-                    ))
-                    capa.potential_areas = derived_areas
-                if inv and inv.areas != derived_areas:
-                    inv.areas = derived_areas
+        # Investigation areas / CAPA potential_areas (Section K): aggregate
+        # areas from both surviving hypotheses and surviving investigation questions.
+        from app.agent.analytical_validator import derive_investigation_areas
+        derived_areas = derive_investigation_areas(
+            filtered_final_hyps,
+            questions=inv.questions if inv else None,
+            existing_areas=inv.areas if inv else None,
+            canonical_subject=getattr(canonical, "finding_subject", None),
+        )
+        if derived_areas:
+            if capa:
+                capa.potential_areas = derived_areas
+            if inv:
+                inv.areas = derived_areas
 
         # Causal-proposition eligibility layer (primary enforcement, per the
         # structured causal-proposition architecture): every guard above is
@@ -988,9 +1021,10 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 _eligible_hyps.append(h)
                 continue
             _demoted_ids.add(h.id)
+            _supp_str = getattr(prop.support_level, "value", str(prop.support_level))
             trace.append(AgentTraceStep.warn(
                 f"Final Evidence Verification: demoted hypothesis {h.id} to investigation area — "
-                f"computed support_level={prop.support_level.value} (topical relatedness to the finding's "
+                f"computed support_level={_supp_str} (topical relatedness to the finding's "
                 "own subject or a reported downstream state is not causal support; only a VERIFIED claim "
                 "or a REPORTED_CAUSAL_MECHANISM claim licenses a candidate hypothesis)"
             ))
@@ -1011,10 +1045,9 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             if inv is not None:
                 inv.areas = [*inv.areas, *_new_areas]
                 if inv.questions:
-                    inv.questions = [
-                        q for q in inv.questions
-                        if not getattr(q, "hypothesis_tested", None) or q.hypothesis_tested not in _demoted_ids
-                    ]
+                    for q in inv.questions:
+                        if getattr(q, "hypothesis_tested", None) in _demoted_ids:
+                            q.hypothesis_tested = None
             if capa is not None and capa.conditional_actions:
                 _demoted_re = re.compile(r"\bH\d+\b")
                 _kept_actions = []
@@ -1081,6 +1114,31 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "never establishes root cause)"
                 ))
                 rc.status = RootCauseStatus.NOT_ESTABLISHED
+
+        # Authoritative promotion check: if any candidate hypothesis is proven by verified evidence, promote it
+        from app.agent.causal_graph import evaluate_root_cause_eligibility, select_authoritative_leading_hypothesis
+        for h in rc.candidate_hypotheses:
+            el, supp, _, _, c_lvl, promo = evaluate_root_cause_eligibility(
+                h,
+                evidence_items=evidence_ledger,
+                conflicts=canonical.evidence_conflicts if canonical else None,
+                referenced_docs=canonical.referenced_documents if canonical else None,
+            )
+            if promo and supp == SupportLevel.SUPPORTED:
+                h.status = "SUPPORTED"
+                h.causal_level = c_lvl
+
+        lead_id, lead_mode, authoritative_rc_status, lead_rationale = select_authoritative_leading_hypothesis(
+            rc.candidate_hypotheses,
+            conflicts=canonical.evidence_conflicts if canonical else None,
+            evidence_ledger=evidence_ledger,
+        )
+        if authoritative_rc_status in (RootCauseStatus.SUPPORTED, RootCauseStatus.ESTABLISHED) and lead_id:
+            rc.status = authoritative_rc_status
+            rc.leading_hypothesis = lead_id
+            rc.leading_hypothesis_status = lead_mode
+            if lead_rationale:
+                rc.leading_hypothesis_rationale = lead_rationale
                 rc.category = "TO_BE_CONFIRMED"
 
         # Causal-verb firewall on the "Why" text (narrative/root_cause_basis):
@@ -1258,7 +1316,17 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # process vocabulary appears somewhere in the finding even when it
         # doesn't share words with the entity specifically; a genuinely
         # substituted, unrelated process (from a different finding
-        # entirely) will not.
+        if impact.process_at_risk:
+            from app.services.semantic_subject import strip_quantity_prefix
+            cleaned_proc = strip_quantity_prefix(impact.process_at_risk)
+            if cleaned_proc and cleaned_proc != impact.process_at_risk:
+                impact.process_at_risk = cleaned_proc[0].upper() + cleaned_proc[1:]
+        if impact.affected_object:
+            from app.services.semantic_subject import strip_quantity_prefix
+            cleaned_obj = strip_quantity_prefix(impact.affected_object)
+            if cleaned_obj and cleaned_obj != impact.affected_object:
+                impact.affected_object = cleaned_obj[0].upper() + cleaned_obj[1:]
+
         if canon_subject:
             topic = topic_word(canon_subject)
             topic_cap = topic[0].upper() + topic[1:]
@@ -1299,7 +1367,8 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             # next to an "Evidence Needed" field carrying only a single
             # generic placeholder line, silently dropping most of what was
             # actually identified as needed.
-            aggregated = "; ".join(dict.fromkeys(inv.evidence_to_collect))
+            from app.agent.analytical_validator import normalize_and_dedupe_evidence_items
+            aggregated = "; ".join(normalize_and_dedupe_evidence_items(inv.evidence_to_collect))
             if aggregated != impact.evidence_needed:
                 trace.append(AgentTraceStep.warn(
                     "Final Evidence Verification: evidence_needed aggregated from the investigation "
@@ -1440,9 +1509,32 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     for violation in validate_causal_graph(rc, fw, capa, mechanism):
         trace.append(AgentTraceStep.warn(f"Causal Graph Audit: {violation}"))
 
+    # Section 15: INVESTIGATION_COMPLETENESS Rule
+    # If root_cause.status == NOT_ESTABLISHED and material unresolved propositions exist,
+    # investigation_plan.questions MUST NOT be empty.
+    from app.agent.causal_guard import should_generate_investigation_plan
+    if should_generate_investigation_plan(evidence_ledger, getattr(rc, "propositions", None), rc, state["request"].finding_text):
+        if inv is None or not inv.questions:
+            from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+            _, fallback_plan = build_deterministic_investigation_plan(
+                state["request"].finding_text,
+                evidence_ledger,
+                canonical_subject=getattr(canonical, "finding_subject", None),
+            )
+            if inv is None:
+                inv = fallback_plan
+                state["investigation_plan"] = inv
+            else:
+                inv.questions = fallback_plan.questions
+                if not inv.areas:
+                    inv.areas = fallback_plan.areas
+                if not inv.evidence_to_collect:
+                    inv.evidence_to_collect = fallback_plan.evidence_to_collect
+            trace.append(AgentTraceStep.ok(
+                f"Investigation completeness rule: populated {len(inv.questions)} investigation question(s)"
+            ))
+
     trace.append(AgentTraceStep.ok("Final evidence verification and consistency validation completed"))
-
-
 
     return {
         **state,

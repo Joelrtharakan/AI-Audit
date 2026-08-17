@@ -63,6 +63,7 @@ from app.models.agent import (
     CapaAnalysis,
     CapaStatus,
     ContributingFactor,
+    CoreSynthesisOutput,
     EvidenceStatus,
     FiveWhyAnalysis,
     FiveWhyStep,
@@ -71,6 +72,7 @@ from app.models.agent import (
     InvestigationQuestion,
     RootCauseAnalysis,
     RootCauseStatus,
+    SupportLevel,
 )
 from app.services.llm_client import LLMError, LLMNetworkError, LLMTimeoutError, get_llm_client
 from app.services.llm_json import parse_llm_json
@@ -91,7 +93,20 @@ def _assign_claim_ids(evidence_ledger: list) -> list[tuple[str, Any]]:
     return [(f"C{i + 1}", e) for i, e in enumerate(evidence_ledger)]
 
 
-def _classify_failure(exc: Exception, ollama_meta: dict) -> str:
+def parse_core_synthesis_output(raw: str) -> tuple[dict, CoreSynthesisOutput]:
+    """Single authoritative parser and validator for core synthesis output.
+    Used identically for primary and recovery responses.
+    """
+    parsed_dict = parse_llm_json(raw)
+    try:
+        validated = CoreSynthesisOutput.model_validate(parsed_dict)
+    except Exception as exc:
+        logger.debug("Core synthesis schema validation error: %s (payload keys: %s)", exc, list(parsed_dict.keys()) if isinstance(parsed_dict, dict) else type(parsed_dict))
+        raise exc
+    return parsed_dict, validated
+
+
+def _classify_failure(exc: Exception | None, ollama_meta: dict) -> str:
     """Map a core_synthesis call failure to one of the specific categories
     from the performance-logging contract, instead of collapsing everything
     into two coarse buckets.
@@ -104,10 +119,8 @@ def _classify_failure(exc: Exception, ollama_meta: dict) -> str:
     budget and still return complete, valid JSON, in which case no exception
     reaches this function at all.
     """
-    try:
-        from pydantic import ValidationError as _PydanticValidationError
-    except ImportError:  # pragma: no cover - pydantic always installed here
-        _PydanticValidationError = ()  # type: ignore[assignment]
+    from pydantic import ValidationError as _PydanticValidationError
+    import json
 
     if isinstance(exc, LLMTimeoutError):
         return "TIMEOUT"
@@ -115,9 +128,9 @@ def _classify_failure(exc: Exception, ollama_meta: dict) -> str:
         return "PROVIDER_FAILURE"
     if isinstance(exc, _PydanticValidationError):
         return "SCHEMA_VALIDATION_FAILURE"
+    if isinstance(exc, (json.JSONDecodeError, ValueError)):
+        return "JSON_PARSE_ERROR"
     if isinstance(exc, LLMError):
-        # Any other provider-level error (HTTP 4xx/5xx, empty completion,
-        # unexpected response shape) that isn't a timeout/network error.
         return "PROVIDER_FAILURE"
     if ollama_meta.get("hit_output_limit"):
         return "OUTPUT_TRUNCATED"
@@ -153,6 +166,7 @@ def _parse_causal_fields(
     has_unresolved_conflict: bool = False,
     claim_ids: list[tuple[str, Any]] | None = None,
     canonical_subject: str | None = None,
+    canonical: CanonicalFindingState | None = None,
 ) -> tuple[RootCauseAnalysis, FiveWhyAnalysis, list[ContributingFactor]]:
     """Parse+guard root_cause / five_why / contributing_factors from a
     core_synthesis-shaped JSON object.
@@ -270,6 +284,15 @@ def _parse_causal_fields(
             # deviation occurred -- it's a fact the finding already
             # gives, dressed up as a hypothesis. Reject it rather than
             # let it crowd out an actual candidate cause.
+            from app.agent.causal_guard import is_evidence_state_not_hypothesis
+            if is_evidence_state_not_hypothesis(statement, ch.get("name")):
+                trace.append(AgentTraceStep.warn(
+                    f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — describes an evidence state "
+                    "or investigation uncertainty rather than proposing a concrete causal mechanism"
+                ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="core_synthesis")
+                continue
             if is_evidence_gap_not_hypothesis(statement, source_text):
                 trace.append(AgentTraceStep.warn(
                     f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — restates an evidence "
@@ -378,15 +401,29 @@ def _parse_causal_fields(
     # what survived every guard above including the count cap -- never
     # conflated with deterministic-fallback-generated hypotheses, which
     # are counted separately at their own call sites.
-    _llm_metrics.increment("llm_hypotheses_generated", _raw_hyp_count)
-    _llm_metrics.increment("llm_hypotheses_accepted", len(cand_hypotheses))
-    _llm_metrics.increment("llm_hypotheses_rejected", max(_raw_hyp_count - len(cand_hypotheses), 0))
+    from app.agent.causal_graph import evaluate_root_cause_eligibility, select_authoritative_leading_hypothesis
+    for h in cand_hypotheses:
+        el, supp, _, _, c_lvl, promo = evaluate_root_cause_eligibility(
+            h,
+            evidence_items=evidence_ledger,
+            conflicts=canonical.evidence_conflicts if canonical else None,
+            referenced_docs=canonical.referenced_documents if canonical else None,
+        )
+        if promo and supp == SupportLevel.SUPPORTED:
+            h.status = "SUPPORTED"
+            h.causal_level = c_lvl
+
+    lead_id, lead_mode, authoritative_rc_status, lead_rationale = select_authoritative_leading_hypothesis(
+        cand_hypotheses,
+        conflicts=canonical.evidence_conflicts if canonical else None,
+        evidence_ledger=evidence_ledger,
+    )
 
     root_cause = RootCauseAnalysis(
-        status=rc_status,
+        status=authoritative_rc_status,
         category=rc_category,
         statement=clean_structured_leak(raw_rc.get("statement")) or None,
-        leading_hypothesis=clean_structured_leak(raw_rc.get("leading_hypothesis")) or None,
+        leading_hypothesis=lead_id,
         candidate_hypotheses=cand_hypotheses,
         risk_of_recurrence=raw_rc.get("risk_of_recurrence", "NOT_ASSESSABLE"),
         narrative=clean_structured_leak(raw_rc.get("narrative")) or "The available evidence establishes the observed condition but does not establish why it occurred.",
@@ -394,7 +431,7 @@ def _parse_causal_fields(
         evidence_required=[
             clean_structured_leak(x) for x in raw_rc.get("evidence_required", []) if clean_structured_leak(x)
         ],
-        leading_hypothesis_rationale=clean_structured_leak(raw_rc.get("leading_hypothesis_rationale")) or None,
+        leading_hypothesis_rationale=lead_rationale or clean_structured_leak(raw_rc.get("leading_hypothesis_rationale")) or None,
     )
 
     # -----------------------------------------------------------------
@@ -472,12 +509,12 @@ def _parse_causal_fields(
                 ))
                 answer = "The available evidence does not establish a further cause beyond the preceding step."
                 st = "UNKNOWN"
-            elif len(fw_steps) >= 1 and restates_observation(answer, observed_deviation):
+            elif restates_observation(answer, observed_deviation, question):
                 trace.append(AgentTraceStep.warn(
                     f"Core Synthesis: 5-Why step {len(fw_steps) + 1} answer merely restated the "
                     "original observation instead of explaining it — truncating chain here"
                 ))
-                answer = "The available evidence does not establish a cause beyond the observation itself."
+                answer = "The available evidence establishes that the deviation occurred, but does not establish why."
                 st = "UNKNOWN"
             elif ungrounded_entities(answer, source_text):
                 trace.append(AgentTraceStep.warn(
@@ -830,28 +867,21 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
         resolve_deviation,
         split_topic_and_tail,
         strip_leading_article,
+        strip_quantity_prefix,
         topic_word,
         validate_semantic_subject,
     )
 
     # SINGLE AUTHORITATIVE SUBJECT SOURCE: canonical.finding_subject is
     # produced exactly once, by understand_finding_node's deterministic
-    # resolver (resolve_deviation). This function previously re-derived
-    # its own independent subject by calling resolve_deviation() again --
-    # a second producer that could (and did, in production) disagree with
-    # the authoritative one, since it re-ran extraction on the raw finding
-    # text a second time with an empty claims list rather than consuming
-    # the value already computed once upstream. Falls back to a fresh
-    # resolve_deviation() call ONLY when canonical isn't available or its
-    # subject wasn't actually resolved (e.g. a hand-built state on the
-    # recovery path, or a test fixture) -- never to override a value the
-    # authoritative producer already established.
+    # resolver (resolve_deviation).
     canon_subject = getattr(canonical, "finding_subject", None) if canonical else None
     if canon_subject and canon_subject != "UNKNOWN" and validate_semantic_subject(canon_subject):
         clean_noun = canon_subject
     else:
         resolved = resolve_deviation(request_finding_text, [])
         clean_noun = resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
+    clean_noun = strip_quantity_prefix(clean_noun) or clean_noun
     topic = topic_word(clean_noun)
     topic_cap = topic[0].upper() + topic[1:]
     temporal_clause = extract_temporal_clause(request_finding_text)
@@ -992,17 +1022,12 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
             # activity or output associated with that use" ONLY fits a
             # condition that actually describes something being
             # operated/used outside a range/limit/parameter (e.g. equipment
-            # used after expiry, operated outside a validated range) --
-            # applying that phrasing unconditionally to EVERY plain-entity
-            # subject leaked equipment/validated-use vocabulary into
-            # unrelated findings (e.g. "missed inspections" -> "Missed
-            # operation and validated-use control", Section 19's exact
-            # failure mode). Checked structurally against the condition
-            # text itself, not the entity's own name.
-            _use_related_condition = bool(condition) and bool(re.search(
+            # used after expiry, operated outside a validated range)
+            _use_related_condition = bool(re.search(
                 r"\b(?:operat\w*|us(?:e|ed|ing)|perform\w*)\s+outside\b|"
-                r"\boutside\s+(?:its|the|their)\s+[\w\s]{0,20}?(?:range|limits?|parameters?|specification|tolerance|threshold)\b",
-                condition, re.IGNORECASE,
+                r"\boutside\s+(?:its|the|their)\s+[\w\s]{0,20}?(?:range|limits?|parameters?|specification|tolerance|threshold)\b|"
+                r"\b(?:validated|operating)\s+(?:range|limits?)\b",
+                f"{request_finding_text} {condition} {observed_deviation}", re.IGNORECASE,
             ))
             if _use_related_condition:
                 derived_process = f"{topic_cap} operation and validated-use control"
@@ -1012,7 +1037,10 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
                     "requirements. This does not establish that any specific output was invalid or that a "
                     "particular cause was responsible."
                 )
-                derived_evidence_needed = f"Applicable requirement/specification for {clean_noun}, and records of actual use or condition during the affected period"
+                derived_evidence_needed = (
+                    f"Approved validation/qualification records, operating logs, exception/deviation records, "
+                    f"and control system/interlock logs for {clean_noun}"
+                )
             else:
                 # Domain-neutral default: states the condition without
                 # presupposing an operation/use/validated-range concept the
@@ -1184,7 +1212,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         provider_used = _router_meta.get("provider_used")
         fallback_used = bool(_router_meta.get("fallback_used", False))
         provider_attempts = list(_router_meta.get("provider_attempts", []))
-        parsed = parse_llm_json(raw)
+        parsed, _ = parse_core_synthesis_output(raw)
         llm_metrics.increment("llm_primary_success")
         from app.services.ollama_client import get_last_call_metadata as _get_ollama_meta
         _ollama_meta = _get_ollama_meta()
@@ -1206,6 +1234,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             parsed, mechanism, evidence_ledger, source_text, observed_deviation, request.finding_text, trace,
             has_unresolved_conflict, claim_ids,
             canonical_subject=getattr(canonical, "finding_subject", None),
+            canonical=canonical,
         )
         synthesis_execution["validation_rejections"] = (
             llm_metrics.snapshot().get("validation_rejections_total", 0) - _rejections_before
@@ -1245,6 +1274,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         _, _area_plan = _build_area_plan(
             request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
         )
+        investigation_plan_override = _area_plan
         capa = CapaAnalysis(
             status=CapaStatus.INVESTIGATION_REQUIRED,
             potential_areas=_area_plan.areas,
@@ -1256,12 +1286,16 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
 
         # CA DRAFT: built deterministically from the already-synthesized
         # root_cause/impact instead of asking the LLM to restate them a
-        # second time.
+        # second time. One canonical implementation.
         ca_draft = build_ca_draft(_derive_ca_draft_fields(root_cause, impact))
 
         analysis_mode = "LLM"
         analysis_engine = "LLM"
-        trace.append(AgentTraceStep.ok("Consolidated core synthesis completed and validated against production rules."))
+        synthesis_execution["source"] = "PRIMARY_LLM"
+        synthesis_execution["recovery_used"] = False
+        trace.append(AgentTraceStep.ok(
+            "Core synthesis: primary LLM call produced verified causal analysis (RCA, 5-Why, Impact, CAPA)."
+        ))
 
     except Exception as primary_exc:
         from app.services.ollama_client import get_last_call_metadata as get_last_ollama_metadata
@@ -1273,11 +1307,12 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             elapsed_ms=primary_ollama_meta.get("elapsed_ms"), failure_type=primary_failure_type,
         )
         logger.info(
-            "node=core_synthesis failure_type=%s hit_output_limit=%s eval_count=%s max_output_tokens=%s",
+            "node=core_synthesis failure_type=%s hit_output_limit=%s eval_count=%s max_output_tokens=%s exc=%s",
             primary_failure_type,
             primary_ollama_meta.get("hit_output_limit"),
             primary_ollama_meta.get("eval_count"),
             primary_ollama_meta.get("max_output_tokens"),
+            primary_exc,
         )
         trace.append(AgentTraceStep.warn(
             f"Core synthesis primary call did not produce a usable result ({primary_failure_type}) — "
@@ -1316,7 +1351,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                 settings.ollama_recovery_synthesis_timeout_seconds, "core_synthesis_recovery",
                 settings.ollama_recovery_num_ctx,
             )
-            recovery_parsed = parse_llm_json(recovery_raw)
+            recovery_parsed, _ = parse_core_synthesis_output(recovery_raw)
             llm_metrics.increment("llm_recovery_success")
             _recovery_ollama_meta = get_last_ollama_metadata()
             llm_metrics.record_execution(
@@ -1330,6 +1365,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                 recovery_parsed, mechanism, evidence_ledger, source_text, observed_deviation, request.finding_text, trace,
                 has_unresolved_conflict, claim_ids,
                 canonical_subject=getattr(canonical, "finding_subject", None),
+                canonical=canonical,
             )
             synthesis_execution["source"] = "RECOVERY_LLM"
             synthesis_execution["recovery_used"] = True
@@ -1355,8 +1391,9 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                 elapsed_ms=recovery_meta.get("elapsed_ms"), failure_type=recovery_failure_type,
             )
             logger.info(
-                "node=core_synthesis_recovery failure_type=%s recovery=DETERMINISTIC_SYNTHESIS",
+                "node=core_synthesis_recovery failure_type=%s recovery=DETERMINISTIC_SYNTHESIS exc=%s",
                 recovery_failure_type,
+                recovery_exc,
             )
             trace.append(AgentTraceStep.ok(
                 f"Core synthesis recovery call also failed ({recovery_failure_type}) — transitioning to "
@@ -1468,12 +1505,6 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                 conditional_actions=build_conditional_capa_actions(fallback_hyps, clean_noun, topic),
             )
 
-        # CA draft reuses the same deterministic derivation the successful-LLM
-        # path uses (never a separately hand-authored, less-careful wording) —
-        # this is what keeps immediate_action evidence-appropriate ("verify
-        # status against the record" rather than presupposing a correction is
-        # needed) whether this ran the recovery path or full deterministic
-        # synthesis.
         ca_draft = build_ca_draft(_derive_ca_draft_fields(root_cause, impact))
 
     return {

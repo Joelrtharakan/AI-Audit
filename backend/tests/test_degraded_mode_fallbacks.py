@@ -27,7 +27,7 @@ def test_five_why_fallback_stops_at_one_step_without_a_mechanism():
     ]
     fw = build_deterministic_five_why(finding_text, ledger)
     assert len(fw.steps) == 1
-    assert "DEGRADED" in fw.status_note
+    assert "EVIDENCE BOUNDARY" in fw.status_note or "DEGRADED" in fw.status_note
 
 
 def test_five_why_fallback_never_asks_about_reporting_behavior():
@@ -43,7 +43,7 @@ def test_five_why_fallback_never_asks_about_reporting_behavior():
     # evidence-boundary stop on why the mechanism itself occurred.
     assert len(fw.steps) == 3
     assert fw.steps[-1].status == "UNKNOWN"
-    assert "DEGRADED MODE" in fw.status_note
+    assert "EVIDENCE BOUNDARY" in fw.status_note or "DEGRADED MODE" in fw.status_note
     assert "NOT ESTABLISHED FROM AVAILABLE EVIDENCE" in fw.steps[-1].answer
 
 

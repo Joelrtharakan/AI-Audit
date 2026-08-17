@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import datetime as dt
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -28,10 +28,13 @@ from pydantic import BaseModel, field_validator
 class EvidenceStatus(str, Enum):
     VERIFIED = "VERIFIED"
     REPORTED = "REPORTED"
+    MIXED = "MIXED"
     INFERRED = "INFERRED"
     UNVERIFIED = "UNVERIFIED"
     CONTRADICTED = "CONTRADICTED"
+    REFUTED = "REFUTED"
     UNKNOWN = "UNKNOWN"
+    UNRESOLVED = "UNRESOLVED"
 
 
 class PropositionType(str, Enum):
@@ -41,28 +44,41 @@ class PropositionType(str, Enum):
     REPORTED_MECHANISM = "REPORTED_MECHANISM"
     IMMEDIATE_MECHANISM = "IMMEDIATE_MECHANISM"
     CONTRIBUTING_CAUSE = "CONTRIBUTING_CAUSE"
+    ROOT_CAUSE = "ROOT_CAUSE"
     SYSTEMIC_CAUSE = "SYSTEMIC_CAUSE"
+    CONTROL_FAILURE = "CONTROL_FAILURE"
     DOCUMENT_REFERENCE = "DOCUMENT_REFERENCE"
     DOCUMENT_CONTENT = "DOCUMENT_CONTENT"
     EVIDENCE_STATE = "EVIDENCE_STATE"
+    INVESTIGATION_QUESTION = "INVESTIGATION_QUESTION"
+    CAPA_STATE = "CAPA_STATE"
+    PREVIOUS_CAPA_STATE = "PREVIOUS_CAPA_STATE"
     CONFLICTED_PROPOSITION = "CONFLICTED_PROPOSITION"
+    IMPACT = "IMPACT"
+    REQUIREMENT = "REQUIREMENT"
 
 
 class CausalLevel(str, Enum):
     L0_OBSERVATION = "L0_OBSERVATION"
     L1_EVENT = "L1_EVENT"
-    L2_REPORTED_MECHANISM = "L2_REPORTED_MECHANISM"
-    L3_IMMEDIATE_MECHANISM = "L3_IMMEDIATE_MECHANISM"
-    L4_CONTRIBUTING_CAUSE = "L4_CONTRIBUTING_CAUSE"
+    L2_IMMEDIATE_MECHANISM = "L2_IMMEDIATE_MECHANISM"
+    L3_CONTRIBUTING_CAUSE = "L3_CONTRIBUTING_CAUSE"
+    L4_ROOT_CAUSE = "L4_ROOT_CAUSE"
     L5_SYSTEMIC_CAUSE = "L5_SYSTEMIC_CAUSE"
+    L2_REPORTED_MECHANISM = "L2_REPORTED_MECHANISM"  # backwards compatibility
+    L3_IMMEDIATE_MECHANISM = "L3_IMMEDIATE_MECHANISM"  # backwards compatibility
     EVIDENCE_STATE = "EVIDENCE_STATE"
 
 
 class SupportLevel(str, Enum):
-    VERIFIED = "VERIFIED"
-    SUPPORTED = "SUPPORTED"
-    REPORTED = "REPORTED"
+    UNSUPPORTED = "UNSUPPORTED"
+    PLAUSIBLE = "PLAUSIBLE"
     POSSIBLE = "POSSIBLE"
+    SUPPORTED = "SUPPORTED"
+    STRONGLY_SUPPORTED = "STRONGLY_SUPPORTED"
+    ESTABLISHED = "ESTABLISHED"
+    VERIFIED = "VERIFIED"
+    REPORTED = "REPORTED"
     UNRESOLVED = "UNRESOLVED"
     UNKNOWN = "UNKNOWN"
     CONTRADICTED = "CONTRADICTED"
@@ -80,16 +96,73 @@ class InvestigationMode(str, Enum):
     COMBINED = "COMBINED"
 
 
+class CausalEdgeType(str, Enum):
+    SUPPORTS = "SUPPORTS"
+    CONTRADICTS = "CONTRADICTS"
+    REQUIRES = "REQUIRES"
+    DEPENDS_ON = "DEPENDS_ON"
+    TEMPORALLY_PRECEDES = "TEMPORALLY_PRECEDES"
+    ENABLES = "ENABLES"
+    PREVENTS = "PREVENTS"
+    RESULTS_IN = "RESULTS_IN"
+    ASSOCIATED_WITH = "ASSOCIATED_WITH"
+    EXPLAINS = "EXPLAINS"
+    UNRESOLVED = "UNRESOLVED"
+    UNRESOLVED_RELATIONSHIP = "UNRESOLVED_RELATIONSHIP"
+
+
+class CausalRelationship(BaseModel):
+    """An explicit directed relationship edge between propositions or evidence in the causal graph."""
+    source_id: str
+    target_id: str
+    edge_type: CausalEdgeType
+    evidence_ids: list[str] = []
+    notes: str | None = None
+
+
+class EvidenceCompleteness(str, Enum):
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    EVIDENCE_UNAVAILABLE = "EVIDENCE_UNAVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+    CONFLICTED = "CONFLICTED"
+
+
+class EvidenceSourceCategory(str, Enum):
+    AUDIT_FINDING = "AUDIT_FINDING"
+    OBJECTIVE_RECORD = "OBJECTIVE_RECORD"
+    REPORTED_STATEMENT = "REPORTED_STATEMENT"
+    SYSTEM_RECORD = "SYSTEM_RECORD"
+    ATTACHMENT = "ATTACHMENT"
+    EVIDENCE_AVAILABILITY = "EVIDENCE_AVAILABILITY"
+    INDEPENDENT_VERIFICATION = "INDEPENDENT_VERIFICATION"
+    UNKNOWN_SOURCE = "UNKNOWN_SOURCE"
+
+
 class ClaimAttribution(str, Enum):
     """Who produced the claim — tracks provenance so a supervisor's assertion
     is never silently equated with an auditor's direct observation."""
     AUDITOR_OBSERVED = "AUDITOR_OBSERVED"
+    AUDIT_FINDING = "AUDIT_FINDING"
     PERSON_REPORTED = "PERSON_REPORTED"
     SUPERVISOR_REPORTED = "SUPERVISOR_REPORTED"
     DOCUMENTARY_EVIDENCE = "DOCUMENTARY_EVIDENCE"
     SYSTEM_EVIDENCE = "SYSTEM_EVIDENCE"
+    ATTACHMENT = "ATTACHMENT"
+    EVIDENCE_AVAILABILITY = "EVIDENCE_AVAILABILITY"
     AI_INFERENCE = "AI_INFERENCE"
     UNKNOWN = "UNKNOWN"
+
+
+class EpistemicSource(str, Enum):
+    AUDIT_OBSERVATION = "AUDIT_OBSERVATION"
+    OBJECTIVE_RECORD = "OBJECTIVE_RECORD"
+    SYSTEM_RECORD = "SYSTEM_RECORD"
+    REPORTED_STATEMENT = "REPORTED_STATEMENT"
+    USER_PROVIDED_EVIDENCE = "USER_PROVIDED_EVIDENCE"
+    DERIVED = "DERIVED"
+    INFERRED = "INFERRED"
+    UNKNOWN_SOURCE = "UNKNOWN_SOURCE"
 
 
 class Proposition(BaseModel):
@@ -99,12 +172,21 @@ class Proposition(BaseModel):
     type: PropositionType = PropositionType.OBSERVATION
     causal_level: CausalLevel = CausalLevel.L0_OBSERVATION
     support_level: SupportLevel = SupportLevel.UNKNOWN
+    source_type: EpistemicSource = EpistemicSource.AUDIT_OBSERVATION
+    evidence_ids: list[str] = []
     supporting_evidence_ids: list[str] = []
     contradicting_evidence_ids: list[str] = []
+    conflict_ids: list[str] = []
     status: str = "UNKNOWN"
+    subject: str | None = None
+    predicate: str | None = None
+    object: str | None = None
+    temporal_context: str | None = None
     speaker: str | None = None
     document_available: bool = True
     document_content_verified: bool = False
+    statement_status: str | None = None
+    underlying_event_status: str | None = None
 
 
 class EvidenceClaim(BaseModel):
@@ -125,6 +207,8 @@ class EvidenceClaim(BaseModel):
     availability: Literal["AVAILABLE", "UNAVAILABLE", "NOT_APPLICABLE"] = "AVAILABLE"
     document_available: bool = True
     document_content_verified: bool = False
+    statement_status: str | None = None
+    underlying_event_status: str | None = None
 
     @property
     def provenance(self) -> str:
@@ -150,12 +234,12 @@ class EvidenceConflict(BaseModel):
     conflict_id: str               # e.g. "CONF1"
     conflict_type: Literal[
         "DELIVERY_VS_RECEIPT", "RECORD_VS_STATEMENT", "COMPLETION_VS_MISSING_RECORD",
-        "SYSTEM_VS_HUMAN_REPORT", "DOCUMENT_VS_STATEMENT", "TIMESTAMP_VS_EVENT",
+        "SYSTEM_RECORD_VS_HUMAN_REPORT", "SYSTEM_VS_HUMAN_REPORT", "DOCUMENT_VS_STATEMENT", "TIMESTAMP_VS_EVENT",
         "CONFLICTING_REPORTS", "CONTRADICTED_BY_EVIDENCE", "INCONSISTENT_RECORDS", "OTHER"
     ] = "CONFLICTING_REPORTS"
     proposition_type: Literal[
         "DELIVERY_VS_RECEIPT", "COMPLETION_VS_MISSING_RECORD", "RECORD_VS_STATEMENT",
-        "TIMESTAMP_VS_REPORTED_EVENT", "SYSTEM_STATE_VS_HUMAN_REPORT", "CONFLICTING_REPORTS",
+        "TIMESTAMP_VS_REPORTED_EVENT", "SYSTEM_RECORD_VS_HUMAN_REPORT", "SYSTEM_STATE_VS_HUMAN_REPORT", "CONFLICTING_REPORTS",
     ] = "CONFLICTING_REPORTS"
     status: Literal["UNRESOLVED", "RESOLVED_FOR", "RESOLVED_AGAINST"] = "UNRESOLVED"
     claims: list[str] = []              # claim_ids involved
@@ -229,6 +313,7 @@ class CanonicalFindingState(BaseModel):
     evidence_conflicts: list[EvidenceConflict] = []
     propositions: list[Proposition] = []
     investigation_mode: InvestigationMode = InvestigationMode.NORMAL
+    evidence_completeness: EvidenceCompleteness = EvidenceCompleteness.COMPLETE
     # Documents the finding references/cites/attaches but which were not
     # available for inspection -- kept separate from evidence_claims so a
     # referenced document's type/name can never be mistaken for an
@@ -314,10 +399,13 @@ class FiveWhyAnalysis(BaseModel):
 class RootCauseStatus(str, Enum):
     VERIFIED = "VERIFIED"
     SUPPORTED = "SUPPORTED"
+    ESTABLISHED = "ESTABLISHED"
     STATED_UNVERIFIED = "STATED_UNVERIFIED"
     INFERRED = "INFERRED"
     NOT_ESTABLISHED = "NOT_ESTABLISHED"
     CONTRADICTED = "CONTRADICTED"
+    CONFLICTED = "CONFLICTED"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
 
 
 class CandidateHypothesis(BaseModel):
@@ -386,6 +474,61 @@ class RootCauseAnalysis(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Core synthesis LLM contracts
+# ---------------------------------------------------------------------------
+
+
+class CoreSynthesisHypothesisLLM(BaseModel):
+    id: str = "H1"
+    name: str = "HYPOTHESIS"
+    statement: str = ""
+    supporting_claim_ids: list[str] = []
+    contradicting_claim_ids: list[str] = []
+    target_proposition_id: str | None = None
+    status: str = "POSSIBLE"
+    evidence_needed: str | None = None
+    confirms_if: str | None = None
+    refutes_if: str | None = None
+    discrimination_evidence: str | None = None
+    relevance_rank: str = "HIGH"
+    rationale: str | None = None
+    evidence_against: str | None = None
+
+
+class CoreSynthesisFiveWhyStepLLM(BaseModel):
+    level: int | None = 1
+    question: str = ""
+    answer: str = ""
+    status: str = "UNKNOWN"
+    evidence_reference: str | None = None
+
+
+class CoreSynthesisFiveWhyLLM(BaseModel):
+    steps: list[CoreSynthesisFiveWhyStepLLM] = []
+    is_complete: bool = False
+    status_note: str | None = None
+
+
+class CoreSynthesisRootCauseLLM(BaseModel):
+    status: str = "NOT_ESTABLISHED"
+    category: str = "TO_BE_CONFIRMED"
+    statement: str | None = None
+    leading_hypothesis: str | None = None
+    root_cause_basis: str | None = None
+    evidence_required: list[str] = []
+    candidate_hypotheses: list[CoreSynthesisHypothesisLLM] = []
+    narrative: str = "The available evidence establishes the observed condition but does not establish why it occurred."
+    risk_of_recurrence: str | None = "NOT_ASSESSABLE"
+    leading_hypothesis_rationale: str | None = None
+
+
+class CoreSynthesisOutput(BaseModel):
+    root_cause: CoreSynthesisRootCauseLLM = Field(default_factory=CoreSynthesisRootCauseLLM)
+    five_why: CoreSynthesisFiveWhyLLM = Field(default_factory=CoreSynthesisFiveWhyLLM)
+    contributing_factors: list[dict[str, Any]] = []
+
+
+# ---------------------------------------------------------------------------
 # Contributing factors
 # ---------------------------------------------------------------------------
 
@@ -408,22 +551,30 @@ class ContributingFactor(BaseModel):
 
 
 class InvestigationQuestion(BaseModel):
-    """A structured investigation question with explicit purpose and discriminating evidence.
+    """A structured investigation question with explicit purpose, target proposition, and discriminating evidence.
 
-    Each question must specify what it will resolve, which hypothesis it tests,
-    and what specific result would confirm or refute that hypothesis — never
-    merely ask whether an evidence document exists.
+    Each question must specify what proposition it will resolve, what specific records are required,
+    its priority, and its structured resolution rule — never merely ask whether an evidence document exists.
     """
     id: str | None = None
+    question_id: str | None = None
     question: str
-    purpose: str = ""  # which hypothesis / unknown this resolves
+    purpose: str = ""  # which proposition / unknown this resolves
     evidence: str = ""  # specific document/record type that would answer this
-    target_type: Literal["HYPOTHESIS", "CONFLICT", "DOCUMENT", "OBSERVATION", "PROPOSITION", "OTHER"] = "HYPOTHESIS"
+    target_type: Literal["HYPOTHESIS", "CONFLICT", "DOCUMENT", "OBSERVATION", "PROPOSITION", "OTHER"] = "PROPOSITION"
     target_id: str | None = None
+    target_proposition_id: str | None = None
+    question_type: str = "PROPOSITION_VERIFICATION"
+    resolves: str | None = None
+    decision_rule: str | None = None
     evidence_required: str | None = None
-    hypothesis_tested: str | None = None  # which hypothesis this discriminates
-    confirms_if: str | None = None  # what result confirms the hypothesis
-    refutes_if: str | None = None  # what result refutes the hypothesis
+    hypothesis_tested: str | None = None  # optional link to candidate hypothesis, never authoritative identity
+    confirms_if: str | None = None
+    supports_if: str | None = None
+    refutes_if: str | None = None
+    priority: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"] = "HIGH"
+    blocking: bool = True
+    resolution_rule: dict[str, str] = {}  # e.g. {"supports": "...", "weakens": "...", "remains_unresolved": "..."}
     presupposes_cause: bool = False
     presupposes_outcome: bool = False
     possible_outcomes: list[str] = []
@@ -523,6 +674,7 @@ class InvestigationReport(BaseModel):
     confidence: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"  # backwards compatibility
     investigation_required: Literal["YES", "NO", "LIMITED"]
     investigation_mode: InvestigationMode = InvestigationMode.NORMAL
+    evidence_completeness: EvidenceCompleteness = EvidenceCompleteness.COMPLETE
     root_cause: RootCauseAnalysis
     contributing_factors: list[ContributingFactor] = []
     investigation: InvestigationPlan

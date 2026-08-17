@@ -396,6 +396,19 @@ def build_causal_proposition(
     finding_text: str,
     subject_words: frozenset | None = None,
 ) -> CausalProposition:
+    from app.agent.causal_guard import is_evidence_state_not_hypothesis
+    if is_evidence_state_not_hypothesis(hypothesis.statement, getattr(hypothesis, "name", None)):
+        return CausalProposition(
+            proposition_id=f"P_{hypothesis.id}",
+            statement=hypothesis.statement or "",
+            mechanism_type=MechanismType.OTHER,
+            source_claim_ids=[],
+            support_level=SupportLevel.UNSUPPORTED,
+            eligibility=HypothesisEligibility.INELIGIBLE,
+            provenance=Provenance.UNKNOWN,
+            causal_level=CausalLevel.EVIDENCE_STATE,
+        )
+
     support_level = compute_support_level(hypothesis.statement, claims, finding_text, subject_words=subject_words)
     eligibility = derive_hypothesis_eligibility(support_level)
     hyp_words = _significant_words(hypothesis.statement)

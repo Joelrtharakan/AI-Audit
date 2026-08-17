@@ -12,7 +12,10 @@ from typing import Any
 
 from app.models.agent import (
     CausalLevel,
+    ClaimAttribution,
+    EpistemicSource,
     EvidenceClaim,
+    EvidenceCompleteness,
     EvidenceConflict,
     EvidenceItem,
     EvidenceStatus,
@@ -99,6 +102,24 @@ def classify_investigation_mode(
     return InvestigationMode.NORMAL
 
 
+def classify_evidence_completeness(
+    finding_text: str,
+    evidence_ledger: list[EvidenceItem] | list[EvidenceClaim] | None = None,
+    conflicts: list[EvidenceConflict] | None = None,
+    referenced_docs: list[ReferencedDocumentInfo] | None = None,
+) -> EvidenceCompleteness:
+    """Classify the evidence completeness independently of individual proposition verification."""
+    if conflicts and len(conflicts) > 0:
+        return EvidenceCompleteness.CONFLICTED
+    if referenced_docs and any(
+        getattr(d, "reference_status", "") == "REFERENCED_UNAVAILABLE" for d in referenced_docs
+    ):
+        return EvidenceCompleteness.PARTIAL
+    if re.search(r"\b(not\s+available\s+to\s+the\s+ai|unavailable\s+to\s+the\s+ai|report\s+was\s+not\s+available)\b", (finding_text or "").lower()):
+        return EvidenceCompleteness.PARTIAL
+    return EvidenceCompleteness.COMPLETE
+
+
 def build_propositions_from_ledger(
     finding_text: str,
     evidence_ledger: list[EvidenceItem] | list[EvidenceClaim],
@@ -113,13 +134,25 @@ def build_propositions_from_ledger(
         status = getattr(item, "status", EvidenceStatus.UNKNOWN)
         speaker = getattr(item, "speaker", None)
         claim_id = getattr(item, "claim_id", f"E{pid_counter}")
+        attribution = getattr(item, "attribution", None)
 
         # Classify proposition type and causal level
         prop_type = PropositionType.OBSERVATION
         causal_lvl = CausalLevel.L0_OBSERVATION
         supp_lvl = SupportLevel.UNKNOWN
 
-        if status == EvidenceStatus.VERIFIED:
+        claim_low = claim_text.lower()
+        if re.search(r"\b(not\s+available|unavailable|could\s+not\s+be\s+located)\b", claim_low) and any(w in claim_low for w in ("report", "attachment", "record", "document", "ai")):
+            prop_type = PropositionType.EVIDENCE_STATE
+            causal_lvl = CausalLevel.EVIDENCE_STATE
+            supp_lvl = SupportLevel.VERIFIED
+            status = EvidenceStatus.VERIFIED
+        elif "referenced" in claim_low or "attached" in claim_low or "cited" in claim_low:
+            prop_type = PropositionType.DOCUMENT_REFERENCE
+            causal_lvl = CausalLevel.L0_OBSERVATION
+            supp_lvl = SupportLevel.VERIFIED
+            status = EvidenceStatus.VERIFIED
+        elif status == EvidenceStatus.VERIFIED:
             supp_lvl = SupportLevel.VERIFIED
             causal_lvl = CausalLevel.L0_OBSERVATION
             prop_type = PropositionType.OBSERVATION
@@ -136,16 +169,40 @@ def build_propositions_from_ledger(
             causal_lvl = CausalLevel.EVIDENCE_STATE
             prop_type = PropositionType.CONFLICTED_PROPOSITION
 
+        source_type = EpistemicSource.AUDIT_OBSERVATION
+        if attribution == ClaimAttribution.SYSTEM_EVIDENCE:
+            source_type = EpistemicSource.SYSTEM_RECORD
+        elif attribution in (ClaimAttribution.PERSON_REPORTED, ClaimAttribution.SUPERVISOR_REPORTED):
+            source_type = EpistemicSource.REPORTED_STATEMENT
+        elif attribution == ClaimAttribution.AI_INFERENCE or status == EvidenceStatus.INFERRED:
+            source_type = EpistemicSource.INFERRED
+        elif attribution == ClaimAttribution.DOCUMENTARY_EVIDENCE:
+            source_type = EpistemicSource.OBJECTIVE_RECORD
+
+        # Determine statement status vs underlying event status
+        statement_status = "VERIFIED"
+        underlying_event_status = "UNKNOWN"
+        if source_type in (EpistemicSource.OBJECTIVE_RECORD, EpistemicSource.SYSTEM_RECORD) and status == EvidenceStatus.VERIFIED:
+            underlying_event_status = "VERIFIED"
+        elif source_type == EpistemicSource.AUDIT_OBSERVATION:
+            underlying_event_status = "UNKNOWN"  # Audit assertion alone does not verify underlying event
+        elif status == EvidenceStatus.REPORTED:
+            statement_status = "REPORTED"
+            underlying_event_status = "UNKNOWN"
+
         prop = Proposition(
             id=f"P{pid_counter}",
             statement=claim_text,
             type=prop_type,
             causal_level=causal_lvl,
             support_level=supp_lvl,
+            source_type=source_type,
             supporting_evidence_ids=[claim_id],
             contradicting_evidence_ids=[],
             status=getattr(status, "value", str(status)),
             speaker=speaker,
+            statement_status=statement_status,
+            underlying_event_status=underlying_event_status,
         )
         propositions.append(prop)
         pid_counter += 1

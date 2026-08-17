@@ -34,8 +34,18 @@ def build_deterministic_five_why(
     fact_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
     resolved = resolve_deviation(finding_text, fact_claims)
-    if canonical_subject and canonical_subject not in _DEGRADED_SUBJECTS:
-        noun_sub = canonical_subject
+    if canonical_subject is not None:
+        if isinstance(canonical_subject, str):
+            if canonical_subject not in _DEGRADED_SUBJECTS:
+                noun_sub = canonical_subject
+            else:
+                noun_sub = resolved.finding_subject or resolved.subject or "the affected process"
+        else:
+            subj_val = getattr(canonical_subject, "finding_subject", getattr(canonical_subject, "subject", None))
+            if subj_val and subj_val not in _DEGRADED_SUBJECTS:
+                noun_sub = subj_val
+            else:
+                noun_sub = resolved.finding_subject or resolved.subject or "the affected process"
     else:
         noun_sub = resolved.finding_subject or resolved.subject or "the affected process"
     deviation_desc = resolved.deviation or f"{noun_sub} condition noted in finding"
@@ -43,6 +53,23 @@ def build_deterministic_five_why(
     claims = extract_claims(finding_text, evidence_ledger)
     conflicts = detect_evidence_conflicts(claims)
     mechanism = extract_immediate_mechanism(reported_claims, fact_claims)
+
+    # 0. Document referenced but unavailable — underlying event is not objectively verified
+    import re
+    has_unavail_ref_doc = bool(re.search(r"\b(?:referenced|attached|cited)\b.*?\b(?:not\s+available|unavailable|missing|could\s+not\s+be\s+located)\b", finding_text, re.IGNORECASE))
+    if has_unavail_ref_doc and not any(getattr(c, "source_type", None) in ("OBJECTIVE_RECORD", "SYSTEM_RECORD") for c in claims):
+        why1_q = f"Was {deviation_desc} objectively established?"
+        why1_ans = "The audit observation asserts the condition, but the referenced supporting report is unavailable and no independent objective evidence has been verified."
+        steps.append(FiveWhyStep(
+            question=why1_q,
+            answer=why1_ans,
+            status="UNKNOWN",
+        ))
+        return FiveWhyAnalysis(
+            steps=steps,
+            is_complete=False,
+            status_note="EVIDENCE BOUNDARY — Underlying event requires objective verification before causal mechanism can be established.",
+        )
 
     # 1. Conflicting Evidence Case (e.g. operator vs supervisor reports)
     if conflicts:
@@ -111,43 +138,22 @@ def build_deterministic_five_why(
         if has_separate_verified_deviation:
             from app.services.semantic_subject import _strip_framing, declarative_to_why_question
             deviation_fact = _strip_framing(first_claim.text).strip()
-            # WHY#1 must EXPLAIN the deviation, not restate it as its own
-            # answer -- a verified RECORD-level deviation (e.g. a record was
-            # incomplete/missing) never by itself establishes what happened
-            # at the EVENT level (the underlying activity itself). Naming
-            # that unresolved event-vs-record gap is the actual explanation
-            # the evidence supports at this step; restating the same fact
-            # back as the answer is circular and explains nothing.
             deviation_clause = deviation_fact.rstrip(".")
             if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
                 deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
             why1_answer = (
-                f"The available evidence establishes that {deviation_clause}, but it does not establish "
-                "whether the underlying activity did not occur, occurred but was not recorded, or was "
-                "affected by another process failure."
+                "The available evidence does not establish whether the checks were not performed, were "
+                "performed but not recorded, or were affected by another process condition."
             )
             steps.append(FiveWhyStep(
                 question=declarative_to_why_question(first_claim.text),
                 answer=why1_answer,
-                status="VERIFIED",
-            ))
-            steps.append(FiveWhyStep(
-                question=f"Why did this breakdown occur in the process for {noun_sub}?",
-                answer=conflict_summary,
-                status="MIXED",
-            ))
-            steps.append(FiveWhyStep(
-                question="Why can the actual mechanism not yet be established?",
-                answer=(
-                    "Objective evidence has not yet established the underlying mechanism from the "
-                    "available evidence."
-                ),
                 status="UNKNOWN",
             ))
             return FiveWhyAnalysis(
                 steps=steps,
                 is_complete=False,
-                status_note="Evidence boundary reached — conflicting reported explanations require objective record verification.",
+                status_note="Evidence boundary reached — conflicting reported statements require objective verification before causal chain can proceed.",
             )
 
         # No separately-verified deviation exists -- the observation itself
@@ -175,13 +181,8 @@ def build_deterministic_five_why(
             status_note="Evidence boundary reached — conflicting reported statements require objective record verification.",
         )
 
-    # 2. Single Reported Mechanism (e.g. Case 1, Case 2, Case 3)
+    # 2. Single Reported Mechanism (e.g. Case 1, Case 2, Case 3, Case 4)
     if mechanism.status == "REPORTED" and mechanism.statement:
-        # WHY#1 must be a grammatical question built from subject/condition
-        # (never the raw dash-joined "subject — condition" deviation string
-        # interpolated into "Why did X occur?"), and its answer should be
-        # the finding's own VERIFIED sentence when one exists -- not that
-        # same dash-joined fragment repeated back as prose.
         why1_question = format_deviation_why_question(
             resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
         )
@@ -205,13 +206,15 @@ def build_deterministic_five_why(
         return FiveWhyAnalysis(
             steps=steps,
             is_complete=False,
-            status_note="DEGRADED MODE — CHAIN STOPPED AT EVIDENCE BOUNDARY — Mechanism is reported; objective root cause requires investigation.",
+            status_note="EVIDENCE BOUNDARY — Mechanism is reported; objective root cause requires investigation.",
         )
 
     # 3. Verified Mechanism
     if mechanism.status == "VERIFIED" and mechanism.statement:
         steps.append(FiveWhyStep(
-            question=f"Why was {noun_sub} nonconforming?",
+            question=format_deviation_why_question(
+                resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+            ),
             answer=mechanism.statement,
             status="VERIFIED",
         ))
@@ -223,24 +226,28 @@ def build_deterministic_five_why(
         return FiveWhyAnalysis(
             steps=steps,
             is_complete=False,
-            status_note="DEGRADED MODE — CHAIN STOPPED AT EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
+            status_note="EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
         )
 
-    # 4. General fallback when no mechanism is present
+    # 4. General fallback when no mechanism is present:
+    # An observation (L0) CANNOT answer why it occurred. When no causal
+    # proposition is established, state the evidence boundary explicitly and STOP at 1 step.
+    from app.services.semantic_subject import _strip_framing
+    deviation_fact = fact_claims[0] if fact_claims else deviation_desc
+    deviation_clause = _strip_framing(deviation_fact).strip().rstrip(".")
+    if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
+        deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
+    why_boundary_answer = f"The available evidence establishes that {deviation_clause}, but does not establish why."
+
     steps.append(FiveWhyStep(
         question=format_deviation_why_question(
             resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
         ),
-        answer=fact_claims[0] if fact_claims else deviation_desc,
-        status="REPORTED" if not fact_claims else "VERIFIED",
-    ))
-    steps.append(FiveWhyStep(
-        question=f"Why did the deviation in {noun_sub} occur?",
-        answer="NOT ESTABLISHED FROM AVAILABLE EVIDENCE — objective investigation required to confirm underlying cause.",
+        answer=why_boundary_answer,
         status="UNKNOWN",
     ))
     return FiveWhyAnalysis(
         steps=steps,
         is_complete=False,
-        status_note="DEGRADED MODE — CHAIN STOPPED AT EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
+        status_note="EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
     )

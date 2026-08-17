@@ -288,12 +288,32 @@ def repeats_previous_why_answer(previous_answer: str | None, answer: str | None)
     return jaccard >= 0.75
 
 
-def restates_observation(answer: str | None, observed_deviation: str | None) -> bool:
+def restates_observation(answer: str | None, observed_deviation: str | None, question: str | None = None) -> bool:
     """True if a Why-step's answer is essentially just the observation
     restated (e.g. "the log was incomplete" answering why the log was
-    incomplete) rather than explaining it -- the same near-duplicate check
-    used for previous-answer repetition, applied against Layer 1."""
-    return repeats_previous_why_answer(observed_deviation, answer)
+    incomplete, "the equipment was operated outside its validated range"
+    or "the validated range was exceeded") rather than explaining it."""
+    if not answer or not observed_deviation:
+        return False
+    if repeats_previous_why_answer(observed_deviation, answer):
+        return True
+    if question and is_circular_why_answer(question, answer):
+        return True
+    ans_words = significant_words(answer) - _WHY_STOPWORDS
+    obs_words = significant_words(observed_deviation) - _WHY_STOPWORDS
+    if not ans_words or not obs_words:
+        return False
+    overlap = ans_words & obs_words
+    if len(overlap) >= 2 and len(overlap) / len(ans_words) >= 0.50:
+        _EXPLANATORY_VERBS = {
+            "because", "due", "caused", "failed", "disabled", "outage",
+            "omitted", "forgot", "misconfigured", "unaware", "lacked", "broken",
+            "interlock", "overload", "defect", "corrupted", "tripped", "bypassed"
+        }
+        new_words = ans_words - obs_words
+        if not (new_words & _EXPLANATORY_VERBS):
+            return True
+    return False
 
 
 def question_reopens_mechanism(question: str, mechanism: MechanismInfo) -> bool:
@@ -663,6 +683,31 @@ def is_evidence_gap_not_hypothesis(statement: str | None, source_text: str) -> b
     return overlap >= 0.6
 
 
+_EVIDENCE_STATE_INDICATORS = re.compile(
+    r"\b(?:whether\s+[\w\s-]+?\s+(?:was|were|is|are|had\s+been)\s+(?:implemented|verified|completed|conducted|performed|effective|available|related|established)|"
+    r"status\s+is\s+(?:unconfirmed|unknown|unverified|to\s+be\s+confirmed)|"
+    r"records?\s+(?:are|were|is|was)\s+(?:unavailable|missing|not\s+available)|"
+    r"effectiveness\s+verification\s+is\s+(?:unknown|unconfirmed|unverified)|"
+    r"need\s+to\s+investigate|requires?\s+investigation|to\s+be\s+investigated|"
+    r"may\s+or\s+may\s+not\s+have\s+(?:occurred|been)|"
+    r"whether\s+it\s+was\s+implemented|whether\s+its?\s+effectiveness\s+was\s+verified|"
+    r"is\s+unconfirmed\b)",
+    re.IGNORECASE,
+)
+
+
+def is_evidence_state_not_hypothesis(statement: str | None, name: str | None = None) -> bool:
+    """Return True if the proposition/statement is describing an EVIDENCE_STATE
+    or INVESTIGATION_STATE (e.g. 'whether X is known', 'whether X was implemented',
+    'status is unconfirmed', 'records are unavailable') rather than proposing
+    a concrete causal mechanism (CAUSE -> MECHANISM -> DEVIATION)."""
+    if name and re.search(r"\b(?:STATUS_UNCONFIRMED|STATUS_UNKNOWN|EVIDENCE_STATE|INVESTIGATION_REQUIRED|UNCONFIRMED)\b", name, re.IGNORECASE):
+        return True
+    if not statement:
+        return False
+    return bool(_EVIDENCE_STATE_INDICATORS.search(statement))
+
+
 # ---------------------------------------------------------------------------
 # 5b. Cross-hypothesis semantic consistency (hypothesis -> evidence ->
 # discrimination -> action must all describe the SAME causal proposition)
@@ -776,15 +821,15 @@ def validate_why_question(
         prev_words = significant_words(previous_answer) - _WHY_STOPWORDS
         if q_words and prev_words and q_words.issubset(prev_words):
             return False, "Question introduces no new causal inquiry beyond previous answer"
-    if observation and restates_observation(q, observation):
-        return False, "Restates the observation"
-    if finding_text:
-        q_words = significant_words(q)
-        finding_words = significant_words(finding_text)
-        if q_words and finding_words:
-            overlap = len(q_words & finding_words) / len(q_words) if q_words else 0
-            if overlap >= 0.9:
-                return False, "Repeats the finding verbatim"
+        if observation and restates_observation(q, observation):
+            return False, "Restates the observation"
+        if finding_text:
+            q_words = significant_words(q)
+            finding_words = significant_words(finding_text)
+            if q_words and finding_words:
+                overlap = len(q_words & finding_words) / len(q_words) if q_words else 0
+                if overlap >= 0.9:
+                    return False, "Repeats the finding verbatim"
     if mechanism and question_reopens_mechanism(q, mechanism):
         return False, "Reopens an already-established mechanism"
     return True, None
@@ -1384,6 +1429,8 @@ def validate_hypothesis_quality(statement: str | None, source_text: str) -> tupl
     """
     if not statement:
         return False, "Empty hypothesis statement"
+    if is_evidence_state_not_hypothesis(statement):
+        return False, "Describes an evidence state or investigation uncertainty rather than proposing a concrete causal mechanism"
     if is_evidence_gap_not_hypothesis(statement, source_text):
         return False, "Restates an evidence gap or observation, not a causal explanation"
     if hypothesis_overclaims_human_error(statement):
@@ -1616,6 +1663,80 @@ def evaluate_causal_eligibility(
         return False, "restates_established_mechanism"
 
     return True, None
+
+
+def should_generate_investigation_plan(
+    evidence_ledger: Any = None,
+    propositions: list[Any] | None = None,
+    root_cause: Any = None,
+    finding_text: str = "",
+) -> bool:
+    """Return True if an investigation plan must be generated for the finding.
+
+    Core Rule (Sections 1, 2, 3):
+    NO ROOT-CAUSE HYPOTHESIS does NOT imply NO INVESTIGATION PLAN.
+    NO ROOT-CAUSE HYPOTHESIS + UNRESOLVED EVIDENCE / UNKNOWN PROPOSITION / CONFLICT = INVESTIGATION REQUIRED.
+
+    Returns TRUE when ANY of the following exists:
+    - unresolved evidence conflict
+    - UNKNOWN or UNRESOLVED proposition
+    - missing objective record required to resolve a finding
+    - reported mechanism without objective corroboration
+    - missing referenced document
+    - previous CAPA with unresolved implementation/effectiveness status
+    - requirement not established
+    - affected period not established
+    - actual event not established
+    - causal mechanism not established (e.g. root_cause.status == NOT_ESTABLISHED or no candidate hypotheses)
+    - downstream impact requiring scope assessment
+    - contradiction between evidence sources
+
+    Returns FALSE ONLY when:
+    1. no unresolved investigation proposition exists, AND
+    2. the evidence is sufficient for the current analysis state, AND
+    3. no material evidence gap remains.
+    """
+    if root_cause is not None:
+        rc_status = str(getattr(root_cause, "status", ""))
+        if "NOT_ESTABLISHED" in rc_status or not getattr(root_cause, "candidate_hypotheses", []):
+            return True
+
+    if evidence_ledger is not None:
+        if getattr(evidence_ledger, "has_unresolved_conflict", False) or getattr(evidence_ledger, "has_conflicting_reports", False):
+            return True
+        if getattr(evidence_ledger, "missing_records", []) or getattr(evidence_ledger, "missing_referenced_documents", []):
+            return True
+        items = getattr(evidence_ledger, "items", []) or []
+        for it in items:
+            st = str(getattr(it, "status", ""))
+            src = str(getattr(it, "source", ""))
+            if any(k in st for k in ("UNRESOLVED", "CONFLICTING", "REPORTED", "MISSING")):
+                return True
+            if "REPORTED_STATEMENT" in src or "PERSON_REPORTED" in src:
+                return True
+
+    if propositions:
+        for p in propositions:
+            st = str(getattr(p, "status", ""))
+            pt = str(getattr(p, "proposition_type", ""))
+            if any(k in st for k in ("UNKNOWN", "UNRESOLVED", "POSSIBLE_UNCONFIRMED", "CONFLICTING")):
+                return True
+            if any(k in pt for k in ("EVIDENCE_STATE", "INVESTIGATION_QUESTION", "REPORTED_MECHANISM")):
+                return True
+
+    from app.agent.recurrence_guard import detect_recurrence
+    if detect_recurrence(finding_text).is_recurring:
+        return True
+
+    _trigger_re = re.compile(
+        r"\b(?:missing|unavailable|not available|not provided|unconfirmed|unknown|unverified|disputed|conflicted|gap|lacking)\b",
+        re.IGNORECASE,
+    )
+    if _trigger_re.search(finding_text):
+        return True
+
+    return True
+
 
 
 

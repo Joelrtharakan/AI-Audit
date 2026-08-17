@@ -122,14 +122,32 @@ _POSITIVE_POLARITY_RE = re.compile(
 )
 
 
-def _classify_attribution(speaker: str | None) -> ClaimAttribution:
-    """Classify the attribution based on the speaker role."""
+_AUDITOR_SPEAKER_RE = re.compile(
+    r"\b(?:auditor|audit\s+observation|audit\s+finding|audit|inspection|investigation)\b",
+    re.IGNORECASE,
+)
+_SYSTEM_RECORD_SPEAKER_RE = re.compile(
+    r"\b(?:system\s+logs?|system\s+records?|audit\s+logs?|audit\s+trail|server\s+logs?|dispatch\s+logs?|lms\s+records?|distribution\s+logs?|calibration\s+records?|maintenance\s+logs?)\b",
+    re.IGNORECASE,
+)
+_EVIDENCE_AVAILABILITY_RE = re.compile(
+    r"\b(?:not\s+available\s+to\s+the\s+ai|not\s+available\s+for\s+inspection|unavailable\s+to\s+the\s+ai|report\s+was\s+not\s+available)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_attribution(speaker: str | None) -> tuple[ClaimAttribution, EvidenceStatus]:
+    """Classify the attribution and initial evidence status based on the speaker role."""
     if not speaker:
-        return ClaimAttribution.UNKNOWN
+        return ClaimAttribution.AUDITOR_OBSERVED, EvidenceStatus.VERIFIED
+    if _AUDITOR_SPEAKER_RE.search(speaker):
+        return ClaimAttribution.AUDITOR_OBSERVED, EvidenceStatus.VERIFIED
+    if _SYSTEM_RECORD_SPEAKER_RE.search(speaker):
+        return ClaimAttribution.SYSTEM_EVIDENCE, EvidenceStatus.VERIFIED
     if _SUPERVISOR_RE.search(speaker):
-        return ClaimAttribution.SUPERVISOR_REPORTED
+        return ClaimAttribution.SUPERVISOR_REPORTED, EvidenceStatus.REPORTED
     # Any named person/role reporting is PERSON_REPORTED
-    return ClaimAttribution.PERSON_REPORTED
+    return ClaimAttribution.PERSON_REPORTED, EvidenceStatus.REPORTED
 
 
 def _classify_polarity(text: str) -> str | None:
@@ -235,25 +253,62 @@ def _strip_leading_discourse_connector(text: str) -> str:
 def _extract_single_claim(text: str, counter: int) -> EvidenceClaim:
     """Extract a single claim from a sentence or clause."""
     matchable_text = _strip_leading_discourse_connector(text.strip())
+
+    # Check if this clause is explicitly describing evidence availability
+    if _EVIDENCE_AVAILABILITY_RE.search(matchable_text):
+        return EvidenceClaim(
+            claim_id=f"C{counter}",
+            text=text.strip(),
+            subject=_extract_subject(matchable_text),
+            predicate=matchable_text,
+            source="finding_text",
+            status=EvidenceStatus.VERIFIED,
+            confidence="HIGH",
+            evidence_reference="Evidence availability constraint",
+            attribution=ClaimAttribution.EVIDENCE_AVAILABILITY,
+            polarity=_classify_polarity(matchable_text),
+            source_type="MISSING_REFERENCED_DOCUMENT",
+            statement_status="VERIFIED",
+            underlying_event_status="NOT_APPLICABLE",
+            availability="UNAVAILABLE",
+            document_available=False,
+        )
+
     # Check for attribution patterns
     for pattern in _ATTRIBUTION_PATTERNS:
         m = pattern.match(matchable_text)
         if m:
             speaker = m.group("speaker").strip()
             claim_text = m.group("claim").strip().rstrip(".")
-            attribution = _classify_attribution(speaker)
+            attribution, initial_status = _classify_attribution(speaker)
+            if attribution == ClaimAttribution.SYSTEM_EVIDENCE:
+                src_type = "SYSTEM_RECORD"
+                stmt_status = "VERIFIED"
+                evt_status = "VERIFIED"
+            elif attribution == ClaimAttribution.AUDITOR_OBSERVED:
+                src_type = "AUDIT_OBSERVATION"
+                stmt_status = "VERIFIED"
+                evt_status = "UNKNOWN"
+            else:
+                src_type = "REPORTED_STATEMENT"
+                stmt_status = "REPORTED"
+                evt_status = "UNKNOWN"
+
             return EvidenceClaim(
                 claim_id=f"C{counter}",
                 text=text.strip(),
                 subject=_extract_subject(claim_text),
                 predicate=claim_text,
                 source="finding_text",
-                status=EvidenceStatus.REPORTED,
-                confidence="MEDIUM",
-                evidence_reference="Attributed statement in finding text",
+                status=initial_status,
+                confidence="HIGH" if initial_status == EvidenceStatus.VERIFIED else "MEDIUM",
+                evidence_reference="Auditor finding text" if initial_status == EvidenceStatus.VERIFIED else "Attributed statement in finding text",
                 attribution=attribution,
                 polarity=_classify_polarity(claim_text),
                 speaker=speaker,
+                source_type=src_type,
+                statement_status=stmt_status,
+                underlying_event_status=evt_status,
             )
 
     # No attribution pattern -- this is a direct auditor observation
@@ -268,6 +323,9 @@ def _extract_single_claim(text: str, counter: int) -> EvidenceClaim:
         evidence_reference="Auditor finding text",
         attribution=ClaimAttribution.AUDITOR_OBSERVED,
         polarity=_classify_polarity(text),
+        source_type="AUDIT_OBSERVATION",
+        statement_status="VERIFIED",
+        underlying_event_status="UNKNOWN",
     )
 
 # ---------------------------------------------------------------------------

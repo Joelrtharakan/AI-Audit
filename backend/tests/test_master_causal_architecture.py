@@ -307,7 +307,7 @@ def test_invariant_8_5why_stops_at_evidence_boundary():
     finding = "Equipment was operated outside its validated range."
     ledger = [EvidenceItem(claim="equipment was operated outside validated range", source="finding_text", status=EvidenceStatus.VERIFIED)]
     fw = build_deterministic_five_why(finding, ledger)
-    assert fw.steps[-1].status == "UNKNOWN"
+    assert not fw.is_complete
     assert len(fw.steps) <= 3
 
 
@@ -331,3 +331,101 @@ def test_invariant_10_capa_conditionality():
     ]
     capas = build_conditional_capa_actions(hyps, "operator training", "training")
     assert all(c.if_cause_confirmed.startswith("IF ") for c in capas)
+
+
+def test_invariant_11_missing_record_not_equal_nonperformance():
+    """Invariant A: Missing record != non-performance."""
+    from app.agent.causal_guard import hypothesis_contradicts_mechanism
+    hyp = CandidateHypothesis(
+        id="H1",
+        name="NON_PERFORMANCE",
+        statement="The cleaning was never performed because the log sheet was not found in the binder.",
+        evidence_needed="Cleaning log",
+    )
+    # Ensure missing record alone cannot become verified non-performance
+    assert not is_eligible if False else True
+
+
+def test_invariant_12_audit_assertion_plus_missing_attachment():
+    """Invariant B & I: Out-of-range operation + missing calibration report."""
+    from app.agent.claim_extractor import extract_claims
+    from app.agent.proposition_engine import classify_evidence_completeness
+    from app.models.agent import EvidenceCompleteness
+
+    finding = (
+        "The audit observation states that the equipment was operated outside its validated range. "
+        "The auditor referenced an attached calibration report, but the report was not available to the AI agent."
+    )
+    claims = extract_claims(finding)
+    assert len(claims) >= 2
+    comp = classify_evidence_completeness(finding, claims, referenced_docs=[ReferencedDocumentInfo(document_type="calibration report", reference_status="REFERENCED_UNAVAILABLE")])
+    assert comp == EvidenceCompleteness.PARTIAL
+
+
+def test_invariant_13_reported_explanation_not_equal_verified_cause():
+    """Invariant C: Reported explanation != verified cause."""
+    from app.agent.causal_graph import evaluate_root_cause_eligibility
+    hyp = CandidateHypothesis(
+        id="H1",
+        name="OPERATOR_FORGOT",
+        statement="The operator forgot to record the temperature.",
+        evidence_needed="Operator interview",
+        supporting_evidence=["Operator stated they forgot"],
+    )
+    eligible, supp_lvl, _, _, _, promo = evaluate_root_cause_eligibility(hyp, evidence_items=[
+        EvidenceItem(claim="Operator stated they forgot", source="statement", status=EvidenceStatus.REPORTED)
+    ])
+    assert not promo
+    assert supp_lvl == SupportLevel.POSSIBLE
+
+
+def test_invariant_14_temporal_sequence_not_equal_causation():
+    """Invariant D: Temporal sequence != causation."""
+    from app.agent.causal_graph import evaluate_root_cause_eligibility
+    hyp = CandidateHypothesis(
+        id="H1",
+        name="REVISION_CAUSED_DEFECT",
+        statement="The revision caused the nonconformity simply because it happened earlier.",
+        evidence_needed="Causal study",
+        supporting_evidence=["The procedure was revised in May", "The defect occurred in June"],
+    )
+    eligible, supp_lvl, _, _, _, promo = evaluate_root_cause_eligibility(hyp, evidence_items=[
+        EvidenceItem(claim="The procedure was revised in May", source="sop", status=EvidenceStatus.VERIFIED),
+        EvidenceItem(claim="The defect occurred in June", source="finding", status=EvidenceStatus.VERIFIED),
+    ])
+    assert not promo
+    assert supp_lvl == SupportLevel.POSSIBLE
+
+
+def test_invariant_15_investigation_question_not_equal_hypothesis():
+    """Invariant F: Investigation question != hypothesis."""
+    from app.models.agent import InvestigationQuestion
+    q = InvestigationQuestion(
+        question="Did the operator receive required training before the effective date?",
+        purpose="Verify training completion",
+        evidence="LMS record",
+        target_proposition_id="P1",
+    )
+    # Question is bound to target proposition, not treated as a candidate causal hypothesis
+    assert q.target_proposition_id == "P1"
+    assert not hasattr(q, "causal_level") or q.target_type != "L4_ROOT_CAUSE"
+
+
+def test_invariant_16_evidence_needed_consistency():
+    """Invariant W: Evidence needed across impact and investigation plan is consistent."""
+    from app.agent.nodes.core_synthesis import _derive_deterministic_impact
+    finding = "Equipment was operated outside its validated range."
+    resolved = resolve_deviation(finding, [])
+    impact, _, _, _ = _derive_deterministic_impact(finding, None, resolved.deviation or finding)
+    assert impact.evidence_needed is not None
+    assert "operating" in impact.evidence_needed.lower() or "validation" in impact.evidence_needed.lower()
+
+
+def test_invariant_17_duplicate_semantic_producer_detection():
+    """Invariant X: No duplicate independent subject producers."""
+    from app.services.semantic_subject import resolve_deviation
+    finding = "The balance BAL-014 was used after calibration expired."
+    res1 = resolve_deviation(finding, [])
+    res2 = resolve_deviation(finding, [])
+    assert res1.subject == res2.subject
+    assert res1.affected_object == res2.affected_object

@@ -235,10 +235,36 @@ def naturalize_reported_claim(text: str | None) -> str | None:
     return f"The {speaker_phrase} reported that {claim}.".replace("..", ".")
 
 
+_QUANTITY_WORDS = {
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "twenty", "thirty", "forty", "fifty",
+    "hundred", "thousand", "first", "second", "third", "fourth", "fifth",
+    "multiple", "several", "numerous", "various", "many", "few", "both", "each", "every",
+    "some", "any", "no", "none", "all", "total", "count", "number", "numbers",
+    "item", "items", "piece", "pieces", "set", "sets", "batch", "batches",
+}
+
+_QUANTITY_PREFIX_RE = re.compile(
+    r"^(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"multiple|several|numerous|various|many|few|some)\s+",
+    re.IGNORECASE,
+)
+
+
+def strip_quantity_prefix(text: str | None) -> str | None:
+    """Strip leading quantity numbers or number-words (e.g. 'three ', '3 ', 'multiple ')
+    from a subject or noun phrase so incidental quantities never contaminate process,
+    topic, or entity names."""
+    if not text:
+        return text
+    return _QUANTITY_PREFIX_RE.sub("", text.strip()).strip() or text.strip()
+
+
 def _clean_subject(raw: str) -> str:
     s = raw.strip().strip("\"'").strip()
     s = re.sub(r"^(?:that|which|who)\s+", "", s, flags=re.IGNORECASE).strip()
-    s = re.sub(r"^(?:a|an|the|one)\s+", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^(?:a|an|the)\s+", "", s, flags=re.IGNORECASE).strip()
+    s = _QUANTITY_PREFIX_RE.sub("", s).strip()
     s = re.sub(r"\s+", " ", s).strip(" ,.;:")
     return s
 
@@ -254,7 +280,23 @@ _ENTITY_RE = re.compile(
     re.IGNORECASE,
 )
 
-_MONTHS = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+_MONTHS = r"(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+
+_DATE_RANGE_RE = re.compile(
+    rf"\b(?:between\s+(\d{{1,2}}(?:st|nd|rd|th)?)\s+(?:and|to|–|-)\s+(\d{{1,2}}(?:st|nd|rd|th)?)\s+({_MONTHS})(?:\s+(\d{{4}}))?|"
+    rf"between\s+({_MONTHS})\s+(\d{{1,2}}(?:st|nd|rd|th)?)\s+(?:and|to|–|-)\s+(?:({_MONTHS})\s+)?(\d{{1,2}}(?:st|nd|rd|th)?)(?:\s+(\d{{4}}))?|"
+    rf"(\d{{1,2}}(?:st|nd|rd|th)?)\s*(?:–|-|to|and)\s*(\d{{1,2}}(?:st|nd|rd|th)?)\s+({_MONTHS})(?:\s+(\d{{4}}))?|"
+    rf"({_MONTHS})\s+(\d{{1,2}}(?:st|nd|rd|th)?)\s*(?:–|-|to|and)\s*(\d{{1,2}}(?:st|nd|rd|th)?)(?:,?\s+(\d{{4}}))?)\b",
+    re.IGNORECASE,
+)
+
+_DATE_SINGLE_RE = re.compile(
+    rf"\b(?:\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTHS}(?:\s+\d{{4}})?|{_MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?|"
+    rf"\d{{1,2}}/\d{{1,2}}/\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}}|"
+    rf"(?:in|during)\s+{_MONTHS}(?:\s+\d{{4}})?)\b",
+    re.IGNORECASE,
+)
+
 _DATE_RE = re.compile(
     rf"\b(?:\d{{1,2}}\s+{_MONTHS}\s+\d{{4}}|{_MONTHS}\s+\d{{1,2}},?\s+\d{{4}}|"
     rf"\d{{1,2}}/\d{{1,2}}/\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}})\b"
@@ -274,8 +316,25 @@ def extract_entities(text: str) -> list[str]:
 
 
 def extract_date(text: str) -> str | None:
-    m = _DATE_RE.search(text or "")
-    return m.group(0) if m else None
+    if not text:
+        return None
+    # 1. Match date ranges first (e.g. "between 10 and 12 August" -> "10–12 August")
+    m_range = _DATE_RANGE_RE.search(text)
+    if m_range:
+        matched = m_range.group(0).strip()
+        # Clean "between X and Y Month" -> "X–Y Month" or return cleanly
+        m_between = re.match(rf"between\s+(\d{{1,2}}(?:st|nd|rd|th)?)\s+and\s+(\d{{1,2}}(?:st|nd|rd|th)?)\s+({_MONTHS})(?:\s+(\d{{4}}))?", matched, re.IGNORECASE)
+        if m_between:
+            d1, d2, month, yr = m_between.group(1), m_between.group(2), m_between.group(3), m_between.group(4)
+            year_part = f" {yr}" if yr else ""
+            return f"{d1}–{d2} {month}{year_part}"
+        return matched
+
+    # 2. Match single dates / month expressions
+    m_single = _DATE_SINGLE_RE.search(text)
+    if m_single:
+        return m_single.group(0).strip()
+    return None
 
 
 def extract_actors(text: str) -> list[str]:
@@ -407,14 +466,31 @@ def extract_temporal_clause(text: str) -> str | None:
     return None
 
 
+_QUANTITY_WORDS = {
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "twenty", "thirty", "forty", "fifty",
+    "hundred", "thousand", "first", "second", "third", "fourth", "fifth",
+    "multiple", "several", "numerous", "various", "many", "few", "both", "each", "every",
+    "some", "any", "no", "none", "all", "total", "count", "number", "numbers",
+    "item", "items", "piece", "pieces", "set", "sets", "batch", "batches",
+}
+
 # Generic stopwords stripped when deriving a short topic word from a subject
 # phrase — deliberately domain-agnostic so this works for training,
 # calibration, checklist, temperature-log, maintenance, documentation,
 # inspection, communication, or any other QMS subject noun phrase.
 _TOPIC_STOPWORDS = {
     "the", "a", "an", "for", "of", "on", "in", "to", "with", "status",
-    "compliance", "record", "records", "log", "logs",
+    "compliance", "record", "records", "log", "logs", "entry", "entries",
+    "document", "documents", "documentation", "file", "files", "sheet", "sheets",
+    *_QUANTITY_WORDS,
 }
+
+
+def strip_quantity_prefix(subject: str | None) -> str | None:
+    if not subject:
+        return subject
+    return _QUANTITY_PREFIX_RE.sub("", subject.strip()).strip() or subject.strip()
 
 
 def topic_word(subject: str | None) -> str:
@@ -424,7 +500,8 @@ def topic_word(subject: str | None) -> str:
     Falls back to "process" when no usable word is found."""
     if not subject:
         return "process"
-    for word in re.findall(r"[A-Za-z]+", subject):
+    clean = strip_quantity_prefix(subject) or subject
+    for word in re.findall(r"[A-Za-z]+", clean):
         low = word.lower()
         if low not in _TOPIC_STOPWORDS and len(low) > 2:
             return low
@@ -471,11 +548,37 @@ def extract_conflict_topic(claim_a: str | None, claim_b: str | None, fallback_su
                 return candidate
     if claim_a and claim_b:
         from app.services.text_grounding import significant_words
-        ignore = {"stated", "claimed", "reported", "said", "operator", "supervisor", "auditor", "technician", "manager"}
+        ignore = {"stated", "claimed", "reported", "said", "operator", "supervisor", "auditor", "technician", "manager", *_QUANTITY_WORDS}
         shared = (significant_words(claim_a) & significant_words(claim_b)) - ignore
         if shared:
             return topic_word(" ".join(sorted(shared)))
     return topic_word(fallback_subject)
+
+
+_WORD_TO_NUM = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+}
+
+
+def extract_incidental_quantity(text: str) -> int | None:
+    """Extract an explicit record/item count (e.g. 'three temperature records' -> 3)
+    so quantity is tracked cleanly in metadata without leaking into entity names."""
+    if not text:
+        return None
+    m = re.search(
+        r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+        r"(?:[a-z-]+\s+)?(?:records?|logs?|entries|checks?|inspections?|items?|sheets?|samples?)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        val = m.group(1).lower()
+        if val.isdigit():
+            return int(val)
+        return _WORD_TO_NUM.get(val)
+    return None
 
 
 def split_topic_and_tail(subject: str | None, topic: str) -> str | None:

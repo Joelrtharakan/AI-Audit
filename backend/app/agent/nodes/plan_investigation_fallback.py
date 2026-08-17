@@ -189,52 +189,67 @@ def build_deterministic_investigation_plan(
             subject_cap = subject[0].upper() + subject[1:] if subject else "the affected communication"
             dr_questions = [
                 InvestigationQuestion(
+                    question_id="Q1_DELIVERY_COMPLETED",
                     question=(
-                        f"Do system records establish successful delivery of {subject} to each affected "
-                        "recipient, including recipient identity, destination, timestamp, and delivery status?"
+                        f"Do system records establish that delivery of {subject} was completed, "
+                        "including recipient identity, destination address, timestamp, and delivery status?"
                     ),
-                    purpose="Verify the delivery-side record in full detail, not merely that a record exists",
+                    purpose="Verify delivery-side completion details",
                     evidence=f"System delivery log for {subject}, including per-recipient status",
+                    target_type="PROPOSITION",
+                    target_proposition_id="P_DELIVERY",
                 ),
                 InvestigationQuestion(
+                    question_id="Q2_RECEIPT_VERIFIED",
                     question=(
                         f"Do independent records establish whether the affected recipients actually received "
                         f"or accessed {subject}{temporal_suffix}?"
                     ),
-                    purpose="Resolves the conflict: whether the delivery-side record matches actual receipt",
+                    purpose="Establish whether delivery resulted in actual recipient receipt or access",
                     evidence=f"Independent receipt/access confirmation for {subject} (e.g. read receipts, access logs)",
+                    target_type="PROPOSITION",
+                    target_proposition_id="P_RECEIPT",
                 ),
                 InvestigationQuestion(
-                    question=f"Do read, access, acknowledgement, or confirmation records exist for {subject}?",
-                    purpose="Establish whether an acknowledgement/confirmation mechanism exists and what it shows",
-                    evidence=f"Acknowledgement/confirmation records for {subject}",
+                    question_id="Q3_ACKNOWLEDGEMENT_STATUS",
+                    question=f"Was acknowledgement or confirmation mandatory before proceeding with tasks governed by {subject}, and do read, access, or acknowledgement records confirm it was completed?",
+                    purpose="Establish whether formal acknowledgement was required and completed",
+                    evidence=f"Applicable procedure and acknowledgement/confirmation records for {subject}",
+                    target_type="PROPOSITION",
+                    target_proposition_id="P_REQ_ACK",
                 ),
                 InvestigationQuestion(
+                    question_id="Q5_ACTION_PRIOR_TO_ACK",
                     question=(
-                        "Did any account, address, notification-channel, system, or access issue affect "
-                        f"delivery or receipt for the affected recipients{temporal_suffix}?"
+                        f"Were the affected recipients required or permitted to act on {subject} before "
+                        "receipt or acknowledgement was confirmed?"
                     ),
-                    purpose="Identify a possible technical/administrative cause without presuming one occurred",
-                    evidence="Account/address/channel/system configuration and error logs for the affected recipients",
-                ),
-                InvestigationQuestion(
-                    question=(
-                        f"Were the affected recipients required to act on {subject} before receipt or "
-                        "acknowledgement was confirmed?"
-                    ),
-                    purpose="Determine whether any activity may have occurred before the conflict was resolved",
+                    purpose="Determine whether operational activity occurred prior to confirmed receipt",
                     evidence=f"Records of activity performed by the affected recipients relative to {subject}",
+                    target_type="PROPOSITION",
+                    target_proposition_id="P_ACTION",
+                ),
+                InvestigationQuestion(
+                    question_id="Q5_FAILURE_MECHANISM",
+                    question=(
+                        "If non-delivery or non-receipt occurred, do channel error logs or recipient account records "
+                        f"establish the specific technical or administrative mechanism{temporal_suffix}?"
+                    ),
+                    purpose="Identify an established mechanism if receipt did not occur",
+                    evidence="Channel error logs, transmission diagnostics, and recipient account configuration",
+                    target_type="PROPOSITION",
+                    target_proposition_id="P_MECHANISM",
                 ),
             ]
             dr_evidence = [
                 f"System delivery log for {subject}",
                 f"Independent receipt/access confirmation for {subject}",
                 f"Acknowledgement/confirmation records for {subject}",
-                "Account/address/channel/system configuration and error logs",
+                "Channel error logs and transmission diagnostics",
             ]
             dr_areas = [
-                f"{subject_cap} delivery and receipt reconciliation",
-                f"{subject_cap} acknowledgement and confirmation records",
+                f"{subject_cap} delivery, receipt and acknowledgement control",
+                f"Operational activity relative to {subject}",
                 "Technical/administrative factors affecting delivery or receipt",
             ]
             return [], InvestigationPlan(
@@ -591,58 +606,143 @@ def build_deterministic_investigation_plan(
             f"Downstream impact of the {subject_bare or subject} condition" if not subject_has_status_word
             else f"Downstream impact of the {subject}",
         ]
-        questions.extend([
-            InvestigationQuestion(
-                question=f"What procedure or requirement governs {subject}, and what does it require in the "
-                "circumstances described in this finding?",
-                purpose="Establish the applicable requirement before evaluating whether it was met",
-                evidence=f"Applicable procedure/requirement governing {subject}",
-            ),
-            InvestigationQuestion(
-                question=f"What records establish the actual status of {subject_bare} at the time relevant to this finding?",
-                purpose="Establish the objective status/history, not merely what the finding itself states",
-                evidence=f"Status/history records for {subject}",
-            ),
-            InvestigationQuestion(
-                question=f"Did any approved exception, extension, waiver, or deviation apply to {subject} "
-                "during the relevant period?",
-                purpose="Determine whether an authorized departure from the normal requirement existed",
-                evidence=f"Exception/waiver/deviation records for {subject}",
-            ),
-            InvestigationQuestion(
-                question=f"What process or role was responsible for monitoring and controlling {subject}?",
-                purpose="Identify the control point relevant to further investigation, without presupposing it failed",
-                evidence=f"Process ownership and responsibility records for {subject}",
-            ),
-            InvestigationQuestion(
-                question=f"What downstream activities, decisions, or outputs depended on {subject}, and would "
-                "require assessment if the condition described in this finding is confirmed?",
-                purpose="Scope potential downstream impact for assessment, without asserting impact occurred",
-                evidence=f"Records of activities/decisions dependent on {subject}",
-            ),
-        ])
+        is_operating_range_deviation = bool(re.search(
+            r"\b(?:operated|used|run|performed)\s+outside\b|\b(?:validated|operating)\s+(?:range|limit|parameters?)\b",
+            f"{finding_text} {resolved.condition or ''}",
+            re.IGNORECASE,
+        ))
+
+        _control_proof_pattern = re.compile(
+            r"\b(?:interlock|block|guard|safety|verification)\b.*?\b(?:disabled|bypassed|defeated|deactivated|switched off)\b|"
+            r"\b(?:audit\s+logs?|server\s+logs?)\s+(?:establish|show|confirm)\b",
+            re.IGNORECASE,
+        )
+        has_direct_control_proof = bool(_control_proof_pattern.search(finding_text))
+        if has_direct_control_proof:
+            # Provenance enforcement applies to every hypothesis producer,
+            # not only the LLM-parsed path (core_synthesis._parse_causal_fields):
+            # a SUPPORTED hypothesis must cite the verified claim(s) that
+            # actually establish the control/interlock disablement it names,
+            # never assert support with an empty evidence list.
+            _citing_claims = [c for c in fact_claims if _control_proof_pattern.search(c)] or fact_claims
+            h1 = CandidateHypothesis(
+                id="H1",
+                name="CONTROL_OR_INTERLOCK_DISABLED",
+                statement=f"The operating control or interlock for {subject} was disabled prior to operation, permitting the out-of-range condition.",
+                status="SUPPORTED",
+                evidence_needed="SCADA/system audit trail records",
+                confirms_if="System audit trail records confirm the interlock or safety control was disabled",
+                refutes_if="System audit trail records confirm all interlocks remained active",
+                discrimination_evidence="Distinguishes active control bypass from operational parameter drift",
+                supporting_evidence=_citing_claims,
+                evidence_strength="VERIFIED" if _citing_claims else "NONE",
+                relevance_rank="HIGH",
+            )
+            hypotheses.append(h1)
+
+        if is_operating_range_deviation:
+            plan_areas = [
+                f"{subject_cap} operating range validation and limits",
+                f"{subject_cap} operational records and actual operating conditions",
+                f"{subject_cap} range controls and operational mechanism",
+            ]
+            questions.extend([
+                InvestigationQuestion(
+                    question=f"What approved validation or qualification record defines the permitted operating range for {subject}?",
+                    purpose="Establish the approved specification and validated range requirements before assessing operation",
+                    evidence=f"Approved validation protocol/report and qualification records for {subject}",
+                ),
+                InvestigationQuestion(
+                    question=f"What objective operating records establish the actual operating condition of {subject} during the affected period?",
+                    purpose="Establish the objective operating parameter records, not merely what the finding text states",
+                    evidence=f"Equipment operating logs, SCADA/historian records, and batch execution records for {subject}",
+                ),
+                InvestigationQuestion(
+                    question=f"Was any approved exception, deviation, extension, or authorization applicable to operation of {subject} outside the validated range?",
+                    purpose="Determine whether an authorized departure from standard operating limits existed",
+                    evidence=f"Approved deviation, waiver, or planned exception records for {subject}",
+                ),
+                InvestigationQuestion(
+                    question=f"What control was required to prevent or detect operation of {subject} outside the validated range, and what records show that control operated?",
+                    purpose="Identify the active operational interlock, alarm, or procedural control point",
+                    evidence=f"Control system logs, interlock verification records, and alarm audit trails for {subject}",
+                ),
+                InvestigationQuestion(
+                    question=f"What objective evidence establishes the mechanism that allowed {subject} to be operated outside the validated range?",
+                    purpose="Identify the specific operational or mechanical mechanism if operation outside limits occurred",
+                    evidence=f"Parameter trends, operator run logs, and control failure records for {subject}",
+                ),
+            ])
+        else:
+            questions.extend([
+                InvestigationQuestion(
+                    question=f"What procedure or requirement governs {subject}, and what does it require in the "
+                    "circumstances described in this finding?",
+                    purpose="Establish the applicable requirement before evaluating whether it was met",
+                    evidence=f"Applicable procedure/requirement governing {subject}",
+                ),
+                InvestigationQuestion(
+                    question=f"What records establish the actual status of {subject_bare} at the time relevant to this finding?",
+                    purpose="Establish the objective status/history, not merely what the finding itself states",
+                    evidence=f"Status/history records for {subject}",
+                ),
+                InvestigationQuestion(
+                    question=f"Did any approved exception, extension, waiver, or deviation apply to {subject} "
+                    "during the relevant period?",
+                    purpose="Determine whether an authorized departure from the normal requirement existed",
+                    evidence=f"Exception/waiver/deviation records for {subject}",
+                ),
+                InvestigationQuestion(
+                    question=f"What process or role was responsible for monitoring and controlling {subject}?",
+                    purpose="Identify the control point relevant to further investigation, without presupposing it failed",
+                    evidence=f"Process ownership and responsibility records for {subject}",
+                ),
+                InvestigationQuestion(
+                    question=f"What downstream activities, decisions, or outputs depended on {subject}, and would "
+                    "require assessment if the condition described in this finding is confirmed?",
+                    purpose="Scope potential downstream impact for assessment, without asserting impact occurred",
+                    evidence=f"Records of activities/decisions dependent on {subject}",
+                ),
+            ])
         evidence_items.extend([
             f"Applicable procedure/requirement governing {subject}",
             f"Status/history records for {subject}",
             f"Exception/waiver/deviation records for {subject}",
         ])
 
-    # RECURRENCE (Section 8/28): mandatory additional hypothesis whenever a
-    # similar finding was previously identified — appended after whichever
-    # branch above fired, never in place of it, since recurrence is an
-    # additional causal dimension (did the previous CAPA actually prevent
-    # this), not a replacement for reasoning about the current deviation.
+    # Filter out any evidence-state propositions from hypotheses
+    from app.agent.causal_guard import is_evidence_state_not_hypothesis
+    hypotheses = [h for h in hypotheses if not is_evidence_state_not_hypothesis(h.statement, h.name)]
+
+    # RECURRENCE: mandatory investigation questions and areas when recurrence is detected
     from app.agent.recurrence_guard import detect_recurrence
     recurrence = detect_recurrence(finding_text)
-    if recurrence.is_recurring and hypotheses:
+    if recurrence.is_recurring:
         recurrence_topic = topic_word(subject)
-        recurrence_hyps = build_recurrence_hypotheses(subject, recurrence_topic, len(hypotheses) + 1)
-        hypotheses.extend(recurrence_hyps)
-        questions.extend(build_recurrence_investigation_questions(subject, recurrence_topic, recurrence_hyps))
-        recurrence_area = f"{recurrence_topic[0].upper()}{recurrence_topic[1:]} CAPA implementation and effectiveness verification"
-        if recurrence_area not in plan_areas:
-            plan_areas = [*plan_areas, recurrence_area]
-        evidence_items.extend(h.evidence_needed for h in recurrence_hyps)
+        questions.extend(build_recurrence_investigation_questions(subject, recurrence_topic))
+        plan_areas = [
+            *plan_areas,
+            f"{recurrence_topic[0].upper()}{recurrence_topic[1:]} previous CAPA implementation and effectiveness verification",
+            f"Causal relationship between previous {recurrence_topic} CAPA and current deviation",
+        ]
+        evidence_items.extend([
+            f"Previous {recurrence_topic} corrective action plan and implementation completion evidence",
+            f"Previous {recurrence_topic} corrective action effectiveness review and verification records",
+            f"Root cause analysis and scope documentation from previous {recurrence_topic} CAPA",
+        ])
+
+    # Standardize all question fields to satisfy Section 5 schema
+    for i, q in enumerate(questions):
+        if not q.id:
+            q.id = f"Q{i+1}"
+        if not q.target_proposition_id:
+            q.target_proposition_id = f"P{i+1}"
+        if not q.resolves:
+            q.resolves = q.purpose or f"Resolves proposition {q.target_proposition_id}"
+        if not q.evidence_required:
+            q.evidence_required = q.evidence or "Applicable objective records"
+        if not q.decision_rule:
+            q.decision_rule = "Evaluate objective evidence to confirm or refute the target proposition"
 
     # Build investigation plan
     investigation_plan = InvestigationPlan(
@@ -788,157 +888,85 @@ def build_conditional_capa_actions(
     return actions
 
 
-def build_recurrence_hypotheses(subject: str, topic: str, start_id: int) -> list[CandidateHypothesis]:
-    """Builds the mandatory RECURRENCE hypothesis set when a similar finding
-    was previously identified (Section 8/9, and the current-turn Section 2).
-
-    RECURRENCE (a similar finding happened again) and CAPA INEFFECTIVENESS
-    (the previous corrective action failed to work) are two distinct facts,
-    and "the previous CAPA was completed" proves neither non-implementation,
-    non-verification, nor ineffectiveness on its own. So recurrence is never
-    collapsed into a single "CAPA effectiveness gap" hypothesis -- it is
-    split into three mutually exclusive mechanisms, each with its own
-    evidence and CAPA mapping, so status determination never has to average
-    across them into a false SUPPORTED:
-
-      H_REC_1 -- the previous corrective action was never fully implemented.
-      H_REC_2 -- it was implemented, but effectiveness was never verified.
-      H_REC_3 -- it was implemented AND verified effective, yet the same or
-                 a similar nonconformity still recurred (verified-but-failed).
-
-    All three start UNRESOLVED (POSSIBLE) -- never SUPPORTED -- because
-    recurrence plus prior completion is evidence that ONE of these three is
-    true, not evidence for any single one of them.
-    """
-    id1, id2, id3 = f"H{start_id}", f"H{start_id + 1}", f"H{start_id + 2}"
-    h_rec_1 = CandidateHypothesis(
-        id=id1,
-        name=f"{topic.upper()}_PREVIOUS_CAPA_NOT_FULLY_IMPLEMENTED",
-        statement=(
-            f"The corrective action from the previous {topic}-related finding for {subject} was not "
-            "fully implemented before this finding occurred."
-        ),
-        status="POSSIBLE",
-        evidence_needed=f"Previous {topic} corrective action plan and implementation completion evidence",
-        confirms_if=(
-            "Implementation records show the previous corrective action was not completed, was only "
-            "partially completed, or was closed without completing its planned actions"
-        ),
-        refutes_if="Implementation records show the previous corrective action's planned actions were fully completed",
-        discrimination_evidence=(
-            f"An implementation completion record for the previous corrective action weakens {id1}. "
-            f"An incomplete, partial, or missing implementation record supports {id1}."
-        ),
-        rationale=(
-            "Plausible because a similar finding was previously identified and the prior corrective "
-            "action was recorded as completed, but whether its planned implementation actions were "
-            "actually carried out has not been established from the available evidence."
-        ),
-        relevance_rank="HIGH",
-    )
-    h_rec_2 = CandidateHypothesis(
-        id=id2,
-        name=f"{topic.upper()}_PREVIOUS_CAPA_EFFECTIVENESS_NOT_VERIFIED",
-        statement=(
-            f"The corrective action from the previous {topic}-related finding for {subject} was "
-            "implemented, but its effectiveness was never objectively verified."
-        ),
-        status="POSSIBLE",
-        evidence_needed=f"Previous {topic} corrective action effectiveness review or verification record",
-        confirms_if="No effectiveness review or verification record exists for the previous corrective action",
-        refutes_if="An effectiveness review or verification record exists for the previous corrective action",
-        discrimination_evidence=(
-            f"An effectiveness review or verification record weakens {id2}. The absence of any such "
-            f"record supports {id2}."
-        ),
-        rationale=(
-            "Plausible because the previous corrective action was recorded as completed, but completion "
-            "does not itself establish that effectiveness was verified -- that is a separate, unestablished "
-            "fact."
-        ),
-        relevance_rank="HIGH",
-    )
-    h_rec_3 = CandidateHypothesis(
-        id=id3,
-        name=f"{topic.upper()}_PREVIOUS_CAPA_VERIFIED_BUT_INEFFECTIVE",
-        statement=(
-            f"The corrective action from the previous {topic}-related finding for {subject} was "
-            "implemented and objectively verified as effective, but the same or a similar nonconformity "
-            "still recurred."
-        ),
-        status="POSSIBLE",
-        evidence_needed=f"Previous {topic} corrective action effectiveness review and current recurrence evidence",
-        confirms_if=(
-            "An effectiveness review verified the previous corrective action as effective, and this "
-            "finding nonetheless describes the same or a similar nonconformity"
-        ),
-        refutes_if="No effectiveness review verified the previous corrective action as effective",
-        discrimination_evidence=(
-            f"The combination of a documented effectiveness verification AND a recurrence of the same or "
-            f"a similar nonconformity supports {id3}; absence of a prior effectiveness verification "
-            f"weakens {id3} (in favor of {id2})."
-        ),
-        rationale=(
-            "Plausible only if a documented effectiveness verification exists for the previous corrective "
-            "action -- if it does not, this mechanism cannot be distinguished from unverified "
-            f"effectiveness ({id2})."
-        ),
-        relevance_rank="MEDIUM",
-    )
-    return [h_rec_1, h_rec_2, h_rec_3]
-
-
 def build_recurrence_investigation_questions(
-    subject: str, topic: str, hypotheses: list[CandidateHypothesis]
+    subject: str, topic: str, hypotheses: list[CandidateHypothesis] | None = None
 ) -> list[InvestigationQuestion]:
-    """One well-formed, single-proposition investigation question per
-    recurrence hypothesis (Section 7/28, and current-turn Section 12-14) --
-    never one compound question covering all three mechanisms at once."""
-    h_rec_1, h_rec_2, h_rec_3 = hypotheses
+    """Structured conditional CAPA lifecycle investigation questions covering:
+      1. Implementation verification
+      2. Effectiveness requirement and definition
+      3. Effectiveness objective verification
+      4. Scope comparison
+      5. Mechanism equivalence and causal linkage
+    """
     return [
         InvestigationQuestion(
-            question=(
-                f"Was the corrective action from the previous {topic}-related finding for {subject} "
-                "fully implemented?"
-            ),
-            purpose=f"Resolves {h_rec_1.id} — whether the previous CAPA's planned actions were actually carried out",
-            evidence=f"Previous {topic} corrective action plan and implementation completion evidence",
-            hypothesis_tested=h_rec_1.id,
-            confirms_if=h_rec_1.confirms_if,
-            refutes_if=h_rec_1.refutes_if,
+            id="Q_REC_1",
+            target_proposition_id="P_REC_1",
+            question=f"What objective records establish whether the actions required by the previous {topic} CAPA were fully implemented?",
+            purpose="Determine whether the previous corrective action was fully implemented before this finding occurred",
+            resolves="Implementation status of previous corrective action",
+            evidence=f"Previous {topic} CAPA action plan and implementation completion evidence",
+            evidence_required=f"Previous {topic} CAPA action plan and implementation completion evidence",
+            decision_rule="If implementation records show actions were not completed or partial → implementation gap is possible; if fully completed → proceed to effectiveness verification.",
             possible_outcomes=[
-                "Implementation completion record found → hypothesis weakened.",
-                "No implementation completion record, or implementation was partial → hypothesis strengthened.",
+                "Implementation completion record found → proceed to effectiveness review verification.",
+                "No implementation completion record, or implementation was partial → implementation gap supported.",
             ],
         ),
         InvestigationQuestion(
-            question=(
-                f"Was the effectiveness of the previous corrective action for {subject} objectively "
-                "verified?"
-            ),
-            purpose=f"Resolves {h_rec_2.id} — whether an effectiveness review or verification record exists",
-            evidence=f"Previous {topic} corrective action effectiveness review or verification record",
-            hypothesis_tested=h_rec_2.id,
-            confirms_if=h_rec_2.confirms_if,
-            refutes_if=h_rec_2.refutes_if,
+            id="Q_REC_2",
+            target_proposition_id="P_REC_2",
+            question=f"Did the previous {topic} CAPA require an effectiveness review, and what effectiveness criterion was defined?",
+            purpose="Establish whether effectiveness verification was mandatory and what specific success criterion governed it",
+            resolves="Effectiveness verification requirement and criterion",
+            evidence=f"Previous {topic} CAPA plan, procedure requirements, and approved effectiveness criteria",
+            evidence_required=f"Previous {topic} CAPA plan and approved effectiveness criteria",
+            decision_rule="If effectiveness review was not required → do not evaluate effectiveness failure; if required → proceed to verification records.",
             possible_outcomes=[
-                "Effectiveness review or verification record found → hypothesis weakened.",
-                "No effectiveness review or verification record exists → hypothesis strengthened.",
+                "Effectiveness criterion defined → evaluate verification records against criterion.",
+                "Effectiveness review not required → effectiveness-verification failure is not applicable.",
             ],
         ),
         InvestigationQuestion(
-            question=(
-                f"If the previous corrective action for {subject} was verified effective, why did the "
-                "same or a similar nonconformity still recur?"
-            ),
-            purpose=f"Resolves {h_rec_3.id} — whether a verified-effective action nonetheless failed to prevent recurrence",
-            evidence=f"Previous {topic} corrective action effectiveness review and current recurrence evidence",
-            hypothesis_tested=h_rec_3.id,
-            confirms_if=h_rec_3.confirms_if,
-            refutes_if=h_rec_3.refutes_if,
+            id="Q_REC_3",
+            target_proposition_id="P_REC_3",
+            question=f"What objective record establishes whether the previous {topic} CAPA satisfied its defined effectiveness criterion?",
+            purpose="Determine whether an objective effectiveness verification was conducted and met the defined criterion",
+            resolves="Effectiveness verification status and criteria satisfaction",
+            evidence=f"Previous {topic} CAPA effectiveness review records, audit trail, and evaluation results",
+            evidence_required=f"Previous {topic} CAPA effectiveness review records and evaluation results",
+            decision_rule="If no effectiveness review exists when required → effectiveness verification gap; if verified effective → proceed to scope comparison.",
             possible_outcomes=[
-                "No prior effectiveness verification exists → hypothesis not applicable, see H_REC_2.",
-                "Prior effectiveness verification exists and recurrence is confirmed → hypothesis strengthened.",
+                "Effectiveness review verified against criteria → proceed to scope comparison.",
+                "No effectiveness review exists or criteria not satisfied → effectiveness verification gap supported.",
+            ],
+        ),
+        InvestigationQuestion(
+            id="Q_REC_4",
+            target_proposition_id="P_REC_4",
+            question=f"Does the current finding fall within the scope of the previous {topic} CAPA?",
+            purpose="Evaluate whether the current equipment/process/condition was covered by the previous CAPA boundary",
+            resolves="Applicability scope of previous CAPA to current finding",
+            evidence=f"Previous {topic} CAPA scope definition and current finding operational scope",
+            evidence_required=f"Previous {topic} CAPA scope definition and current finding operational scope",
+            decision_rule="If current finding is outside previous CAPA scope → previous CAPA is not related to this deviation; if within scope → proceed to mechanism equivalence.",
+            possible_outcomes=[
+                "Current finding outside scope → previous CAPA not applicable to this finding.",
+                "Current finding within scope → proceed to causal mechanism comparison.",
+            ],
+        ),
+        InvestigationQuestion(
+            id="Q_REC_5",
+            target_proposition_id="P_REC_5",
+            question=f"What objective evidence establishes whether the current deviation represents recurrence of the same causal mechanism addressed by the previous {topic} CAPA?",
+            purpose="Determine whether the underlying causal mechanism is identical to the mechanism addressed by the previous CAPA",
+            resolves="Causal mechanism equivalence between previous CAPA and current deviation",
+            evidence=f"Previous {topic} CAPA root cause analysis compared with current deviation mechanism evidence",
+            evidence_required=f"Previous {topic} CAPA root cause analysis and current mechanism evidence",
+            decision_rule="If mechanisms differ → previous CAPA did not cause current deviation; if identical mechanism and scope → CAPA ineffectiveness hypothesis may be evaluated.",
+            possible_outcomes=[
+                "Different mechanism → previous CAPA is not causally connected to current deviation.",
+                "Identical mechanism and within scope → genuine recurrence of previously addressed failure mechanism.",
             ],
         ),
     ]
