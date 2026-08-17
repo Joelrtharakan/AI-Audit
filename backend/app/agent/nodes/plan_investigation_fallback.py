@@ -27,11 +27,65 @@ from app.services.semantic_subject import (
 )
 
 
+_DEGRADED_SUBJECTS = {"process compliance", None, ""}
+
+# Structural (verb-object, not keyword-list) extraction of what a
+# transmission-shaped sentence ("System shows email delivered", "Access log
+# shows document opened") is actually about -- used only as a last resort
+# when neither the primary structural resolver nor the entity extractor
+# recognized a DELIVERY_VS_RECEIPT finding's subject (e.g. "email"/
+# "document" aren't in the generic keyword-priority fallback's list). Never
+# used to override a subject the primary resolver already found.
+# Tier 1: reporting/recording verbs ("shows", "indicates", "records",
+# "confirms") -- checked first since these essentially never double as a
+# leading noun-modifier the way "access"/"open"/"send" can ("Access log
+# shows..." -- "Access" collides with the transmission verb "access" when
+# scanned bag-of-words, capturing "log" instead of the actual object
+# "document" later in the sentence).
+_REPORTING_OBJECT_RE = re.compile(
+    r"\b(?:shows?|indicat\w*|records?|confirms?)\s+(?:that\s+)?(?:the\s+|an?\s+)?([a-z][\w-]*)\b",
+    re.IGNORECASE,
+)
+# Tier 2: broader transmission-verb fallback, only used when tier 1 finds
+# nothing.
+_TRANSMISSION_OBJECT_RE = re.compile(
+    r"\b(?:deliver\w*|sen[dt]\w*|receiv\w*|access\w*|open\w*|retriev\w*|transmit\w*)\s+"
+    r"(?:that\s+)?(?:the\s+|an?\s+)?([a-z][\w-]*)\b",
+    re.IGNORECASE,
+)
+_TRANSMISSION_OBJECT_STOPWORDS = {
+    "that", "the", "a", "an", "it", "this", "successfully", "never", "not",
+    "was", "were", "is", "are", "has", "have", "been",
+}
+
+
+def _extract_transmission_object(text: str) -> str | None:
+    for pattern in (_REPORTING_OBJECT_RE, _TRANSMISSION_OBJECT_RE):
+        for match in pattern.finditer(text or ""):
+            candidate = match.group(1).lower()
+            if candidate not in _TRANSMISSION_OBJECT_STOPWORDS and len(candidate) > 2:
+                return candidate
+    return None
+
+
 def build_deterministic_investigation_plan(
     finding_text: str,
     evidence_ledger: list[EvidenceItem],
+    canonical_subject: str | None = None,
 ) -> tuple[list[CandidateHypothesis], InvestigationPlan]:
-    """Build dynamic, case-grounded hypotheses and discriminating investigation questions."""
+    """Build dynamic, case-grounded hypotheses and discriminating investigation questions.
+
+    `canonical_subject` (understand_finding_node's already-resolved
+    `canonical_finding_state.finding_subject`) is preferred over this
+    function's own independent `resolve_deviation()` call whenever it is
+    available and not itself degraded -- there must be ONE authoritative
+    semantic-subject producer for a finding, not two that can silently
+    disagree (Section 20: "canonical.finding_subject must remain the
+    authoritative semantic source... Do not independently re-derive
+    semantic subjects"). Defaults to None so every existing call site
+    (production and test) keeps its current behavior unchanged unless it
+    explicitly opts in.
+    """
     hypotheses: list[CandidateHypothesis] = []
     questions: list[InvestigationQuestion] = []
     evidence_items: list[str] = []
@@ -47,7 +101,10 @@ def build_deterministic_investigation_plan(
     fact_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
     resolved = resolve_deviation(finding_text, fact_claims)
-    subject = resolved.finding_subject or resolved.subject or "the affected process"
+    if canonical_subject and canonical_subject not in _DEGRADED_SUBJECTS:
+        subject = canonical_subject
+    else:
+        subject = resolved.finding_subject or resolved.subject or "the affected process"
     actor = resolved.actor
 
     if extracted_id and extracted_id not in subject:
@@ -98,6 +155,93 @@ def build_deterministic_investigation_plan(
             conflict_claims_by_id.get(conflict_claim_ids[1]) if len(conflict_claim_ids) > 1 and conflict_claim_ids[1] in conflict_claims_by_id
             else (reported_texts[1] if len(reported_texts) > 1 else f"another party reported that {subject} was completed")
         )
+
+        # DELIVERY_VS_RECEIPT (Conflict-Center hardening): a conflict between
+        # a system/record asserting something was delivered/sent/accessed and
+        # a person reporting they never received/accessed it is NOT a
+        # completion dispute -- collapsing it into a "{TOPIC}_NOT_COMPLETED"
+        # hypothesis (the branch below, built for training/maintenance-style
+        # "was the activity done" conflicts) fabricates a specific failure
+        # mode (delivery/notification/acknowledgement failure) the evidence
+        # never actually establishes. DELIVERY, RECEIPT, ACCESS, and
+        # ACKNOWLEDGEMENT are distinct propositions (Section 2) -- this
+        # branch preserves both sides, generates evidence-discriminating
+        # questions that investigate the conflict without presupposing
+        # either side, and returns ZERO hypotheses so root cause stays
+        # NOT_ESTABLISHED / leading hypothesis stays NONE until independent
+        # evidence resolves the conflict.
+        if getattr(primary_conflict, "proposition_type", None) == "DELIVERY_VS_RECEIPT":
+            # `subject` (the finding's OVERALL resolved subject) can itself
+            # be the degraded "process compliance" placeholder when neither
+            # the structural condition patterns nor the entity/keyword
+            # fallback recognized the finding's vocabulary (e.g. "email",
+            # "document" aren't in the keyword list) -- fall back to the
+            # CONFLICT's own topic (derived from the conflicting claims'
+            # actual wording, same mechanism the branch below already
+            # relies on) rather than surfacing "process compliance" in
+            # every question.
+            dr_subject = subject
+            if dr_subject in {"process compliance", None, ""}:
+                dr_subject = _extract_transmission_object(finding_text) or extract_conflict_topic(claim_a, claim_b, subject)
+            subject = dr_subject
+            temporal = extract_temporal_clause(finding_text)
+            temporal_suffix = f" {temporal}" if temporal else ""
+            subject_cap = subject[0].upper() + subject[1:] if subject else "the affected communication"
+            dr_questions = [
+                InvestigationQuestion(
+                    question=(
+                        f"Do system records establish successful delivery of {subject} to each affected "
+                        "recipient, including recipient identity, destination, timestamp, and delivery status?"
+                    ),
+                    purpose="Verify the delivery-side record in full detail, not merely that a record exists",
+                    evidence=f"System delivery log for {subject}, including per-recipient status",
+                ),
+                InvestigationQuestion(
+                    question=(
+                        f"Do independent records establish whether the affected recipients actually received "
+                        f"or accessed {subject}{temporal_suffix}?"
+                    ),
+                    purpose="Resolves the conflict: whether the delivery-side record matches actual receipt",
+                    evidence=f"Independent receipt/access confirmation for {subject} (e.g. read receipts, access logs)",
+                ),
+                InvestigationQuestion(
+                    question=f"Do read, access, acknowledgement, or confirmation records exist for {subject}?",
+                    purpose="Establish whether an acknowledgement/confirmation mechanism exists and what it shows",
+                    evidence=f"Acknowledgement/confirmation records for {subject}",
+                ),
+                InvestigationQuestion(
+                    question=(
+                        "Did any account, address, notification-channel, system, or access issue affect "
+                        f"delivery or receipt for the affected recipients{temporal_suffix}?"
+                    ),
+                    purpose="Identify a possible technical/administrative cause without presuming one occurred",
+                    evidence="Account/address/channel/system configuration and error logs for the affected recipients",
+                ),
+                InvestigationQuestion(
+                    question=(
+                        f"Were the affected recipients required to act on {subject} before receipt or "
+                        "acknowledgement was confirmed?"
+                    ),
+                    purpose="Determine whether any activity may have occurred before the conflict was resolved",
+                    evidence=f"Records of activity performed by the affected recipients relative to {subject}",
+                ),
+            ]
+            dr_evidence = [
+                f"System delivery log for {subject}",
+                f"Independent receipt/access confirmation for {subject}",
+                f"Acknowledgement/confirmation records for {subject}",
+                "Account/address/channel/system configuration and error logs",
+            ]
+            dr_areas = [
+                f"{subject_cap} delivery and receipt reconciliation",
+                f"{subject_cap} acknowledgement and confirmation records",
+                "Technical/administrative factors affecting delivery or receipt",
+            ]
+            return [], InvestigationPlan(
+                questions=dr_questions,
+                areas=dr_areas,
+                evidence_to_collect=dr_evidence,
+            )
 
         # Topic is derived from the CONFLICT's own claims, never from the
         # finding's overall subject -- see extract_conflict_topic's
@@ -279,6 +423,26 @@ def build_deterministic_investigation_plan(
             confirms_if=h1.confirms_if,
             refutes_if=h1.refutes_if,
         ))
+        # NEUTRAL questions deliberately NOT bound to H1 (no
+        # hypothesis_tested): H1 itself is a hedged, evidence-thin
+        # candidate that the causal-proposition eligibility layer
+        # downstream may correctly demote when no claim directly supports
+        # it (Section 3/9 of the final hardening pass) -- if that happens,
+        # the hypothesis-ID-consistency firewall strips any question bound
+        # to the now-missing H1, which previously left ZERO investigation
+        # questions even though real uncertainty remains (Property 6: zero
+        # hypotheses must not mean zero investigation). These survive that
+        # demotion because they were never hypothesis-bound to begin with.
+        questions.append(InvestigationQuestion(
+            question=f"What records establish how the revision affecting {subject} was communicated to affected personnel?",
+            purpose="Establish what communication, if any, is documented, without presupposing it failed",
+            evidence=f"{subject} revision distribution and communication records",
+        ))
+        questions.append(InvestigationQuestion(
+            question=f"Was acknowledgement of the revision affecting {subject} required, and if so, what record establishes whether it occurred?",
+            purpose="Establish whether an acknowledgement requirement existed and was documented",
+            evidence=f"{subject} acknowledgement requirement and records",
+        ))
         evidence_items.extend([f"{subject} revision distribution records", f"{subject} acknowledgement records"])
 
     # 3. Non-performance Branch: fires on any REPORTED "X was missed/not
@@ -393,41 +557,75 @@ def build_deterministic_investigation_plan(
         ))
         evidence_items.extend([f"{subject} execution log", "system audit trail"])
 
-    # 5. General / Unresolved Branch
+    # 5. General / Unresolved Branch: no conflict, no reported mechanism, no
+    # recognized mechanism polarity -- by definition NOTHING in the finding
+    # states or implies a candidate causal mechanism. Generating two
+    # hypotheses here regardless (as this branch previously did) is exactly
+    # the "specific-looking but invented RCA" anti-pattern the evidence
+    # discipline throughout this codebase exists to prevent: "execution
+    # compliance gap" / "verification control gap" READ as concrete
+    # findings but are actually just the two halves of "something, somehow,
+    # went wrong" with the finding's subject substituted in -- a generic
+    # causal bucket wearing a specific-sounding name, which is why it was
+    # evading the causal-bucket guard (that guard matches vaguer, more
+    # obviously hedged phrasing, not this). Zero hypotheses is the correct,
+    # evidence-honest output here (Section 21: "ZERO HYPOTHESES IS A VALID
+    # AND OFTEN CORRECT OUTPUT") -- what this finding DOES support is a set
+    # of foundational, non-presupposing questions about what's actually
+    # established, which the code below asks instead of assuming an answer.
     else:
-        h1 = CandidateHypothesis(
-            id="H1",
-            name="PROCESS_EXECUTION_COMPLIANCE_GAP",
-            statement=f"The operational controls associated with {subject} were not executed as specified in applicable procedures.",
-            status="POSSIBLE",
-            evidence_needed=f"{subject} execution logs, supervisory verification records",
-            confirms_if="Execution logs show deviations from approved procedural steps",
-            refutes_if="Execution logs confirm strict adherence to approved procedure",
-            discrimination_evidence="Distinguishes execution noncompliance from supervisory detection weakness",
-            relevance_rank="HIGH",
-        )
-        h2 = CandidateHypothesis(
-            id="H2",
-            name="VERIFICATION_OR_RECONCILIATION_CONTROL_GAP",
-            statement=f"Verification or reconciliation controls for {subject} did not detect or prevent the nonconforming condition.",
-            status="POSSIBLE",
-            evidence_needed=f"{subject} supervisory sign-off records, review logs",
-            confirms_if="Supervisory review signed off without identifying the nonconforming condition",
-            refutes_if="Supervisory review timely documented and escalated the condition",
-            discrimination_evidence="Distinguishes verification control weakness from initial execution failure",
-            relevance_rank="HIGH",
-        )
-        hypotheses.extend([h1, h2])
-
-        questions.append(InvestigationQuestion(
-            question=f"Do execution and verification records for {subject} confirm adherence to approved procedural controls?",
-            purpose="Evaluate operational compliance vs verification control effectiveness",
-            evidence=f"{subject} execution logs, supervisory verification records",
-            hypothesis_tested="H1",
-            confirms_if=h1.confirms_if,
-            refutes_if=h1.refutes_if,
-        ))
-        evidence_items.extend([f"{subject} execution logs", f"{subject} verification records"])
+        # The subject phrase may already contain "status"/"condition"
+        # anywhere in it (e.g. "equipment calibration status for BAL-014"),
+        # not only at the end -- appending our own "status and
+        # authorization"/"condition" regardless would double the word
+        # ("...status for BAL-014 status and authorization"), the exact
+        # "X status for X status" pattern this codebase's own style rules
+        # elsewhere reject. Check for the word anywhere and adapt wording.
+        subject_bare = re.sub(r"\b(?:status|condition)\b", "", subject or "", flags=re.IGNORECASE)
+        subject_bare = re.sub(r"\s{2,}", " ", subject_bare).strip()
+        subject_has_status_word = bool(re.search(r"\b(?:status|condition)\b", subject or "", re.IGNORECASE))
+        subject_cap = subject[0].upper() + subject[1:] if subject else "The affected item"
+        plan_areas = [
+            f"{subject_cap} and authorization" if subject_has_status_word else f"{subject_cap} status and authorization",
+            f"{subject_cap} governing procedure and control requirements",
+            f"Downstream impact of the {subject_bare or subject} condition" if not subject_has_status_word
+            else f"Downstream impact of the {subject}",
+        ]
+        questions.extend([
+            InvestigationQuestion(
+                question=f"What procedure or requirement governs {subject}, and what does it require in the "
+                "circumstances described in this finding?",
+                purpose="Establish the applicable requirement before evaluating whether it was met",
+                evidence=f"Applicable procedure/requirement governing {subject}",
+            ),
+            InvestigationQuestion(
+                question=f"What records establish the actual status of {subject_bare} at the time relevant to this finding?",
+                purpose="Establish the objective status/history, not merely what the finding itself states",
+                evidence=f"Status/history records for {subject}",
+            ),
+            InvestigationQuestion(
+                question=f"Did any approved exception, extension, waiver, or deviation apply to {subject} "
+                "during the relevant period?",
+                purpose="Determine whether an authorized departure from the normal requirement existed",
+                evidence=f"Exception/waiver/deviation records for {subject}",
+            ),
+            InvestigationQuestion(
+                question=f"What process or role was responsible for monitoring and controlling {subject}?",
+                purpose="Identify the control point relevant to further investigation, without presupposing it failed",
+                evidence=f"Process ownership and responsibility records for {subject}",
+            ),
+            InvestigationQuestion(
+                question=f"What downstream activities, decisions, or outputs depended on {subject}, and would "
+                "require assessment if the condition described in this finding is confirmed?",
+                purpose="Scope potential downstream impact for assessment, without asserting impact occurred",
+                evidence=f"Records of activities/decisions dependent on {subject}",
+            ),
+        ])
+        evidence_items.extend([
+            f"Applicable procedure/requirement governing {subject}",
+            f"Status/history records for {subject}",
+            f"Exception/waiver/deviation records for {subject}",
+        ])
 
     # RECURRENCE (Section 8/28): mandatory additional hypothesis whenever a
     # similar finding was previously identified — appended after whichever

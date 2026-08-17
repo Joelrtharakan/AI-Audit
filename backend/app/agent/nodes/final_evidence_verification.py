@@ -198,6 +198,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # populated five_why from core_synthesis).
     fw = state.get("five_why")
     if fw and fw.steps:
+        _fw_canonical = state.get("canonical_finding_state")
         valid_fw_steps = []
         for step in fw.steps:
             q_text = _clean_text(step.question) or step.question
@@ -212,12 +213,14 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             from app.agent.causal_guard import (
                 detect_unsupported_causal_specificity,
                 five_why_answer_invents_mechanism_at_unknown_status,
+                hypothesis_asserts_referenced_document_content,
                 hypothesis_asserts_systemic_cause_without_process_evidence,
                 hypothesis_asserts_unhedged_notification_failure,
                 hypothesis_asserts_unlicensed_change_event_defect,
                 hypothesis_statement_asserts_unsupported_causation,
             )
             _fw_verified_facts = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
+            _fw_referenced_docs = (_fw_canonical.referenced_documents if _fw_canonical else None)
             # A 5-Why ANSWER is exactly as capable of asserting an
             # unlicensed causal mechanism as a hypothesis STATEMENT is --
             # "Because staff may lack training or awareness" is the same
@@ -233,7 +236,20 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             _systemic_escalation = hypothesis_asserts_systemic_cause_without_process_evidence(step.answer, finding_text)
             _notification_inversion = hypothesis_asserts_unhedged_notification_failure(step.answer, finding_text)
             _change_event_inversion = hypothesis_asserts_unlicensed_change_event_defect(step.answer, finding_text)
-            if _unsupported or _unsupported_causation or _unestablished_at_unknown or _systemic_escalation or _notification_inversion or _change_event_inversion:
+            _referenced_doc_content = hypothesis_asserts_referenced_document_content(step.answer, _fw_referenced_docs)
+            # MIXED MISUSE (Section 6/8): MIXED means actual evidence
+            # CONFLICTS about the same proposition -- it is not a synonym
+            # for "uncertain" or a way to phrase a plausible-but-unproven
+            # mechanism without committing to VERIFIED. If this finding has
+            # no detected evidence conflict at all, a step cannot
+            # legitimately be MIXED; downgrade to UNKNOWN rather than let
+            # an unhedged causal answer hide behind a status that sounds
+            # more evidence-grounded than "unknown" but asserts nothing
+            # falsifiable.
+            _spurious_mixed = (
+                step.status == "MIXED" and not (_fw_canonical and _fw_canonical.evidence_conflicts)
+            )
+            if _unsupported or _unsupported_causation or _unestablished_at_unknown or _systemic_escalation or _notification_inversion or _change_event_inversion or _referenced_doc_content:
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: 5-Why step answer asserted an unlicensed causal "
                     f"mechanism ({step.answer!r}, status {step.status}"
@@ -241,6 +257,20 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     ") — replaced with an evidence-boundary acknowledgment"
                 ))
                 step.answer = "The available evidence does not establish this — the underlying cause is not established from the evidence reviewed."
+                step.status = "UNKNOWN"
+            elif _spurious_mixed:
+                # Content passed every unsupported-mechanism check above, but
+                # the status itself was illegitimate -- MIXED without any
+                # detected conflict. Downgrade the status only (never
+                # promote to VERIFIED here: that would require positively
+                # confirming the answer traces only to VERIFIED claims,
+                # which this loop isn't set up to certify) -- conservative
+                # per Section 46 ("when in doubt, do not guess").
+                trace.append(AgentTraceStep.warn(
+                    f"Final Evidence Verification: 5-Why step labeled MIXED with no detected evidence "
+                    "conflict for this finding — downgraded to UNKNOWN (MIXED requires an actual conflict, "
+                    "not merely an uncertain answer)"
+                ))
                 step.status = "UNKNOWN"
             valid_fw_steps.append(step)
         fw.steps = valid_fw_steps
@@ -253,7 +283,11 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # this call's attempt failed, not the underlying evidence.
     if fw is not None and not fw.steps:
         from app.agent.nodes.five_why_fallback import build_deterministic_five_why
-        backfilled_fw = build_deterministic_five_why(finding_text, evidence_ledger)
+        _backfill_canonical = state.get("canonical_finding_state")
+        backfilled_fw = build_deterministic_five_why(
+            finding_text, evidence_ledger,
+            canonical_subject=getattr(_backfill_canonical, "finding_subject", None),
+        )
         if backfilled_fw.steps:
             trace.append(AgentTraceStep.warn(
                 "Final Evidence Verification: 5-Why chain was empty after this call's steps were rejected "
@@ -399,7 +433,8 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         from app.services.semantic_subject import classify_finding_specificity
         _reported_for_specificity = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
         specificity = classify_finding_specificity(
-            finding_text, _reported_for_specificity, mechanism.status if mechanism else None
+            finding_text, _reported_for_specificity, mechanism.status if mechanism else None,
+            canonical.deviation_condition if canonical else None,
         )
         if specificity == "LOW":
             existing_hyps = rc.candidate_hypotheses or []
@@ -543,6 +578,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     if rc is not None:
         from app.agent.causal_guard import (
             detect_unsupported_causal_specificity,
+            hypothesis_asserts_referenced_document_content,
             hypothesis_asserts_self_referential_evidence,
             hypothesis_asserts_systemic_cause_without_process_evidence,
             hypothesis_asserts_unhedged_notification_failure,
@@ -554,12 +590,24 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             hypothesis_statement_asserts_unsupported_causation,
             hypothesis_statement_is_generic_causal_bucket,
         )
+        from app.services import llm_metrics as _llm_metrics
+        _referenced_docs = canonical.referenced_documents if canonical else None
         filtered_final_hyps = []
         for h in rc.candidate_hypotheses:
             if h.status == "REFUTED":
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} because status was REFUTED"
                 ))
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
+                continue
+            if hypothesis_asserts_referenced_document_content(h.statement, _referenced_docs):
+                trace.append(AgentTraceStep.warn(
+                    f"Final Evidence Verification: removed hypothesis {h.id} — asserts content of a "
+                    "document the finding only referenced/cited but which was unavailable for inspection "
+                    "(Referenced-Evidence Boundary: a document being mentioned is not evidence of what it "
+                    "contains)"
+                ))
+                _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
             if hypothesis_asserts_self_referential_evidence(h.statement):
                 trace.append(AgentTraceStep.warn(
@@ -567,6 +615,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "'supporting evidence' inline (e.g. 'records show...') instead of being grounded in "
                     "the actual evidence ledger; a claim asserting evidence exists is not evidence"
                 ))
+                _llm_metrics.record_validation_rejection(reason="invalid_provenance", node="final_evidence_verification")
                 continue
             if hypothesis_asserts_systemic_cause_without_process_evidence(h.statement, finding_text):
                 trace.append(AgentTraceStep.warn(
@@ -574,6 +623,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "process/system/control-level claim without the finding citing any review, audit, "
                     "documentation, or record finding about that process (Level 1→4 jump)"
                 ))
+                _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
             if hypothesis_statement_is_generic_causal_bucket(h.statement):
                 trace.append(AgentTraceStep.warn(
@@ -582,6 +632,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "an evidence-grounded mechanism; a vague hedged bucket is not a valid substitute for "
                     "a specific one"
                 ))
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
                 continue
             if hypothesis_name_is_generic(h.name):
                 # A vague title ("Process Oversight") doesn't necessarily
@@ -603,29 +654,34 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     f"Final Evidence Verification: removed hypothesis {h.id} — attacks the credibility of "
                     "a reported statement instead of reasoning about the underlying proposition"
                 ))
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
                 continue
             if mechanism and mechanism.statement:
                 if hypothesis_contradicts_mechanism(h.statement, mechanism):
                     trace.append(AgentTraceStep.warn(
                         f"Final Evidence Verification: removed hypothesis {h.id} — contradicts mechanism"
                     ))
+                    _llm_metrics.record_validation_rejection(reason="unsupported_causation", node="final_evidence_verification")
                     continue
                 if mechanism_already_names_generic_hypothesis(h.statement, mechanism):
                     trace.append(AgentTraceStep.warn(
                         f"Final Evidence Verification: removed hypothesis {h.id} — restates mechanism"
                     ))
+                    _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
                     continue
             if hypothesis_contradicts_verified_completion(h.statement, verified_facts):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — contradicts a VERIFIED "
                     "fact that the thing it claims is deficient was actually completed"
                 ))
+                _llm_metrics.record_validation_rejection(reason="unsupported_causation", node="final_evidence_verification")
                 continue
             is_unsupported, reason = detect_unsupported_causal_specificity(h.statement, finding_text)
             if is_unsupported:
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — {reason}"
                 ))
+                _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
             if hypothesis_asserts_unhedged_unverified_completion(h.statement):
                 trace.append(AgentTraceStep.warn(
@@ -633,6 +689,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "activity as settled fact ('was conducted/completed but not documented') instead of "
                     "preserving uncertainty ('may have been completed, but the record was unavailable')"
                 ))
+                _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
             if hypothesis_asserts_unhedged_notification_failure(h.statement, finding_text):
                 trace.append(AgentTraceStep.warn(
@@ -641,6 +698,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "(causal-event inversion: a downstream reported awareness state does not establish "
                     "the upstream communication event failed)"
                 ))
+                _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
             if hypothesis_asserts_unlicensed_change_event_defect(h.statement, finding_text):
                 trace.append(AgentTraceStep.warn(
@@ -649,12 +707,14 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "(e.g. 'not properly documented or disseminated'), when the finding gives no "
                     "independent account of how the change was handled"
                 ))
+                _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
             if hypothesis_statement_asserts_unsupported_causation(h.statement, verified_facts):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — statement asserts causation "
                     "('because'/'due to'/'caused by'/etc.) not grounded in a VERIFIED fact"
                 ))
+                _llm_metrics.record_validation_rejection(reason="unsupported_causation", node="final_evidence_verification")
                 continue
 
             # Deterministic status policy enforcement (Requirements 1, 2, 4)
@@ -713,6 +773,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                         f"Final Evidence Verification: downgraded hypothesis {h.id} from SUPPORTED to "
                         "POSSIBLE — no citable supporting evidence found (traceability firewall)"
                     ))
+                    _llm_metrics.record_validation_repair(reason="missing_provenance", node="final_evidence_verification")
             filtered_final_hyps.append(h)
 
         # Cap current-event hypotheses at 4 (recurrence/previous-CAPA
@@ -740,6 +801,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     f"Final Evidence Verification: dropped hypothesis {h.id} — exceeded the 4 "
                     "current-event hypothesis cap (evidence-constrained hypothesis generation)"
                 ))
+                _llm_metrics.record_validation_rejection(reason="other", node="final_evidence_verification")
         rc.candidate_hypotheses = current_event_hyps + recurrence_hyps
 
         # Evidence-grounded hypothesis backfill: if EVERY hypothesis the
@@ -761,7 +823,10 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 build_conditional_capa_actions,
                 build_deterministic_investigation_plan,
             )
-            backfill_hyps, backfill_plan = build_deterministic_investigation_plan(finding_text, evidence_ledger)
+            backfill_hyps, backfill_plan = build_deterministic_investigation_plan(
+                finding_text, evidence_ledger,
+                canonical_subject=getattr(canonical, "finding_subject", None),
+            )
             # Backfilled hypotheses must pass through the SAME unsupported-
             # specificity firewall as every other path (no output may bypass
             # the single authoritative checkpoint) -- defense in depth even
@@ -778,9 +843,12 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 and not hypothesis_asserts_systemic_cause_without_process_evidence(h.statement, finding_text)
                 and not hypothesis_asserts_unhedged_notification_failure(h.statement, finding_text)
                 and not hypothesis_asserts_unlicensed_change_event_defect(h.statement, finding_text)
+                and not hypothesis_asserts_referenced_document_content(h.statement, _referenced_docs)
             ]
             if backfill_hyps:
                 rc.candidate_hypotheses = backfill_hyps
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.increment("deterministic_hypotheses_generated", len(backfill_hyps))
                 trace.append(AgentTraceStep.warn(
                     "Final Evidence Verification: this call's proposed hypotheses were all invalid "
                     f"(evidence-gap restatement / ungrounded domain / etc.) — backfilled {len(backfill_hyps)} "
@@ -926,7 +994,16 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 "own subject or a reported downstream state is not causal support; only a VERIFIED claim "
                 "or a REPORTED_CAUSAL_MECHANISM claim licenses a candidate hypothesis)"
             ))
-            area_title = (h.name or h.statement or "").replace("_", " ").strip().title()
+            # Derived from the STATEMENT, never the raw internal name --
+            # a bucket-style name like "PROCESS_EXECUTION_COMPLIANCE_GAP"
+            # humanizes into "Process Execution Compliance Gap", which
+            # reads as an established finding/cause, not an investigation
+            # target (Section 11: investigation areas must not be rendered
+            # as if they were causes). derive_hypothesis_title_from_statement
+            # is the same statement-derived title logic already used to
+            # rename generic hypothesis NAMES elsewhere in this file.
+            from app.agent.causal_guard import derive_hypothesis_title_from_statement as _derive_area_title
+            area_title = _derive_area_title(h.statement, h.id) if h.statement else (h.name or "").replace("_", " ").strip().title()
             if area_title and area_title not in (inv.areas if inv else []) and area_title not in _new_areas:
                 _new_areas.append(area_title)
         if _demoted_ids:
@@ -973,17 +1050,35 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # RootCauseStatus.VERIFIED -- but normalization is a syntactic
         # mapping (valid enum value), never a semantic check that the claim
         # is actually justified. A VERIFIED/SUPPORTED root-cause status must
-        # be backed by at least one hypothesis whose evidence_strength was
-        # independently, deterministically computed (by
-        # determine_hypothesis_status above) as VERIFIED -- never trusted
-        # from the LLM's own status word alone (Phase 7/8: "LLM must never
-        # decide evidence status").
+        # be grounded EITHER by a hypothesis whose evidence_strength was
+        # independently, deterministically computed as VERIFIED, OR --
+        # when no hypothesis exists at all, e.g. a finding whose own
+        # VERIFIED claim directly states the cause with no candidate
+        # reasoning needed -- by a VERIFIED evidence-ledger claim whose
+        # text substantially (>=2 significant words) overlaps the root
+        # cause's own statement/narrative. Never trusted from the LLM's
+        # own status word alone (Phase 7/8: "LLM must never decide
+        # evidence status"). The >=2-word substantive-overlap threshold
+        # matters: without it, a VERIFIED claim about something else
+        # entirely (e.g. "no record was available") could spuriously
+        # ground an unrelated causal statement merely by sharing one
+        # incidental word.
         if rc.status in (RootCauseStatus.VERIFIED, RootCauseStatus.SUPPORTED, "VERIFIED", "SUPPORTED"):
-            if not any(h.evidence_strength == "VERIFIED" for h in rc.candidate_hypotheses):
+            has_verified_hyp = any(h.evidence_strength == "VERIFIED" for h in rc.candidate_hypotheses)
+            grounded_by_direct_claim = False
+            if not has_verified_hyp:
+                from app.services.text_grounding import significant_words as _sig_words_rc
+                _rc_words = _sig_words_rc(rc.statement or rc.narrative or "")
+                for _e in evidence_ledger:
+                    if _e.status == EvidenceStatus.VERIFIED and len(_sig_words_rc(_e.claim) & _rc_words) >= 2:
+                        grounded_by_direct_claim = True
+                        break
+            if not has_verified_hyp and not grounded_by_direct_claim:
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: root cause status {rc.status!r} was not backed by any "
-                    "hypothesis with independently-verified evidence — downgraded to NOT_ESTABLISHED "
-                    "(a status word alone, from the LLM or otherwise, never establishes root cause)"
+                    "independently-verified hypothesis or a directly-overlapping VERIFIED claim — "
+                    "downgraded to NOT_ESTABLISHED (a status word alone, from the LLM or otherwise, "
+                    "never establishes root cause)"
                 ))
                 rc.status = RootCauseStatus.NOT_ESTABLISHED
                 rc.category = "TO_BE_CONFIRMED"
@@ -1103,7 +1198,10 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         if canonical and canonical.evidence_conflicts:
             # When evidence conflicts exist, rebuild deterministic 5-Why chain if LLM fabricated steps
             from app.agent.nodes.five_why_fallback import build_deterministic_five_why
-            fw = build_deterministic_five_why(finding_text, evidence_ledger)
+            fw = build_deterministic_five_why(
+                finding_text, evidence_ledger,
+                canonical_subject=getattr(canonical, "finding_subject", None),
+            )
             if report:
                 report.five_why = fw
 
@@ -1145,20 +1243,34 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 f"Final Evidence Verification: corrected impact affected_object to canonical phrase: {clean_obj!r}"
             ))
 
-        # Same drift defect, same fix, applied to the two other fields that
-        # name the same underlying topic -- process_at_risk and
-        # evidence_needed must describe THIS finding's topic, not one the
+        # process_at_risk must describe THIS finding's topic, not one the
         # LLM substituted in (e.g. "procedure revision documentation" for a
-        # training finding).
+        # training finding) -- but it legitimately names the CONTROL
+        # DOMAIN (e.g. "calibration"), which is expected to use different
+        # vocabulary than the entity/affected-object subject (e.g. "balance
+        # BAL-014") by design (Phase 6: "do not let the entity resolver
+        # determine the process name"). Comparing against canon_subject
+        # alone made every correct, entity-independent process name look
+        # like drift and get overwritten with a generic entity-derived
+        # label -- exactly the second-producer defect this check was
+        # supposed to prevent, just relocated to a different field.
+        # Compare against the full finding text instead: legitimate
+        # process vocabulary appears somewhere in the finding even when it
+        # doesn't share words with the entity specifically; a genuinely
+        # substituted, unrelated process (from a different finding
+        # entirely) will not.
         if canon_subject:
             topic = topic_word(canon_subject)
             topic_cap = topic[0].upper() + topic[1:]
-            if impact.process_at_risk and not subject_topic_matches(impact.process_at_risk, canon_subject):
-                trace.append(AgentTraceStep.warn(
-                    f"Final Evidence Verification: process_at_risk {impact.process_at_risk!r} drifted from "
-                    "the finding's canonical subject — replaced"
-                ))
-                impact.process_at_risk = f"{topic_cap} and compliance control"
+            if impact.process_at_risk:
+                _process_topic = topic_word(impact.process_at_risk)
+                _finding_words = {w.lower() for w in re.findall(r"[A-Za-z]+", finding_text)}
+                if _process_topic not in _finding_words:
+                    trace.append(AgentTraceStep.warn(
+                        f"Final Evidence Verification: process_at_risk {impact.process_at_risk!r} drifted from "
+                        "the finding's canonical subject — replaced"
+                    ))
+                    impact.process_at_risk = f"{topic_cap} and compliance control"
 
         # Evidence Needed (Section 5): always DERIVED from the live
         # candidate hypotheses' own already-grounded evidence_needed values
@@ -1206,7 +1318,20 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             f"If {_clean_subj} was not completed as required, potential risk of operational "
             "noncompliance or unverified execution."
         )
-        if impact.potential_effect and not re.search(r"^(if\b|potential\b|requires\b)", impact.potential_effect.strip(), re.IGNORECASE):
+        # Hedge check: the narrative must contain conditional/evidence-
+        # bounded language SOMEWHERE, not necessarily as its first word --
+        # a rigid "must start with if/potential/requires" check rejected
+        # perfectly well-hedged deterministic narratives that happen to
+        # lead with the affected object instead (e.g. "Equipment was
+        # reportedly operated outside its validated range. This may
+        # require assessment..."), silently discarding the single
+        # authoritative producer's own output in favor of a generic
+        # template for no semantic reason.
+        _HEDGE_MARKERS_RE = re.compile(
+            r"\b(if|potential(?:ly)?|require[sd]?|may|could|reportedly|does\s+not\s+establish|assessment)\b",
+            re.IGNORECASE,
+        )
+        if impact.potential_effect and not _HEDGE_MARKERS_RE.search(impact.potential_effect.strip()):
             impact.potential_effect = _safe_potential_effect
         elif impact.potential_effect:
             from app.agent.causal_guard import impact_asserts_unestablished_concept

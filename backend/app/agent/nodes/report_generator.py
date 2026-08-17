@@ -194,8 +194,12 @@ async def generate_report_node(state: AgentState) -> AgentState:
     _final_grounding_sweep(state, root_cause, five_why, capa, impact, trace)
 
     canonical = state.get("canonical_finding_state")
-    evidence_claims = canonical.evidence_claims if canonical else []
-    evidence_conflicts = canonical.evidence_conflicts if canonical else []
+    evidence_claims = getattr(canonical, "evidence_claims", []) if canonical else []
+    evidence_conflicts = getattr(canonical, "evidence_conflicts", []) if canonical else []
+    referenced_documents = getattr(canonical, "referenced_documents", []) if canonical else []
+    propositions = getattr(canonical, "propositions", []) if canonical else []
+    from app.models.agent import InvestigationMode
+    investigation_mode = getattr(canonical, "investigation_mode", InvestigationMode.NORMAL) if canonical else InvestigationMode.NORMAL
 
     report = InvestigationReport(
         observation_quality=observation_quality,  # type: ignore[arg-type]
@@ -204,6 +208,7 @@ async def generate_report_node(state: AgentState) -> AgentState:
         overall_confidence=overall_conf,  # type: ignore[arg-type]
         confidence=overall_conf,  # type: ignore[arg-type]
         investigation_required=investigation_required,  # type: ignore[arg-type]
+        investigation_mode=investigation_mode,
         root_cause=root_cause,
         contributing_factors=state.get("contributing_factors", []),
         investigation=investigation_plan,
@@ -212,8 +217,10 @@ async def generate_report_node(state: AgentState) -> AgentState:
         impact_assessment=impact,
         evidence_gaps=state.get("evidence_gaps", []),
         evidence=state.get("evidence_ledger", []),
+        propositions=propositions,
         evidence_claims=evidence_claims,
         evidence_conflicts=evidence_conflicts,
+        referenced_documents=referenced_documents,
         human_review_required=True,  # always
         analysis_mode=state.get("analysis_mode", "LLM"),  # type: ignore[arg-type]
         analysis_engine=state.get("analysis_engine", "LLM"),  # type: ignore[arg-type]

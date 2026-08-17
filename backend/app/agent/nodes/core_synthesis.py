@@ -18,6 +18,7 @@ output-budget ceiling -- see `_classify_failure` and `_parse_causal_fields`):
 from __future__ import annotations
 
 import json
+import re
 import logging
 from typing import Any
 
@@ -123,6 +124,21 @@ def _classify_failure(exc: Exception, ollama_meta: dict) -> str:
     return "INVALID_JSON"
 
 
+def _failure_metric_suffix(failure_type: str) -> str:
+    """Maps the fine-grained _classify_failure() categories onto the three
+    llm_metrics failure buckets (Phase 6: count each event exactly once,
+    in the right bucket) -- TIMEOUT is its own bucket; JSON/schema/output
+    problems are "invalid_json" (something WAS returned but couldn't be
+    used); PROVIDER_FAILURE (network/HTTP/empty-completion) is
+    "other_failure" (the call itself didn't complete normally, distinct
+    from a parsing problem)."""
+    if failure_type == "TIMEOUT":
+        return "timeout"
+    if failure_type == "PROVIDER_FAILURE":
+        return "other_failure"
+    return "invalid_json"
+
+
 _MAX_LLM_HYPOTHESES = 3
 
 
@@ -136,6 +152,7 @@ def _parse_causal_fields(
     trace: list,
     has_unresolved_conflict: bool = False,
     claim_ids: list[tuple[str, Any]] | None = None,
+    canonical_subject: str | None = None,
 ) -> tuple[RootCauseAnalysis, FiveWhyAnalysis, list[ContributingFactor]]:
     """Parse+guard root_cause / five_why / contributing_factors from a
     core_synthesis-shaped JSON object.
@@ -193,6 +210,8 @@ def _parse_causal_fields(
                 trace.append(AgentTraceStep.warn(
                     f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — directly contradicted by evidence"
                 ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="unsupported_causation", node="core_synthesis")
                 continue
             # CONTRADICTION-AWARE FILTER (structural, not finding-specific):
             # a hypothesis claiming "performed but not recorded" cannot
@@ -204,6 +223,8 @@ def _parse_causal_fields(
                     f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — contradicts the "
                     f"established mechanism ({mechanism.statement!r})"
                 ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="unsupported_causation", node="core_synthesis")
                 continue
             # REDUNDANCY FILTER: a hedged restatement of the already-established
             # mechanism is not a new hypothesis about its CAUSE.
@@ -212,6 +233,8 @@ def _parse_causal_fields(
                     f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — restates the already-"
                     "established mechanism as an open possibility instead of reasoning about its cause"
                 ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="core_synthesis")
                 continue
             # VERIFIED-COMPLETION CONTRADICTION (structural, not tied to any
             # topic word): a hypothesis proposing a deficiency/absence of
@@ -223,6 +246,8 @@ def _parse_causal_fields(
                     f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — contradicts a VERIFIED "
                     "fact that the thing it claims is deficient was actually completed"
                 ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="unsupported_causation", node="core_synthesis")
                 continue
             # STATEMENT-CREDIBILITY GUARD (structural, not finding-specific):
             # a hypothesis whose mechanism is "the supervisor's/operator's
@@ -235,6 +260,8 @@ def _parse_causal_fields(
                     f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — attacks the credibility of "
                     "a reported statement instead of reasoning about the underlying proposition"
                 ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="core_synthesis")
                 continue
             # HYPOTHESIS CAUSALITY FILTER (structural, not finding-specific):
             # a "hypothesis" that just restates an evidence gap already
@@ -248,44 +275,39 @@ def _parse_causal_fields(
                     f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — restates an evidence "
                     "gap/fact already stated in the finding rather than proposing a causal explanation"
                 ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="core_synthesis")
                 continue
-            # PROVENANCE ENFORCEMENT: only applies when the response
-            # actually uses the structured-provenance schema (either
-            # supporting_claim_ids or contradicting_claim_ids key present)
-            # -- a response using an older/different shape that never
-            # attempts this field isn't "asserting zero provenance", it's
-            # a different (still test-covered) contract, so it is left to
-            # the existing statement-level guards above/below instead.
-            # Once a response DOES use this schema: an ID the evidence
-            # ledger never issued is always rejected (the LLM cannot
-            # invent claim IDs), and citing NEITHER a supporting NOR a
-            # contradicting claim at all is zero provenance and rejected
-            # outright, regardless of how plausible the statement reads.
+            # PROVENANCE ENFORCEMENT (unconditional -- Phase 1 of the final
+            # hardening pass: exactly ONE provenance policy, no legacy-shape
+            # bypass). Every hypothesis MUST cite at least one claim id via
+            # supporting_claim_ids or contradicting_claim_ids, and every
+            # cited id MUST exist in this finding's canonical evidence
+            # ledger. A hypothesis with no citable claim, or one citing an
+            # id the ledger never issued, is rejected outright -- the LLM
+            # cannot invent provenance, and a plausible-reading statement
+            # with zero evidence linkage is not a hypothesis, it's prose.
             raw_supporting_ids = ch.get("supporting_claim_ids")
             raw_contradicting_ids = ch.get("contradicting_claim_ids")
-            provenance_schema_used = raw_supporting_ids is not None or raw_contradicting_ids is not None
-            supporting_ids: list[str] = []
-            contradicting_ids: list[str] = []
-            if provenance_schema_used and valid_claim_ids:
-                supporting_ids = [c for c in (raw_supporting_ids or []) if isinstance(c, str)]
-                contradicting_ids = [c for c in (raw_contradicting_ids or []) if isinstance(c, str)]
-                invalid_ids = [c for c in (*supporting_ids, *contradicting_ids) if c not in valid_claim_ids]
-                if invalid_ids:
-                    trace.append(AgentTraceStep.warn(
-                        f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — cited claim id(s) "
-                        f"{invalid_ids} that do not exist in the evidence ledger"
-                    ))
-                    from app.services import llm_metrics as _llm_metrics
-                    _llm_metrics.increment("hypotheses_provenance_rejected")
-                    continue
-                if not supporting_ids and not contradicting_ids:
-                    trace.append(AgentTraceStep.warn(
-                        f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — cited zero supporting "
-                        "or contradicting claim provenance"
-                    ))
-                    from app.services import llm_metrics as _llm_metrics
-                    _llm_metrics.increment("hypotheses_provenance_rejected")
-                    continue
+            supporting_ids = [c for c in (raw_supporting_ids or []) if isinstance(c, str)]
+            contradicting_ids = [c for c in (raw_contradicting_ids or []) if isinstance(c, str)]
+            invalid_ids = [c for c in (*supporting_ids, *contradicting_ids) if c not in valid_claim_ids]
+            if invalid_ids:
+                trace.append(AgentTraceStep.warn(
+                    f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — cited claim id(s) "
+                    f"{invalid_ids} that do not exist in the evidence ledger"
+                ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="invalid_provenance", node="core_synthesis")
+                continue
+            if not supporting_ids and not contradicting_ids:
+                trace.append(AgentTraceStep.warn(
+                    f"Core Synthesis: dropped hypothesis {ch.get('id', 'H')} — cited zero supporting "
+                    "or contradicting claim provenance"
+                ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="missing_provenance", node="core_synthesis")
+                continue
             new_hyp = CandidateHypothesis(
                 id=str(ch.get("id", "H")),
                 name=str(ch.get("name", "HYPOTHESIS")),
@@ -311,7 +333,25 @@ def _parse_causal_fields(
                     f"Core Synthesis: dropped hypothesis {new_hyp.id} — its discrimination criterion "
                     "describes evidence that supports a DIFFERENT hypothesis id, not its own"
                 ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="core_synthesis")
                 continue
+
+            from app.agent.causal_guard import evaluate_causal_eligibility
+            is_eligible, rejection_reason = evaluate_causal_eligibility(
+                new_hyp,
+                evidence_ledger=evidence_ledger,
+                mechanism=mechanism,
+                source_text=source_text,
+            )
+            if not is_eligible:
+                trace.append(AgentTraceStep.warn(
+                    f"Core Synthesis: dropped hypothesis {new_hyp.id} — failed causal eligibility ({rejection_reason})"
+                ))
+                from app.services import llm_metrics as _llm_metrics
+                _llm_metrics.record_validation_rejection(reason="causal_eligibility", node="core_synthesis")
+                continue
+
             cand_hypotheses.append(new_hyp)
 
     # HYPOTHESIS COUNT CAP (Phase 4/9 of the LLM-boundary rebuild): the
@@ -321,6 +361,7 @@ def _parse_causal_fields(
     # ranked (then first-seen) survive; this is independent of, and
     # stricter than, the separate 4-hypothesis cap final_evidence_
     # verification applies later as defense-in-depth.
+    from app.services import llm_metrics as _llm_metrics
     if len(cand_hypotheses) > _MAX_LLM_HYPOTHESES:
         _rank_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
         dropped = cand_hypotheses[_MAX_LLM_HYPOTHESES:]
@@ -329,10 +370,17 @@ def _parse_causal_fields(
             f"Core Synthesis: LLM returned {len(dropped) + len(cand_hypotheses)} hypotheses — capped to "
             f"{_MAX_LLM_HYPOTHESES} highest-ranked"
         ))
+        for _ in dropped:
+            _llm_metrics.record_validation_rejection(reason="other", node="core_synthesis")
 
-    from app.services import llm_metrics as _llm_metrics
-    _llm_metrics.increment("hypotheses_generated", len(cand_hypotheses))
-    _llm_metrics.increment("hypotheses_rejected", max(_raw_hyp_count - len(cand_hypotheses), 0))
+    # Semantically separated per Phase 5: "generated" is what the LLM
+    # actually proposed in this response (_raw_hyp_count), "accepted" is
+    # what survived every guard above including the count cap -- never
+    # conflated with deterministic-fallback-generated hypotheses, which
+    # are counted separately at their own call sites.
+    _llm_metrics.increment("llm_hypotheses_generated", _raw_hyp_count)
+    _llm_metrics.increment("llm_hypotheses_accepted", len(cand_hypotheses))
+    _llm_metrics.increment("llm_hypotheses_rejected", max(_raw_hyp_count - len(cand_hypotheses), 0))
 
     root_cause = RootCauseAnalysis(
         status=rc_status,
@@ -550,7 +598,9 @@ def _parse_causal_fields(
     # Ensure candidate_hypotheses is NEVER empty
     if not root_cause.candidate_hypotheses:
         from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
-        fallback_hyps, _ = build_deterministic_investigation_plan(finding_text, evidence_ledger)
+        fallback_hyps, _ = build_deterministic_investigation_plan(
+            finding_text, evidence_ledger, canonical_subject=canonical_subject,
+        )
         root_cause.candidate_hypotheses = fallback_hyps
         trace.append(AgentTraceStep.warn("Core Synthesis: generated fallback candidate hypotheses from finding text"))
 
@@ -632,10 +682,24 @@ def _derive_ca_draft_fields(root_cause, impact) -> dict:
     )
 
     import re as _re
+    # DELIVERY_VS_RECEIPT conflict shape ("X receipt", built by the
+    # delivery/receipt branch of _derive_deterministic_impact) -- "permitting
+    # independent execution or release" presupposes a release/operation
+    # dependency this finding never establishes; the appropriate action is
+    # verifying notification/receipt/acknowledgement status, conditional on
+    # reliance (Section 16).
+    if affected.strip().lower().endswith(" receipt"):
+        _base_subject = affected[: -len(" receipt")]
+        _base_subject = _base_subject[0].lower() + _base_subject[1:] if _base_subject else _base_subject
+        immediate_action = (
+            "Verify the current notification, receipt, and acknowledgement status for affected personnel "
+            f"against authorized communication records before relying on {_base_subject} for "
+            "further action, where applicable."
+        )
     # Avoid "Verify the current status of X status" when the affected-object
     # phrase already names a status/qualification (e.g. "Operator training
     # status for the revised procedure") -- say it once, not twice.
-    if affected.strip().lower().endswith(("status", "qualification")) or " status for " in affected.lower() or " qualification for " in affected.lower():
+    elif affected.strip().lower().endswith(("status", "qualification")) or " status for " in affected.lower() or " qualification for " in affected.lower():
         lead_word = affected.split(" ", 1)[0].lower()
         article = "" if lead_word in ("the", "a", "an") else "the "
         immediate_action = f"Verify {article}{affected[0].lower()}{affected[1:]} against authorized records before permitting independent execution or release, where applicable."
@@ -697,6 +761,63 @@ def _trim_evidence_for_recovery(claim_ids: list[tuple[str, Any]]) -> list[dict]:
     ]
 
 
+_EXPIRY_CONTEXT_RE = re.compile(r"\bexpir\w*\b[^.]{0,40}?(\d{1,2}\s+\w+\s+\d{4})", re.IGNORECASE)
+_USE_CONTEXT_RE = re.compile(
+    r"\b(?:used|performed|conducted|carried\s+out|executed)\b[^.]{0,60}?(\d{1,2}\s+\w+\s+\d{4})",
+    re.IGNORECASE,
+)
+
+
+def _detect_expiry_then_use(finding_text: str) -> bool:
+    """Structural (date-comparison, not domain-vocabulary) detection of the
+    "X expired on date A; X was used on date B where B is on/after A"
+    pattern -- generalizes across calibration certificates, reagent expiry,
+    qualification expiry, etc. without a per-domain keyword list (Section
+    32: structural guards over keyword guards). Used only to select a more
+    specific, still evidence-bounded potential_effect narrative below --
+    never to assert a mechanism or root cause."""
+    expiry_match = _EXPIRY_CONTEXT_RE.search(finding_text or "")
+    use_match = _USE_CONTEXT_RE.search(finding_text or "")
+    if not expiry_match or not use_match:
+        return False
+    try:
+        from dateutil import parser as _date_parser
+        expiry_date = _date_parser.parse(expiry_match.group(1))
+        use_date = _date_parser.parse(use_match.group(1))
+    except (ValueError, OverflowError):
+        return False
+    return use_date >= expiry_date
+
+
+_CREDENTIAL_DOMAIN_RE = re.compile(
+    r"\b([a-z]+)\s+(?:certificate|certification|license|licence|qualification|accreditation|permit)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_expiry_domain_word(finding_text: str) -> str | None:
+    """The word modifying the credential/document that expired ("calibration
+    certificate" -> "calibration", "training certification" -> "training")
+    -- structural (pattern: word immediately before a credential-type noun),
+    not a hardcoded domain list. Used for process_at_risk so the control
+    domain reflects what actually expired, not the entity resolver's own
+    object noun (Phase 6: "do not let the entity resolver determine the
+    process name" -- "balance BAL-014" the entity is not "calibration" the
+    control domain, even though both describe the same finding)."""
+    match = _CREDENTIAL_DOMAIN_RE.search(finding_text or "")
+    return match.group(1).lower() if match else None
+
+
+def _extract_use_date_text(finding_text: str) -> str | None:
+    """The raw date TEXT (not a parsed object) from the "used/performed on
+    <date>" clause -- the affected/exposure period for an expiry-then-use
+    finding is the date the out-of-status resource was actually used, not
+    the audit/discovery date (Known Failure 8). Only called after
+    _detect_expiry_then_use has already confirmed this pattern applies."""
+    use_match = _USE_CONTEXT_RE.search(finding_text or "")
+    return use_match.group(1) if use_match else None
+
+
 def _derive_deterministic_impact(request_finding_text: str, canonical, observed_deviation: str) -> tuple[ImpactAssessment, str, str, str | None]:
     """Shared deterministic impact derivation used both when a compact
     recovery call succeeds (recovery's schema deliberately excludes impact)
@@ -710,15 +831,41 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
         split_topic_and_tail,
         strip_leading_article,
         topic_word,
+        validate_semantic_subject,
     )
 
-    fact_claims = []  # populated by caller via evidence_ledger where available; kept for signature symmetry
-    resolved = resolve_deviation(request_finding_text, fact_claims)
-    clean_noun = resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
+    # SINGLE AUTHORITATIVE SUBJECT SOURCE: canonical.finding_subject is
+    # produced exactly once, by understand_finding_node's deterministic
+    # resolver (resolve_deviation). This function previously re-derived
+    # its own independent subject by calling resolve_deviation() again --
+    # a second producer that could (and did, in production) disagree with
+    # the authoritative one, since it re-ran extraction on the raw finding
+    # text a second time with an empty claims list rather than consuming
+    # the value already computed once upstream. Falls back to a fresh
+    # resolve_deviation() call ONLY when canonical isn't available or its
+    # subject wasn't actually resolved (e.g. a hand-built state on the
+    # recovery path, or a test fixture) -- never to override a value the
+    # authoritative producer already established.
+    canon_subject = getattr(canonical, "finding_subject", None) if canonical else None
+    if canon_subject and canon_subject != "UNKNOWN" and validate_semantic_subject(canon_subject):
+        clean_noun = canon_subject
+    else:
+        resolved = resolve_deviation(request_finding_text, [])
+        clean_noun = resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
     topic = topic_word(clean_noun)
     topic_cap = topic[0].upper() + topic[1:]
     temporal_clause = extract_temporal_clause(request_finding_text)
-    if temporal_clause:
+    expiry_then_use = _detect_expiry_then_use(request_finding_text)
+    _use_date_text = _extract_use_date_text(request_finding_text) if expiry_then_use else None
+    if _use_date_text:
+        # Checked BEFORE the generic temporal_clause extractor (Known
+        # Failure 8): a specific date the finding states the resource was
+        # actually USED on is always more precise than a vague "during the
+        # audit" clause that extract_temporal_clause may also match --
+        # audit/discovery date must never win over an actual exposure date
+        # the finding provides.
+        degraded_period = _use_date_text
+    elif temporal_clause:
         degraded_period = temporal_clause[0].upper() + temporal_clause[1:]
     else:
         degraded_period = (
@@ -730,7 +877,65 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
     # status" or "the the operator".
     actor = strip_leading_article((canonical.actor if canonical else None) or None)
 
-    if clean_noun and not clean_noun.startswith("UNKNOWN"):
+    # DELIVERY_VS_RECEIPT conflict (Conflict-Center hardening, Section 7-9):
+    # checked FIRST, before expiry/tail/record-shaped branches below, since
+    # a delivery-vs-receipt conflict is not about equipment use, validated
+    # ranges, or record completeness -- those templates would contaminate a
+    # notification/communication finding with an unrelated domain (Section
+    # 19: "a finding about notification must never inherit the impact
+    # template from equipment/calibration findings"). affected_object
+    # represents the CONFLICTED EVENT (receipt), not just the document/
+    # message; process_at_risk is the communication/acknowledgement
+    # control, never a validated-use/equipment template; potential_effect
+    # stays conditional on whether personnel acted before the conflict
+    # resolved -- never asserts delivery, receipt, or acknowledgement
+    # actually failed.
+    _delivery_receipt_conflict = None
+    if canonical and getattr(canonical, "evidence_conflicts", None):
+        _delivery_receipt_conflict = next(
+            (c for c in canonical.evidence_conflicts
+             if getattr(c, "proposition_type", None) == "DELIVERY_VS_RECEIPT"
+             and getattr(c, "status", "UNRESOLVED") == "UNRESOLVED"),
+            None,
+        )
+    if clean_noun and not clean_noun.startswith("UNKNOWN") and _delivery_receipt_conflict is not None:
+        _clean_noun_cap = clean_noun[0].upper() + clean_noun[1:]
+        derived_obj = f"{_clean_noun_cap} receipt"
+        derived_process = f"{_clean_noun_cap} delivery, receipt, and acknowledgement control"
+        derived_effect = (
+            f"If affected personnel were required to act on {clean_noun} before receipt or acknowledgement "
+            "was confirmed, the scope and compliance status of those actions may require assessment. This "
+            "does not establish that delivery, receipt, or any related control failed."
+        )
+        derived_evidence_needed = (
+            f"Independent receipt/access confirmation and acknowledgement records for {clean_noun}, and "
+            "records of any activity performed by affected personnel relative to it"
+        )
+    elif clean_noun and not clean_noun.startswith("UNKNOWN") and expiry_then_use:
+        # Structural expiry/use-date relationship (Section 18/19): distinct
+        # from both the qualification-status branch and the generic
+        # record-absence branch below -- the issue here isn't "we can't
+        # confirm an activity happened" (the activity IS verified to have
+        # happened), it's "the activity happened after a stated expiry",
+        # which requires assessing VALIDITY, not existence. Never asserts
+        # the measurement/use was invalid, that a product was affected, or
+        # what caused the expiry to go unaddressed -- those are separate,
+        # unestablished propositions (P2/P3/P4 in the spec this implements).
+        derived_obj = clean_noun[0].upper() + clean_noun[1:]
+        _expiry_domain = _extract_expiry_domain_word(request_finding_text)
+        _process_domain_word = _expiry_domain.capitalize() if _expiry_domain else topic_cap
+        derived_process = f"{_process_domain_word} and equipment-use control"
+        derived_effect = (
+            f"If {clean_noun} was used after the stated expiry as this finding describes, the activity "
+            "performed may require assessment to determine whether it remained valid under the applicable "
+            "requirements. This does not establish that the activity was invalid or that any downstream "
+            "output was affected."
+        )
+        derived_evidence_needed = (
+            f"Current {topic} status/history, any approved extension or waiver, and records of what "
+            "relied on the activity performed after the stated expiry"
+        )
+    elif clean_noun and not clean_noun.startswith("UNKNOWN"):
         # tail = the subject phrase with its own leading "<topic> for "
         # prefix stripped (e.g. "training for the revised procedure" ->
         # "the revised procedure"). Only set when the subject actually HAS
@@ -749,7 +954,7 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
                 f"may have proceeded without confirmed qualification for {tail}."
             )
             derived_evidence_needed = f"Approved {topic} completion and authorization record"
-        else:
+        elif re.search(r"\b(records?|logs?|documentation|report|checklist|form|sheet)\b", clean_noun, re.IGNORECASE):
             # Record/documentation-shaped subject (e.g. "temperature
             # monitoring records for refrigerator QC-REF-02") -- the
             # subject itself IS already a clean, specific affected object;
@@ -770,6 +975,59 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
                 "applicable requirements."
             )
             derived_evidence_needed = f"Independent {topic} verification record (e.g. instrument audit trail, electronic log, or supervisory review)"
+        else:
+            # Plain entity/physical-object subject (e.g. "equipment",
+            # "balance BAL-014") with a structurally captured deviation
+            # condition (e.g. "operated outside its validated range") that
+            # is NOT itself a record/document -- the record-shaped
+            # template's "records prevent confirmation" framing doesn't fit
+            # a physical object, so this branch states the condition
+            # directly instead of forcing it through record vocabulary.
+            derived_obj = clean_noun[0].upper() + clean_noun[1:]
+            condition = (
+                canonical.deviation_condition if (canonical and canonical.deviation_condition not in (None, "UNKNOWN"))
+                else "in a condition that has not been verified against applicable requirements"
+            )
+            # "Operation and validated-use control" / "validity of any
+            # activity or output associated with that use" ONLY fits a
+            # condition that actually describes something being
+            # operated/used outside a range/limit/parameter (e.g. equipment
+            # used after expiry, operated outside a validated range) --
+            # applying that phrasing unconditionally to EVERY plain-entity
+            # subject leaked equipment/validated-use vocabulary into
+            # unrelated findings (e.g. "missed inspections" -> "Missed
+            # operation and validated-use control", Section 19's exact
+            # failure mode). Checked structurally against the condition
+            # text itself, not the entity's own name.
+            _use_related_condition = bool(condition) and bool(re.search(
+                r"\b(?:operat\w*|us(?:e|ed|ing)|perform\w*)\s+outside\b|"
+                r"\boutside\s+(?:its|the|their)\s+[\w\s]{0,20}?(?:range|limits?|parameters?|specification|tolerance|threshold)\b",
+                condition, re.IGNORECASE,
+            ))
+            if _use_related_condition:
+                derived_process = f"{topic_cap} operation and validated-use control"
+                derived_effect = (
+                    f"{derived_obj} was reportedly {condition}. This may require assessment of the validity or "
+                    "acceptability of any activity or output associated with that use against the applicable "
+                    "requirements. This does not establish that any specific output was invalid or that a "
+                    "particular cause was responsible."
+                )
+                derived_evidence_needed = f"Applicable requirement/specification for {clean_noun}, and records of actual use or condition during the affected period"
+            else:
+                # Domain-neutral default: states the condition without
+                # presupposing an operation/use/validated-range concept the
+                # finding never actually establishes. Uses the full subject
+                # phrase (not just its single-word topic, which can be a
+                # leading adjective/participle like "missed" rather than
+                # the core noun -- "Missed inspections control" reads far
+                # better than "Missed control").
+                derived_process = f"{derived_obj} control"
+                derived_effect = (
+                    f"{derived_obj} was reportedly {condition}. Scope and downstream consequence require "
+                    "assessment against the applicable requirement and objective records. This does not "
+                    "establish a cause."
+                )
+                derived_evidence_needed = f"Applicable requirement/specification for {clean_noun}, and objective records relevant to the affected period"
     else:
         derived_process = "NOT ESTABLISHED"
         derived_obj = "NOT ESTABLISHED"
@@ -796,6 +1054,23 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
     """Run consolidated RCA, 5-Why, Impact, CAPA, and CA Draft synthesis."""
     trace = list(state.get("trace", []))
     errors = list(state.get("errors", []))
+    # Internal execution-state record (Phase 3 of the final hardening pass):
+    # distinguishes WHICH path actually produced the result without
+    # changing the public analysis_mode contract (still just "LLM" /
+    # "DETERMINISTIC" / "DEGRADED" -- unaudited frontend consumers only
+    # ever see that field). `source` narrows to PRIMARY_LLM/RECOVERY_LLM/
+    # DETERMINISTIC; `validation_repairs` counts hypotheses/steps this
+    # node itself corrected (contradiction/domain/provenance drops) so
+    # "the LLM succeeded but needed repair" is distinguishable from "the
+    # LLM's raw output survived untouched" without inventing a new public
+    # enum value.
+    synthesis_execution: dict = {
+        "source": "PRIMARY_LLM",
+        "recovery_used": False,
+        "deterministic_fallback_used": False,
+        "validation_repairs": 0,
+        "validation_rejections": 0,
+    }
     request = state["request"]
     evidence_ledger = state.get("evidence_ledger", [])
     quality = state.get("observation_quality")
@@ -889,6 +1164,9 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         )
 
     from app.services import llm_metrics
+    import uuid
+    _request_id = uuid.uuid4().hex[:8]
+    synthesis_execution["request_id"] = _request_id
     llm_metrics.increment("llm_primary_attempted")
 
     try:
@@ -908,11 +1186,32 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         provider_attempts = list(_router_meta.get("provider_attempts", []))
         parsed = parse_llm_json(raw)
         llm_metrics.increment("llm_primary_success")
+        from app.services.ollama_client import get_last_call_metadata as _get_ollama_meta
+        _ollama_meta = _get_ollama_meta()
+        llm_metrics.record_execution(
+            request_id=_request_id, node="core_synthesis", model=settings.ollama_model, phase="primary",
+            elapsed_ms=_ollama_meta.get("elapsed_ms"), prompt_tokens=_ollama_meta.get("prompt_eval_count"),
+            output_tokens=_ollama_meta.get("eval_count"),
+        )
         source_text = build_source_text(request.finding_text, evidence_ledger)
 
+        # Structured counter delta (Phase 4: no trace-message substring
+        # inference) -- _parse_causal_fields's guards call
+        # llm_metrics.record_validation_rejection/_repair directly at each
+        # decision site; the before/after delta on those cumulative
+        # counters is what synthesis_execution reports for this call.
+        _rejections_before = llm_metrics.snapshot().get("validation_rejections_total", 0)
+        _repairs_before = llm_metrics.snapshot().get("validation_repairs_total", 0)
         root_cause, five_why, contributing_factors = _parse_causal_fields(
             parsed, mechanism, evidence_ledger, source_text, observed_deviation, request.finding_text, trace,
             has_unresolved_conflict, claim_ids,
+            canonical_subject=getattr(canonical, "finding_subject", None),
+        )
+        synthesis_execution["validation_rejections"] = (
+            llm_metrics.snapshot().get("validation_rejections_total", 0) - _rejections_before
+        )
+        synthesis_execution["validation_repairs"] = (
+            llm_metrics.snapshot().get("validation_repairs_total", 0) - _repairs_before
         )
 
         # ---------------------------------------------------------------------
@@ -943,7 +1242,9 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         from app.agent.nodes.plan_investigation_fallback import (
             build_deterministic_investigation_plan as _build_area_plan,
         )
-        _, _area_plan = _build_area_plan(request.finding_text, evidence_ledger)
+        _, _area_plan = _build_area_plan(
+            request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
+        )
         capa = CapaAnalysis(
             status=CapaStatus.INVESTIGATION_REQUIRED,
             potential_areas=_area_plan.areas,
@@ -966,8 +1267,10 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         from app.services.ollama_client import get_last_call_metadata as get_last_ollama_metadata
         primary_ollama_meta = get_last_ollama_metadata()
         primary_failure_type = _classify_failure(primary_exc, primary_ollama_meta)
-        llm_metrics.increment(
-            "llm_primary_timeout" if primary_failure_type == "TIMEOUT" else "llm_primary_invalid_json"
+        llm_metrics.increment(f"llm_primary_{_failure_metric_suffix(primary_failure_type)}")
+        llm_metrics.record_execution(
+            request_id=_request_id, node="core_synthesis", model=settings.ollama_model, phase="primary",
+            elapsed_ms=primary_ollama_meta.get("elapsed_ms"), failure_type=primary_failure_type,
         )
         logger.info(
             "node=core_synthesis failure_type=%s hit_output_limit=%s eval_count=%s max_output_tokens=%s",
@@ -1015,9 +1318,26 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             )
             recovery_parsed = parse_llm_json(recovery_raw)
             llm_metrics.increment("llm_recovery_success")
+            _recovery_ollama_meta = get_last_ollama_metadata()
+            llm_metrics.record_execution(
+                request_id=_request_id, node="core_synthesis_recovery", model=settings.ollama_model, phase="recovery",
+                elapsed_ms=_recovery_ollama_meta.get("elapsed_ms"), prompt_tokens=_recovery_ollama_meta.get("prompt_eval_count"),
+                output_tokens=_recovery_ollama_meta.get("eval_count"),
+            )
+            _rejections_before_recovery = llm_metrics.snapshot().get("validation_rejections_total", 0)
+            _repairs_before_recovery = llm_metrics.snapshot().get("validation_repairs_total", 0)
             root_cause, five_why, contributing_factors = _parse_causal_fields(
                 recovery_parsed, mechanism, evidence_ledger, source_text, observed_deviation, request.finding_text, trace,
                 has_unresolved_conflict, claim_ids,
+                canonical_subject=getattr(canonical, "finding_subject", None),
+            )
+            synthesis_execution["source"] = "RECOVERY_LLM"
+            synthesis_execution["recovery_used"] = True
+            synthesis_execution["validation_rejections"] = (
+                llm_metrics.snapshot().get("validation_rejections_total", 0) - _rejections_before_recovery
+            )
+            synthesis_execution["validation_repairs"] = (
+                llm_metrics.snapshot().get("validation_repairs_total", 0) - _repairs_before_recovery
             )
             recovery_used = True
             trace.append(AgentTraceStep.ok(
@@ -1029,8 +1349,10 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         except Exception as recovery_exc:
             recovery_meta = get_last_ollama_metadata()
             recovery_failure_type = _classify_failure(recovery_exc, recovery_meta)
-            llm_metrics.increment(
-                "llm_recovery_timeout" if recovery_failure_type == "TIMEOUT" else "llm_recovery_invalid_json"
+            llm_metrics.increment(f"llm_recovery_{_failure_metric_suffix(recovery_failure_type)}")
+            llm_metrics.record_execution(
+                request_id=_request_id, node="core_synthesis_recovery", model=settings.ollama_model, phase="recovery",
+                elapsed_ms=recovery_meta.get("elapsed_ms"), failure_type=recovery_failure_type,
             )
             logger.info(
                 "node=core_synthesis_recovery failure_type=%s recovery=DETERMINISTIC_SYNTHESIS",
@@ -1057,7 +1379,9 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             build_conditional_capa_actions,
             build_deterministic_investigation_plan,
         )
-        _, fallback_plan = build_deterministic_investigation_plan(request.finding_text, evidence_ledger)
+        _, fallback_plan = build_deterministic_investigation_plan(
+            request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
+        )
         investigation_plan_override = fallback_plan
 
         if recovery_used and root_cause is not None and five_why is not None:
@@ -1082,12 +1406,26 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             analysis_mode = "DETERMINISTIC"
             analysis_engine = "DETERMINISTIC"
             llm_metrics.increment("deterministic_fallback")
+            synthesis_execution["source"] = "DETERMINISTIC"
+            synthesis_execution["deterministic_fallback_used"] = True
+            # Same _request_id as the primary/recovery attempts above
+            # (Phase 7 correlation) -- a caller correlating recent_executions()
+            # by request_id sees the full primary -> recovery -> fallback
+            # chain for one synthesis call, not three unrelated ids.
+            llm_metrics.record_execution(
+                request_id=_request_id, node="core_synthesis", model=settings.ollama_model, phase="fallback",
+            )
 
             from app.agent.nodes.five_why_fallback import build_deterministic_five_why
-            five_why = build_deterministic_five_why(request.finding_text, evidence_ledger)
-            fallback_hyps, fallback_plan = build_deterministic_investigation_plan(request.finding_text, evidence_ledger)
+            five_why = build_deterministic_five_why(
+                request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
+            )
+            fallback_hyps, fallback_plan = build_deterministic_investigation_plan(
+                request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
+            )
             investigation_plan_override = fallback_plan
             contributing_factors = []
+            llm_metrics.increment("deterministic_hypotheses_generated", len(fallback_hyps))
 
             for h in fallback_hyps:
                 h.confidence = hypothesis_confidence(h)
@@ -1148,6 +1486,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         "ca_draft": ca_draft,
         "analysis_mode": analysis_mode,
         "analysis_engine": analysis_engine,
+        "synthesis_execution": synthesis_execution,
         "provider_used": provider_used,
         "fallback_used": fallback_used,
         "provider_attempts": provider_attempts,

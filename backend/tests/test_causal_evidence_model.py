@@ -247,12 +247,18 @@ def test_case_i_unsupported_procedure_accessibility_rejected():
 
 
 def test_case_j_missing_training_record():
-    """Case J: Missing training record finding."""
+    """Case J: Missing training record finding -- a bare record-absence
+    finding with no reported explanation and no conflict is NOT grounds
+    for a hypothesis (Section 21: "not derived solely from an absent
+    record" / "ZERO HYPOTHESES IS A VALID AND OFTEN CORRECT OUTPUT").
+    Previously this asserted >=2 generic-bucket hypotheses ("controls...
+    not executed") -- exactly the invented-RCA anti-pattern the General/
+    Unresolved branch was rewritten to stop producing. The correct output
+    is zero hypotheses plus real investigation questions."""
     from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
     finding = "The training record for the operator was missing from the personnel file."
     hyps, plan = build_deterministic_investigation_plan(finding, [])
-    assert len(hyps) >= 2
-    assert any("not executed" in h.statement.lower() or "controls" in h.statement.lower() or "omitted" in h.statement.lower() for h in hyps)
+    assert hyps == []
     assert len(plan.questions) >= 1
 
 

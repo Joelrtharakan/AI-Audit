@@ -48,6 +48,10 @@ _FRAMING_PREFIXES = [
     re.compile(r"^\s*during\s+.+?,\s*", re.IGNORECASE),
     re.compile(r"^\s*it\s+(?:was|is)\s+(?:observed|found|noted|identified|determined)\s+that\s+", re.IGNORECASE),
     re.compile(
+        r"^\s*(?:the\s+)?(?:audit\s+)?observation\s+(?:states?|notes?|indicates?|reports?)\s+that\s+",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"^\s*(?:the\s+)?(?:auditor|inspector|reviewer|assessor)\s+"
         r"(?:identified|found|observed|noted|determined)\s+(?:that\s+)?",
         re.IGNORECASE,
@@ -288,10 +292,14 @@ _RELATIVE_TIME_RE = re.compile(
 )
 
 
+_DEGRADED_CONDITIONS = {None, "", "UNKNOWN", "status unconfirmed", "condition unconfirmed"}
+
+
 def classify_finding_specificity(
     finding_text: str,
     reported_claims: list[str] | None = None,
     mechanism_status: str | None = None,
+    deviation_condition: str | None = None,
 ) -> str:
     """Deterministic finding-specificity classification (HIGH/MEDIUM/LOW),
     structural only -- never tied to a domain word or a specific evaluated
@@ -299,13 +307,17 @@ def classify_finding_specificity(
 
     A finding is only LOW specificity when it has NONE of: a specific
     entity/equipment/document identifier, a date or relative time period, a
-    reported/attributed statement, or an already-established immediate
-    mechanism. That combination is exactly what a generic allegation like
-    "the department is not following the required procedure correctly"
-    looks like structurally -- no object, no period, no account, no
-    mechanism -- versus a finding that names an affected object, a date, or
-    quotes someone even without an explicit ID (e.g. "the checklist was not
-    completed for three consecutive days; the operator stated...").
+    reported/attributed statement, an already-established immediate
+    mechanism, or a structurally-captured deviation condition (e.g. "not
+    completed", "operated outside its validated range" -- a concrete stated
+    condition, not the degraded "status/condition unconfirmed" filler).
+    That combination is exactly what a generic allegation like "the
+    department is not following the required procedure correctly" looks
+    like structurally -- no object, no period, no account, no mechanism, no
+    stated condition -- versus a finding that names an affected object, a
+    date, quotes someone, or states a concrete deviation condition (e.g.
+    "the equipment was operated outside its validated range" -- clear even
+    with no entity ID, date, or attributed statement).
 
     Used to gate hypothesis generation: a LOW-specificity finding must not
     receive fabricated, evidence-free causal hypotheses (Section 29) -- the
@@ -317,8 +329,9 @@ def classify_finding_specificity(
     has_date_or_period = bool(_DATE_RE.search(text) or _RELATIVE_TIME_RE.search(text))
     has_reported = bool(reported_claims)
     has_mechanism = bool(mechanism_status) and mechanism_status not in ("UNKNOWN", "NONE")
+    has_condition = bool(deviation_condition) and deviation_condition.strip() not in _DEGRADED_CONDITIONS
 
-    concrete_signals = sum([has_entity, has_date_or_period, has_reported, has_mechanism])
+    concrete_signals = sum([has_entity, has_date_or_period, has_reported, has_mechanism, has_condition])
     if concrete_signals == 0:
         return "LOW"
     if concrete_signals >= 2:
@@ -502,21 +515,37 @@ def split_topic_and_tail(subject: str | None, topic: str) -> str | None:
 
 def build_affected_object_phrase(subject: str | None, actor: str | None = None) -> str:
     """Build the ONE canonical 'affected object' phrase from a resolved
-    subject and an optional actor, e.g. subject="training for the revised
-    procedure" + actor="The operator" -> "Operator training status for the
-    revised procedure".
+    subject and an optional actor.
 
     This is the single construction used everywhere an affected-object-style
     phrase is needed (deterministic synthesis, LLM-output repair) so a
     downstream field is never built by independently re-concatenating
-    semantic parts (role + topic + tail) a second, inconsistent way. Purely
-    structural -- topic/tail come from the finding's own resolved subject,
-    never a domain-specific hardcode.
+    semantic parts (role + topic + tail) a second, inconsistent way.
+
+    Two subject shapes require different treatment (the same distinction
+    `_derive_deterministic_impact` already makes -- reused here rather than
+    re-decided a second, inconsistent way):
+
+    - ACTIVITY/QUALIFICATION-shaped ("training for the revised procedure"):
+      split_topic_and_tail finds a "<topic> for <tail>" structure, and the
+      affected object IS a role/qualification status -- built from
+      role + topic + tail exactly once each, e.g. "Operator training
+      status for the revised procedure".
+
+    - ENTITY-shaped ("balance BAL-014", "temperature log for refrigerator
+      QC-REF-02"): the subject is ALREADY a clean, specific object with no
+      "<topic> for <tail>" structure to extract. Wrapping it in the
+      actor/qualification template regardless produces exactly the
+      "Personnel calibration status for calibration certificate" defect --
+      entity + fabricated process + fabricated status + a default actor
+      the finding never named. Used directly instead, capitalized.
     """
     if not subject or subject.startswith("UNKNOWN"):
         return "NOT ESTABLISHED"
     topic = topic_word(subject)
-    tail = split_topic_and_tail(subject, topic) or subject
+    tail = split_topic_and_tail(subject, topic)
+    if not tail:
+        return subject[0].upper() + subject[1:]
     stripped_actor = strip_leading_article(actor)
     actor_word = stripped_actor.capitalize() if stripped_actor else "Personnel"
     return f"{actor_word} {topic} status for {tail}"
@@ -633,6 +662,15 @@ _CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         re.compile(r"^(?P<subject>.+?)\s+failed\s+to\s+(?P<cond>[a-z][a-z\s]*?)\s*\.?$", re.IGNORECASE),
     ),
     (
+        "outside_scope",
+        re.compile(
+            r"^(?P<subject>.+?)\s+(?:was|were)\s+(?P<verb>operated|used|performed|conducted|run|stored|handled)"
+            r"\s+outside\s+(?:its|the|their)\s+(?P<cond>[a-z][a-z\s]*?(?:range|limits?|parameters?|specification|"
+            r"tolerance|threshold))\b.*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "bare_failed",
         re.compile(r"^(?P<subject>.+?)\s+failed\b.*$", re.IGNORECASE),
     ),
@@ -645,6 +683,128 @@ _PREFIX_CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("missing", re.compile(r"^(?:an?\s+)?missing\s+(?P<subject>.+?)\s*\.?$", re.IGNORECASE)),
     ("nonconforming", re.compile(r"^(?:an?\s+)?nonconforming\s+(?P<subject>.+?)\s*\.?$", re.IGNORECASE)),
 ]
+
+
+_ENTITY_TYPE_NOUN_RE = re.compile(
+    r"\b(?:the\s+)?([a-z][a-z\s-]{1,30}?)\s+(" + _ENTITY_RE.pattern[3:-3] + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _entity_noun_phrase(text: str, entity: str) -> str | None:
+    """Structural (not keyword-list) affected-object resolution: when the
+    finding names a tagged entity (an equipment/room/lot code the ENTITY_RE
+    pattern already recognizes), the noun immediately preceding it in the
+    RAW SENTENCE -- "balance BAL-014", "refrigerator QC-REF-02", "scale
+    SC-04" -- is the actual concrete object, not a generic status-label
+    template. This works for any entity+preceding-noun pairing the text
+    happens to use, so it generalizes across domains without a per-domain
+    keyword list (unlike the "if 'calibration' in text: return ..."
+    fallback this function is meant to preempt)."""
+    if not text or not entity:
+        return None
+    for match in _ENTITY_TYPE_NOUN_RE.finditer(text):
+        if match.group(2).upper() != entity.upper():
+            continue
+        noun_phrase = match.group(1).strip()
+        # The entity-type noun is whatever comes AFTER the LAST
+        # preposition/article boundary immediately before the entity --
+        # "the calibration certificate for balance BAL-014" should yield
+        # "balance", not "certificate balance" (an earlier clause's noun
+        # incidentally swept in) or "for balance" (a bare preposition).
+        # Splitting on the last stopword boundary keeps only the words
+        # genuinely modifying the entity itself.
+        _stopwords = {"for", "the", "a", "an", "of", "to", "in", "on", "at", "and", "or", "with"}
+        words = noun_phrase.split()
+        last_stopword_idx = max(
+            (i for i, w in enumerate(words) if w.lower() in _stopwords), default=-1
+        )
+        words = words[last_stopword_idx + 1:] or words
+        noun_phrase = " ".join(words[-2:])
+        if not noun_phrase or not validate_semantic_subject(noun_phrase):
+            continue
+        return f"{noun_phrase} {entity}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Referenced-Evidence Boundary (Section: REFERENCED EVIDENCE != INSPECTED
+# EVIDENCE): a document/record the finding merely cites, mentions, attaches,
+# or refers to -- but which was not actually available for inspection --
+# must never contaminate subject/topic/causal resolution. Detection is
+# structural (a reference-verb clause co-occurring with an unavailability
+# clause in the same sentence), never a per-document-type keyword list, so
+# it generalizes across "calibration report", "training record",
+# "maintenance log", "qualification document", etc. without enumerating them.
+# ---------------------------------------------------------------------------
+_DOC_REFERENCE_VERB_RE = re.compile(
+    r"\b(?:referenced|cited|referred\s+to|refers?\s+to)\s+(?:an?\s+|the\s+)?(?:attached\s+)?"
+    r"(?P<doc>[a-z][a-z\s-]{1,50}?)\b(?=\s*(?:,|\.|;|\s+that\b|\s+which\b|\s+but\b|\s+and\b|$))",
+    re.IGNORECASE,
+)
+# Passive-voice shape: the document noun phrase precedes its reference verb
+# ("the attached certificate was mentioned/cited/referenced ...").
+_DOC_MENTIONED_RE = re.compile(
+    r"\b(?:the\s+)?(?:attached\s+)?(?P<doc>[a-z][a-z\s-]{1,50}?)\s+was\s+(?:mentioned|cited|referenced)\b",
+    re.IGNORECASE,
+)
+_DOC_UNAVAILABLE_RE = re.compile(
+    r"\b(?:was|were|is|are)\s+not\s+(?:available|attached|provided|accessible)\b|"
+    r"\bcould\s+not\s+be\s+(?:retrieved|accessed|reviewed|provided|attached)\b|"
+    r"\b(?:was|were|is|are)\s+unavailable\b|"
+    r"\bcould\s+not\s+(?:access|retrieve|review)\b|"
+    r"\bnot\s+available\s+to\s+the\b",
+    re.IGNORECASE,
+)
+_DOC_TYPE_TRAILING_STOPWORDS = {"it", "that", "which", "was", "were"}
+
+
+def _clean_document_type(raw: str) -> str:
+    words = [w for w in raw.strip().split() if w.lower() not in _DOC_TYPE_TRAILING_STOPWORDS]
+    return " ".join(words).strip(" ,.;:")
+
+
+def detect_referenced_unavailable_documents(text: str) -> list[tuple[str, str]]:
+    """Return [(document_type, raw_sentence_span), ...] for every sentence
+    where a document is referenced/cited/mentioned/attached AND separately
+    marked as unavailable/inaccessible/not provided within that same
+    sentence. A document's TYPE/NAME is preserved as metadata; this function
+    deliberately does NOT attempt to resolve what the document says -- there
+    is nothing in the finding text that could license that."""
+    if not text:
+        return []
+    results: list[tuple[str, str]] = []
+    for sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
+        sentence = sentence.strip()
+        if not sentence or not _DOC_UNAVAILABLE_RE.search(sentence):
+            continue
+        doc_type = None
+        m = _DOC_REFERENCE_VERB_RE.search(sentence)
+        if m:
+            doc_type = _clean_document_type(m.group("doc"))
+        else:
+            m2 = _DOC_MENTIONED_RE.search(sentence)
+            if m2:
+                doc_type = _clean_document_type(m2.group("doc"))
+        if doc_type and len(doc_type) > 2:
+            results.append((doc_type, sentence))
+    return results
+
+
+def _mask_referenced_document_spans(text: str) -> str:
+    """Remove sentences identified as referenced-but-unavailable-document
+    clauses before subject/topic resolution runs, so a document's type
+    vocabulary (e.g. "calibration report") can never seed the finding
+    subject just because it was mentioned -- the actual observed deviation
+    must be resolved from the REMAINING text. No-op (returns text unchanged)
+    when nothing is detected."""
+    refs = detect_referenced_unavailable_documents(text)
+    if not refs:
+        return text
+    masked = text
+    for _doc_type, span in refs:
+        masked = masked.replace(span, "")
+    return re.sub(r"\s+", " ", masked).strip()
 
 
 def _extract_activity_from_reported_finding(text: str) -> str:
@@ -678,10 +838,21 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
     actors = extract_actors(text)
     date = extract_date(text)
 
+    # Referenced-Evidence Boundary: a sentence that only reports a document
+    # was referenced/cited/attached and separately unavailable must never be
+    # treated as describing the finding's own subject/deviation -- its
+    # vocabulary (e.g. "calibration report") is metadata about a citation,
+    # not a claim about the affected object. Excluded from the structural
+    # sentence loop and the keyword fallback below (Section 17: structural
+    # provenance check, not a per-document-type keyword list).
+    _referenced_doc_sentences = {
+        span for _doc_type, span in detect_referenced_unavailable_documents(text)
+    }
+
     # 1. Try structural sentence patterns
     for sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
         sentence = sentence.strip()
-        if not sentence:
+        if not sentence or sentence in _referenced_doc_sentences:
             continue
         stripped = _strip_framing(sentence)
 
@@ -711,6 +882,9 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                 cond = f"deviated from {req.strip()}"
             elif name == "missing_from":
                 cond = "missing"
+            elif name == "outside_scope" and cond:
+                verb = (groups.get("verb") or "operated").strip()
+                cond = f"{verb} outside its {cond.strip()}"
 
             return DeviationInfo(
                 subject=subj,
@@ -770,10 +944,26 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                     matched=True,
                 )
 
-    # 2. Check if the finding describes reported speech / training conflict
-    activity_subj = _extract_activity_from_reported_finding(text)
-    if entities and not any(e in activity_subj for e in entities):
-        activity_subj = f"{activity_subj} for {entities[0]}"
+    # 2. Structural entity-noun resolution FIRST (Section 6): if the raw
+    # text names a tagged entity preceded by a concrete noun ("balance
+    # BAL-014"), that IS the affected object -- prefer it over the
+    # keyword-guessed generic status-label fallback below, which produces
+    # exactly the "process/status wrapped around an entity ID" pattern
+    # ("equipment calibration status for BAL-014") this section exists to
+    # eliminate.
+    activity_subj = None
+    if entities:
+        activity_subj = _entity_noun_phrase(text, entities[0])
+    if not activity_subj:
+        # Keyword fallback runs on the MASKED text (referenced-but-
+        # unavailable-document clauses removed) so a document's mere
+        # mention/type (e.g. "calibration report") can never seed the
+        # finding subject just because it was cited -- see
+        # detect_referenced_unavailable_documents.
+        masked_text = _mask_referenced_document_spans(text)
+        activity_subj = _extract_activity_from_reported_finding(masked_text)
+        if entities and not any(e in activity_subj for e in entities):
+            activity_subj = f"{activity_subj} for {entities[0]}"
 
     return DeviationInfo(
         subject=activity_subj,
@@ -791,6 +981,18 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
     )
 
 
+def resolve_referenced_documents(finding_text: str) -> list[dict]:
+    """Public wrapper returning referenced-but-unavailable documents as
+    plain dicts (document_type, raw_span) for the canonical state builder --
+    the single authoritative producer of this metadata (Referenced-Evidence
+    Boundary). Never returns content; a document's type/name is the only
+    thing this can ever establish."""
+    return [
+        {"document_type": doc_type, "raw_span": span}
+        for doc_type, span in detect_referenced_unavailable_documents(finding_text)
+    ]
+
+
 def resolve_deviation(finding_text: str, fact_claims: list[str] | None = None) -> DeviationInfo:
     """Best-effort semantic subject/condition resolution for a finding.
     Guaranteed to return a valid noun phrase subject (never a verb clause)."""
@@ -805,7 +1007,7 @@ def resolve_deviation(finding_text: str, fact_claims: list[str] | None = None) -
             break
 
     if not result.subject or not validate_semantic_subject(result.subject):
-        activity_subj = _extract_activity_from_reported_finding(finding_text)
+        activity_subj = _extract_activity_from_reported_finding(_mask_referenced_document_spans(finding_text))
         result.subject = activity_subj
         result.finding_subject = activity_subj
         result.affected_object = activity_subj

@@ -237,7 +237,7 @@ async def test_hypothesis_citing_nonexistent_claim_id_is_rejected():
         result = await core_synthesis_node(state)
     names = {h.name for h in result["root_cause"].candidate_hypotheses}
     assert "INVENTED" not in names
-    assert llm_metrics.snapshot()["hypotheses_provenance_rejected"] >= 1
+    assert llm_metrics.aggregated()["provenance_rejections"] >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@ async def test_hypothesis_with_zero_provenance_is_rejected():
         result = await core_synthesis_node(state)
     names = {h.name for h in result["root_cause"].candidate_hypotheses}
     assert "UNGROUNDED" not in names
-    assert llm_metrics.snapshot()["hypotheses_provenance_rejected"] >= 1
+    assert llm_metrics.aggregated()["provenance_rejections"] >= 1
 
 
 # ---------------------------------------------------------------------------

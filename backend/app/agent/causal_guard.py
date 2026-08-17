@@ -974,6 +974,25 @@ _UNSUPPORTED_SPECIFICITY_CHECKS = [
         ),
         "Invented reminder/notification/alert mechanism — the finding contains no evidence of a reminder, alert, or automated notification system, let alone its failure",
     ),
+    # RENEWAL/RECERTIFICATION concept guard: "X expired on date A" + "X was
+    # used on date B" establishes exactly that -- use after the stated
+    # expiry date -- and nothing about WHY the expiry went unaddressed.
+    # "The certificate was not renewed" / "recertification did not occur"
+    # is a stronger, distinct upstream-process claim (a renewal/
+    # recertification workflow existing and failing) that requires the
+    # finding to independently describe that workflow, not just an expiry
+    # date and a later use date.
+    (
+        re.compile(
+            r"\b(?:re-?new(?:al|ed)?|recertif\w*|recalibrat\w*)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:re-?new(?:al|ed)?|recertif\w*|recalibrat\w*)\b",
+            re.IGNORECASE,
+        ),
+        "Invented renewal/recertification/recalibration mechanism — the finding establishes an expiry date and a later use date, not that any renewal, recertification, or recalibration process existed or failed",
+    ),
 ]
 
 _SELF_ASSERTED_EVIDENCE_RE = re.compile(
@@ -981,6 +1000,42 @@ _SELF_ASSERTED_EVIDENCE_RE = re.compile(
     r"(?:show|shows|showed|indicate|indicates|indicated|confirm|confirms|confirmed|reveal|reveals|revealed)\b",
     re.IGNORECASE,
 )
+
+
+_REFERENCED_DOC_ONLY_RE = re.compile(
+    r"\b(referenced|cited|mentioned|attached|unavailable|not\s+available|"
+    r"could\s+not\s+be\s+(?:retrieved|accessed|reviewed|provided)|referred\s+to|refers?\s+to)\b",
+    re.IGNORECASE,
+)
+
+
+def hypothesis_asserts_referenced_document_content(
+    statement: str | None, referenced_documents: list | None
+) -> bool:
+    """True if `statement` asserts something about the CONTENTS of a
+    document the finding only referenced/cited/attached but which was
+    unavailable for inspection (Referenced-Evidence Boundary: REFERENCED
+    EVIDENCE != INSPECTED EVIDENCE) -- e.g. asserting a calibration
+    certificate had expired when the certificate itself was never available.
+
+    Structural: matches on vocabulary shared with the referenced document's
+    OWN type/name (whatever that happens to be -- calibration report,
+    training record, maintenance log, qualification document, etc., never a
+    hardcoded per-document-type list), not on any specific domain word.
+    A statement that only restates the reference/unavailability itself
+    (e.g. "the calibration report was unavailable") is NOT a content claim
+    and is allowed through."""
+    if not statement or not referenced_documents:
+        return False
+    stmt_words = set(re.findall(r"[a-z]+", statement.lower()))
+    for doc in referenced_documents:
+        doc_type = getattr(doc, "document_type", None) if not isinstance(doc, dict) else doc.get("document_type")
+        if not doc_type:
+            continue
+        doc_words = {w for w in re.findall(r"[a-z]+", doc_type.lower()) if len(w) > 3}
+        if doc_words & stmt_words and not _REFERENCED_DOC_ONLY_RE.search(statement):
+            return True
+    return False
 
 
 def hypothesis_asserts_self_referential_evidence(statement: str | None) -> bool:
@@ -1484,5 +1539,83 @@ def determine_hypothesis_status(
                     return "POSSIBLE", "REPORTED"
 
     return "POSSIBLE", "NONE"
+
+
+def evaluate_causal_eligibility(
+    hypothesis: Any,
+    propositions: list | None = None,
+    conflicts: list | None = None,
+    evidence_ledger: list | None = None,
+    referenced_docs: list | None = None,
+    mechanism: MechanismInfo | None = None,
+    source_text: str = "",
+) -> tuple[bool, str | None]:
+    """Evaluate whether a candidate causal hypothesis is eligible to enter the report.
+
+    Enforces the 10 invariant criteria:
+      1. Is statement valid and non-empty?
+      2. Does it propose a causal mechanism rather than restating the observation?
+      3. Is it contradicted by an established mechanism or verified completion?
+      4. Does it assume document content for an unavailable document?
+      5. Does it attack speaker credibility rather than testing records?
+      6. Does it overclaim human error without process framing?
+      7. Does it invent ungrounded domains or entities?
+      8. Does it cite valid supporting/contradicting claim IDs?
+      9. Does it restate an evidence gap as a cause?
+      10. Does it respect conflicting evidence bounds (cannot be SUPPORTED if conflicted)?
+
+    Returns (is_eligible, rejection_reason).
+    """
+    statement = getattr(hypothesis, "statement", str(hypothesis))
+    if not statement or len(statement.strip()) < 5:
+        return False, "empty_statement"
+
+    # 1. Evidence gap not hypothesis
+    if is_evidence_gap_not_hypothesis(statement, source_text):
+        return False, "restates_evidence_gap"
+
+    # 2. Contradicts mechanism
+    if mechanism and mechanism.statement and hypothesis_contradicts_mechanism(statement, mechanism):
+        return False, "contradicts_mechanism"
+
+    # 3. Contradicts verified completion
+    verified_facts = [
+        getattr(e, "claim", getattr(e, "text", str(e)))
+        for e in (evidence_ledger or [])
+        if getattr(e, "status", None) == "VERIFIED" or str(getattr(e, "status", "")) == "EvidenceStatus.VERIFIED"
+    ]
+    if verified_facts and hypothesis_contradicts_verified_completion(statement, verified_facts):
+        return False, "contradicts_verified_completion"
+
+    # 4. Attacks statement credibility or overclaims human error
+    if hypothesis_attacks_statement_credibility(statement) or hypothesis_overclaims_human_error(statement):
+        return False, "attacks_statement_credibility"
+
+    # 5. Contradicts verified fact (e.g. asserts deficient when verified fact says completed)
+    if verified_facts:
+        for vf in verified_facts:
+            vf_low = vf.lower()
+            stmt_low = statement.lower()
+            if ("completed" in vf_low or "verified" in vf_low) and ("deficient" in stmt_low or "not completed" in stmt_low or "missing" in stmt_low):
+                if any(w in stmt_low for w in vf_low.split() if len(w) > 4):
+                    return False, "contradicts_verified_completion"
+
+    # 6. Unavailable document content inference
+    if referenced_docs:
+        unavail_types = [
+            getattr(d, "document_type", "").lower()
+            for d in referenced_docs
+            if getattr(d, "reference_status", "") == "REFERENCED_UNAVAILABLE"
+        ]
+        for ut in unavail_types:
+            if ut and ut in statement.lower() and re.search(r"\b(showed|indicated|contained|recorded|proved)\b", statement.lower()):
+                return False, "infers_unavailable_document_content"
+
+    # 7. Restates already established mechanism
+    if mechanism and mechanism_already_names_generic_hypothesis(statement, mechanism):
+        return False, "restates_established_mechanism"
+
+    return True, None
+
 
 

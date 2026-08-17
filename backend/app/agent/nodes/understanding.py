@@ -148,25 +148,46 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     fact_claims = [e.claim for e in ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in ledger if e.status == EvidenceStatus.REPORTED]
 
-    # Semantic subject/condition resolution (Section 2 & 3): prefer the LLM's
-    # own structured extraction only when it produced a grounded, non-pronoun,
-    # non-clause subject; otherwise fall back to the deterministic structural extractor.
+    # Semantic subject/condition resolution: the deterministic structural
+    # resolver (resolve_deviation -> extract_semantic_subject, including
+    # its entity-noun-phrase extraction: "balance BAL-014", "pipette
+    # P-200") is the SOLE authoritative producer of finding_subject/
+    # affected_object. It previously competed with the LLM's own
+    # extraction.deviation_subject, which won whenever it merely shared
+    # vocabulary with the finding ("grounded") -- a much weaker bar than
+    # actual correctness, and the source of a real production defect: the
+    # LLM proposed "personnel calibration status for calibration
+    # certificate" for a finding about "balance BAL-014", which passed the
+    # groundedness check (shares "calibration"/"certificate") despite
+    # confusing actor + process + document with the actual entity. The LLM
+    # subject is now used ONLY as a last resort, when the deterministic
+    # resolver itself produced no usable result -- never to override a
+    # result the authoritative resolver actually found.
     from app.services.semantic_subject import resolve_deviation, validate_semantic_subject
     from app.services.text_grounding import phrase_is_grounded, significant_words
 
     resolved = resolve_deviation(request.finding_text, fact_claims)
     source_words = significant_words(request.finding_text)
-    llm_subject = extraction.deviation_subject if extraction else None
-    if llm_subject and phrase_is_grounded(llm_subject, source_words) and validate_semantic_subject(llm_subject):
-        deviation_subject = llm_subject.strip()
-        deviation_condition = (extraction.deviation_condition or "UNKNOWN") if extraction else "UNKNOWN"
-        deviation_actor = extraction.deviation_actor if extraction else None
-        deviation_date = extraction.timeframe if extraction else None
-    else:
-        deviation_subject = resolved.finding_subject or resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
+    _DEGRADED_SUBJECTS = {"process compliance", None, ""}
+    resolver_succeeded = (resolved.finding_subject or resolved.subject) not in _DEGRADED_SUBJECTS
+
+    if resolver_succeeded:
+        deviation_subject = resolved.finding_subject or resolved.subject
         deviation_condition = resolved.condition or "UNKNOWN"
         deviation_actor = resolved.actor or (extraction.deviation_actor if extraction else None)
         deviation_date = resolved.date or (extraction.timeframe if extraction else None)
+    else:
+        llm_subject = extraction.deviation_subject if extraction else None
+        if llm_subject and phrase_is_grounded(llm_subject, source_words) and validate_semantic_subject(llm_subject):
+            deviation_subject = llm_subject.strip()
+            deviation_condition = (extraction.deviation_condition or "UNKNOWN") if extraction else "UNKNOWN"
+            deviation_actor = extraction.deviation_actor if extraction else None
+            deviation_date = extraction.timeframe if extraction else None
+        else:
+            deviation_subject = resolved.finding_subject or resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
+            deviation_condition = resolved.condition or "UNKNOWN"
+            deviation_actor = resolved.actor or (extraction.deviation_actor if extraction else None)
+            deviation_date = resolved.date or (extraction.timeframe if extraction else None)
 
     if not deviation_subject or not validate_semantic_subject(deviation_subject):
         deviation_subject = resolved.finding_subject or "process compliance"
@@ -206,12 +227,31 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             "— conflicting reported statements prevent establishing the mechanism"
         ))
 
+    from app.services.semantic_subject import resolve_referenced_documents
+    from app.models.agent import ReferencedDocumentInfo
+    referenced_documents = [
+        ReferencedDocumentInfo(document_type=d["document_type"], raw_span=d["raw_span"])
+        for d in resolve_referenced_documents(request.finding_text)
+    ]
+    if referenced_documents:
+        trace.append(AgentTraceStep.warn(
+            "Referenced-but-unavailable document(s) detected: "
+            + "; ".join(d.document_type for d in referenced_documents)
+            + " — content treated as UNKNOWN, not usable as evidence"
+        ))
+
     from app.agent.recurrence_guard import detect_recurrence
     recurrence = detect_recurrence(request.finding_text)
     if recurrence.is_recurring:
         trace.append(AgentTraceStep.warn(
             "Recurrence signal detected: " + (recurrence.rationale or "a similar finding was previously identified")
         ))
+
+    from app.agent.proposition_engine import build_propositions_from_ledger, classify_investigation_mode
+    investigation_mode = classify_investigation_mode(
+        request.finding_text, evidence_claims, evidence_conflicts, referenced_documents
+    )
+    propositions = build_propositions_from_ledger(request.finding_text, evidence_claims, evidence_conflicts)
 
     canonical_state = CanonicalFindingState(
         raw_finding=request.finding_text,
@@ -241,6 +281,9 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         prompt_injection_detected=is_instruction(request.finding_text),
         evidence_claims=evidence_claims,
         evidence_conflicts=evidence_conflicts,
+        referenced_documents=referenced_documents,
+        investigation_mode=investigation_mode,
+        propositions=propositions,
         recurrence_signal=recurrence.is_recurring,
         previous_capa_referenced=recurrence.has_previous_capa_reference,
         previous_capa_status=recurrence.previous_capa_status,

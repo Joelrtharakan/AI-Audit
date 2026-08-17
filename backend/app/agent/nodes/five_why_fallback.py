@@ -10,9 +10,13 @@ from __future__ import annotations
 from app.models.agent import EvidenceItem, EvidenceStatus, FiveWhyAnalysis, FiveWhyStep
 
 
+_DEGRADED_SUBJECTS = {"process compliance", None, ""}
+
+
 def build_deterministic_five_why(
     finding_text: str,
     evidence_ledger: list[EvidenceItem],
+    canonical_subject: str | None = None,
 ) -> FiveWhyAnalysis:
     """Build a deterministic, evidence-bound 5-Why chain from the case model.
 
@@ -30,7 +34,10 @@ def build_deterministic_five_why(
     fact_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
     resolved = resolve_deviation(finding_text, fact_claims)
-    noun_sub = resolved.finding_subject or resolved.subject or "the affected process"
+    if canonical_subject and canonical_subject not in _DEGRADED_SUBJECTS:
+        noun_sub = canonical_subject
+    else:
+        noun_sub = resolved.finding_subject or resolved.subject or "the affected process"
     deviation_desc = resolved.deviation or f"{noun_sub} condition noted in finding"
 
     claims = extract_claims(finding_text, evidence_ledger)
@@ -41,6 +48,35 @@ def build_deterministic_five_why(
     if conflicts:
         conflict = conflicts[0]
         topic = topic_word(noun_sub)
+
+        # DELIVERY_VS_RECEIPT (Conflict-Center hardening, Section 10/11): the
+        # 5-Why chain must NOT choose either conflicting proposition as fact
+        # ("Why were the operators not aware..." presupposes non-receipt;
+        # "Why was the notification not received..." presupposes delivery
+        # succeeded). The question must stay proposition-neutral and stop
+        # immediately at the evidence boundary -- never invent a second or
+        # third causal layer while the conflict itself remains unresolved.
+        if getattr(conflict, "proposition_type", None) == "DELIVERY_VS_RECEIPT":
+            steps.append(FiveWhyStep(
+                question=(
+                    f"Why do system records indicate successful delivery of {noun_sub} while the affected "
+                    "personnel report that they did not receive it?"
+                ),
+                answer=(
+                    "Objective verification is required to resolve the conflicting evidence and determine "
+                    "whether the discrepancy concerns delivery, receipt, accessibility, acknowledgement, or "
+                    "another mechanism."
+                ),
+                status="UNKNOWN",
+            ))
+            return FiveWhyAnalysis(
+                steps=steps,
+                is_complete=False,
+                status_note=(
+                    "Evidence boundary reached — conflicting delivery/receipt evidence requires objective "
+                    "verification before the chain can proceed."
+                ),
+            )
         # Step 1 content: why was the proposition unconfirmed — grounded in
         # the actual reported claim texts, with speaker attribution when
         # available, instead of a generic "conflicting reports" summary.
@@ -197,6 +233,11 @@ def build_deterministic_five_why(
         ),
         answer=fact_claims[0] if fact_claims else deviation_desc,
         status="REPORTED" if not fact_claims else "VERIFIED",
+    ))
+    steps.append(FiveWhyStep(
+        question=f"Why did the deviation in {noun_sub} occur?",
+        answer="NOT ESTABLISHED FROM AVAILABLE EVIDENCE — objective investigation required to confirm underlying cause.",
+        status="UNKNOWN",
     ))
     return FiveWhyAnalysis(
         steps=steps,

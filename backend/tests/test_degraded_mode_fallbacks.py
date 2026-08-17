@@ -99,7 +99,10 @@ def test_investigation_plan_fallback_areas_are_not_generic_universal_categories(
     hyps, plan = build_deterministic_investigation_plan(finding_text, ledger)
     assert plan.areas
     assert plan.areas != ["Execution Verification", "Documentation Control", "Workstation Setup"]
-    # Areas should trace back to the hypothesis names actually generated.
-    hyp_name_words = {w for h in hyps for w in h.name.lower().split("_")}
+    # This finding has no reported explanation and no conflict, so it
+    # correctly lands in the General/Unresolved branch: zero hypotheses,
+    # areas/questions derived from the finding's own subject instead
+    # (Section 21: zero hypotheses is a valid, often correct output).
+    assert hyps == []
     area_words = {w for a in plan.areas for w in a.lower().split()}
-    assert hyp_name_words & area_words
+    assert "review" in area_words

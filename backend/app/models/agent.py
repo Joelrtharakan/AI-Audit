@@ -34,6 +34,52 @@ class EvidenceStatus(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class PropositionType(str, Enum):
+    OBSERVATION = "OBSERVATION"
+    EVENT = "EVENT"
+    REPORTED_EVENT = "REPORTED_EVENT"
+    REPORTED_MECHANISM = "REPORTED_MECHANISM"
+    IMMEDIATE_MECHANISM = "IMMEDIATE_MECHANISM"
+    CONTRIBUTING_CAUSE = "CONTRIBUTING_CAUSE"
+    SYSTEMIC_CAUSE = "SYSTEMIC_CAUSE"
+    DOCUMENT_REFERENCE = "DOCUMENT_REFERENCE"
+    DOCUMENT_CONTENT = "DOCUMENT_CONTENT"
+    EVIDENCE_STATE = "EVIDENCE_STATE"
+    CONFLICTED_PROPOSITION = "CONFLICTED_PROPOSITION"
+
+
+class CausalLevel(str, Enum):
+    L0_OBSERVATION = "L0_OBSERVATION"
+    L1_EVENT = "L1_EVENT"
+    L2_REPORTED_MECHANISM = "L2_REPORTED_MECHANISM"
+    L3_IMMEDIATE_MECHANISM = "L3_IMMEDIATE_MECHANISM"
+    L4_CONTRIBUTING_CAUSE = "L4_CONTRIBUTING_CAUSE"
+    L5_SYSTEMIC_CAUSE = "L5_SYSTEMIC_CAUSE"
+    EVIDENCE_STATE = "EVIDENCE_STATE"
+
+
+class SupportLevel(str, Enum):
+    VERIFIED = "VERIFIED"
+    SUPPORTED = "SUPPORTED"
+    REPORTED = "REPORTED"
+    POSSIBLE = "POSSIBLE"
+    UNRESOLVED = "UNRESOLVED"
+    UNKNOWN = "UNKNOWN"
+    CONTRADICTED = "CONTRADICTED"
+    REJECTED = "REJECTED"
+
+
+class InvestigationMode(str, Enum):
+    NORMAL = "NORMAL"
+    CONFLICT = "CONFLICT"
+    LOW_SPECIFICITY = "LOW_SPECIFICITY"
+    DOCUMENT_UNAVAILABLE = "DOCUMENT_UNAVAILABLE"
+    RECORD_UNAVAILABLE = "RECORD_UNAVAILABLE"
+    REPORTED_MECHANISM = "REPORTED_MECHANISM"
+    TEMPORAL_DEVIATION = "TEMPORAL_DEVIATION"
+    COMBINED = "COMBINED"
+
+
 class ClaimAttribution(str, Enum):
     """Who produced the claim — tracks provenance so a supervisor's assertion
     is never silently equated with an auditor's direct observation."""
@@ -46,14 +92,23 @@ class ClaimAttribution(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class EvidenceClaim(BaseModel):
-    """Claim-level evidence with full provenance.
+class Proposition(BaseModel):
+    """A canonical proposition in the causal graph."""
+    id: str  # e.g. "P1"
+    statement: str
+    type: PropositionType = PropositionType.OBSERVATION
+    causal_level: CausalLevel = CausalLevel.L0_OBSERVATION
+    support_level: SupportLevel = SupportLevel.UNKNOWN
+    supporting_evidence_ids: list[str] = []
+    contradicting_evidence_ids: list[str] = []
+    status: str = "UNKNOWN"
+    speaker: str | None = None
+    document_available: bool = True
+    document_content_verified: bool = False
 
-    Every extracted claim must carry its own attribution so downstream
-    reasoning can distinguish 'the operator stated X' (PERSON_REPORTED) from
-    'the auditor observed X' (AUDITOR_OBSERVED) and never collapse two
-    conflicting reported statements into a single VERIFIED fact.
-    """
+
+class EvidenceClaim(BaseModel):
+    """Claim-level evidence with full provenance."""
     claim_id: str                    # e.g. "C1"
     text: str                        # The actual claim text
     subject: str | None = None       # What entity the claim is about
@@ -64,19 +119,15 @@ class EvidenceClaim(BaseModel):
     evidence_reference: str | None = None
     attribution: ClaimAttribution = ClaimAttribution.UNKNOWN
     polarity: str | None = None      # "positive"/"negative"/None
-    # Who made the claim (e.g. "operator", "department supervisor") when the
-    # claim is REPORTED — distinct from `attribution`, which classifies the
-    # ROLE category (PERSON_REPORTED/SUPERVISOR_REPORTED), not the literal
-    # speaker text. Null for AUDITOR_OBSERVED claims (no speaker to name).
     speaker: str | None = None
+    sentence_group: int | None = None
+    source_type: str = "AUDIT_OBSERVATION"
+    availability: Literal["AVAILABLE", "UNAVAILABLE", "NOT_APPLICABLE"] = "AVAILABLE"
+    document_available: bool = True
+    document_content_verified: bool = False
 
     @property
     def provenance(self) -> str:
-        """Where the claim came from: VERIFIED (auditor-observed),
-        REPORTED (someone asserted it), or INFERRED (AI-derived). Distinct
-        from `status`, which additionally carries the truth-verification
-        outcome — a REPORTED claim's provenance never changes even if it is
-        later contradicted."""
         if self.status == EvidenceStatus.INFERRED:
             return "INFERRED"
         if self.status == EvidenceStatus.VERIFIED:
@@ -85,11 +136,6 @@ class EvidenceClaim(BaseModel):
 
     @property
     def verification(self) -> str:
-        """Truth-verification outcome, kept conceptually separate from
-        provenance: REPORTED provenance means someone asserted the claim, NOT
-        that the assertion is unverified-and-therefore-unknown truth. A
-        REPORTED claim is UNVERIFIED, never UNKNOWN — UNKNOWN is reserved for
-        propositions the evidence simply does not address at all."""
         if self.status == EvidenceStatus.VERIFIED:
             return "VERIFIED"
         if self.status == EvidenceStatus.CONTRADICTED:
@@ -100,20 +146,26 @@ class EvidenceClaim(BaseModel):
 
 
 class EvidenceConflict(BaseModel):
-    """A detected conflict between two or more claims about the same proposition.
-
-    The system must never automatically resolve a conflict by choosing one
-    side — an UNRESOLVED conflict is a valid, informative analytical outcome
-    that tells the auditor exactly where the evidence disagrees and what
-    investigation would resolve it.
-    """
+    """A detected conflict between two or more claims about the same proposition."""
     conflict_id: str               # e.g. "CONF1"
-    conflict_type: Literal["CONFLICTING_REPORTS", "CONTRADICTED_BY_EVIDENCE", "INCONSISTENT_RECORDS"]
+    conflict_type: Literal[
+        "DELIVERY_VS_RECEIPT", "RECORD_VS_STATEMENT", "COMPLETION_VS_MISSING_RECORD",
+        "SYSTEM_VS_HUMAN_REPORT", "DOCUMENT_VS_STATEMENT", "TIMESTAMP_VS_EVENT",
+        "CONFLICTING_REPORTS", "CONTRADICTED_BY_EVIDENCE", "INCONSISTENT_RECORDS", "OTHER"
+    ] = "CONFLICTING_REPORTS"
+    proposition_type: Literal[
+        "DELIVERY_VS_RECEIPT", "COMPLETION_VS_MISSING_RECORD", "RECORD_VS_STATEMENT",
+        "TIMESTAMP_VS_REPORTED_EVENT", "SYSTEM_STATE_VS_HUMAN_REPORT", "CONFLICTING_REPORTS",
+    ] = "CONFLICTING_REPORTS"
     status: Literal["UNRESOLVED", "RESOLVED_FOR", "RESOLVED_AGAINST"] = "UNRESOLVED"
-    claims: list[str]              # claim_ids involved
-    proposition: str               # The proposition they disagree about
+    claims: list[str] = []              # claim_ids involved
+    proposition_a_id: str | None = None
+    proposition_b_id: str | None = None
+    proposition: str = ""               # The proposition they disagree about
     resolution_required: bool = True
+    resolution_evidence: str | None = None
     resolution_note: str | None = None
+    severity: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
 
 
 class CanonicalFindingState(BaseModel):
@@ -175,6 +227,13 @@ class CanonicalFindingState(BaseModel):
     evidence_claims: list[EvidenceClaim] = []
     # Detected conflicts between claims about the same proposition
     evidence_conflicts: list[EvidenceConflict] = []
+    propositions: list[Proposition] = []
+    investigation_mode: InvestigationMode = InvestigationMode.NORMAL
+    # Documents the finding references/cites/attaches but which were not
+    # available for inspection -- kept separate from evidence_claims so a
+    # referenced document's type/name can never be mistaken for an
+    # established claim about its contents (Referenced-Evidence Boundary).
+    referenced_documents: list[ReferencedDocumentInfo] = []
 
     # ------------------------------------------------------------------
     # Temporal / recurrence reasoning (app.agent.recurrence_guard). A
@@ -190,6 +249,25 @@ class CanonicalFindingState(BaseModel):
     previous_capa_effectiveness: str = "NOT_VERIFIED"  # "EFFECTIVE" | "NOT_VERIFIED"
     recurrence_rationale: str | None = None
 
+
+
+class ReferencedDocumentInfo(BaseModel):
+    """A document/record the finding mentions, cites, or attaches but which
+    was not actually available for inspection (Referenced-Evidence Boundary).
+
+    REFERENCED EVIDENCE != INSPECTED EVIDENCE: a document being named is
+    evidence that it was named, never evidence of what it contains. This is
+    kept as separate metadata precisely so its identity/type (e.g.
+    "calibration report") can be preserved for the record without ever being
+    treated as a claim about the finding's actual subject, deviation, or
+    cause -- see semantic_subject.detect_referenced_unavailable_documents,
+    the single structural (provenance-based, not vocabulary-based) producer
+    of this field.
+    """
+    document_type: str                      # raw noun phrase, e.g. "calibration report"
+    reference_status: Literal["REFERENCED_UNAVAILABLE", "REFERENCED_AVAILABLE"] = "REFERENCED_UNAVAILABLE"
+    content_status: Literal["UNKNOWN", "VERIFIED"] = "UNKNOWN"
+    raw_span: str | None = None             # the sentence/clause this was detected in
 
 
 class EvidenceItem(BaseModel):
@@ -263,6 +341,10 @@ class CandidateHypothesis(BaseModel):
     confirms_if: str | None = None
     # What specific result would REFUTE this hypothesis.
     refutes_if: str | None = None
+    # Provenance tracking: IDs of claims (C1, C2, ...) or propositions supporting/contradicting
+    supporting_claim_ids: list[str] = []
+    contradicting_claim_ids: list[str] = []
+    causal_level: CausalLevel = CausalLevel.L3_IMMEDIATE_MECHANISM
     # Evidence strength categorization
     evidence_strength: Literal["NONE", "REPORTED", "CORROBORATED", "VERIFIED", "CONFLICTING"] = "NONE"
     # Deterministic per-hypothesis confidence grade (never asserted by the
@@ -332,18 +414,18 @@ class InvestigationQuestion(BaseModel):
     and what specific result would confirm or refute that hypothesis — never
     merely ask whether an evidence document exists.
     """
-
+    id: str | None = None
     question: str
-    purpose: str  # which hypothesis / unknown this resolves
-    evidence: str  # specific document/record type that would answer this
+    purpose: str = ""  # which hypothesis / unknown this resolves
+    evidence: str = ""  # specific document/record type that would answer this
+    target_type: Literal["HYPOTHESIS", "CONFLICT", "DOCUMENT", "OBSERVATION", "PROPOSITION", "OTHER"] = "HYPOTHESIS"
+    target_id: str | None = None
+    evidence_required: str | None = None
     hypothesis_tested: str | None = None  # which hypothesis this discriminates
     confirms_if: str | None = None  # what result confirms the hypothesis
     refutes_if: str | None = None  # what result refutes the hypothesis
-    # Concise "if the evidence shows X, then Y" outcomes across the
-    # candidate hypotheses this question discriminates between — richer than
-    # confirms_if/refutes_if alone when a single question's answer can shift
-    # more than one hypothesis at once (e.g. "record confirms completion" ->
-    # weakens H1, "record cannot be located" -> H2 remains possible).
+    presupposes_cause: bool = False
+    presupposes_outcome: bool = False
     possible_outcomes: list[str] = []
 
 
@@ -371,22 +453,12 @@ class ConditionalCapaAction(BaseModel):
 
     if_cause_confirmed: str  # the condition, e.g. "If training was never assigned by the training matrix"
     recommended_action: str  # specific corrective action for that branch
-    # Optional structured fields (populated where the synthesis provides
-    # them) distinguishing what KIND of action this is, so a systemic action
-    # is never mistaken for an already-confirmed corrective action.
     action_type: Literal["IMMEDIATE_CORRECTION", "CONTAINMENT", "CORRECTIVE_ACTION", "SYSTEMIC_ACTION"] | None = None
     verification_method: str | None = None  # how effectiveness of this action would be verified
-    # The record/data an auditor would need to confirm this branch's
-    # condition — kept separate from `recommended_action` so the CAPA action
-    # text never becomes "address the cause via <evidence source>" (an
-    # evidence source is not an organizational corrective action).
     evidence_needed: str | None = None
-    # Effectiveness governance (current-turn Section 16): never invented --
-    # populated with an explicit placeholder ("TO_BE_ASSIGNED"/"TO_BE_DEFINED")
-    # when the finding provides no basis for a real owner/criterion/period,
-    # rather than fabricating a plausible-sounding name or date.
     effectiveness_owner: str | None = None
     effectiveness_review_period: str | None = None
+    root_cause_hypothesis_id: str | None = None
 
 
 class CapaAnalysis(BaseModel):
@@ -420,16 +492,7 @@ class ImpactAssessment(BaseModel):
     relevant_change: str | None = None   # what specifically changed (Rule 18: never assumed)
     potential_effect: str | None = None  # plausible downstream consequence
     evidence_needed: str | None = None   # what would bound the scope
-    # Per-field EXPLICIT/INFERRED/UNKNOWN classification (keyed by field name:
-    # "affected_object", "affected_period", "process_at_risk",
-    # "relevant_change", "potential_effect"), computed deterministically by
-    # app.agent.analytical_validator.compute_impact_field_basis — never
-    # asserted by the LLM itself, since a model can't be trusted to grade
-    # its own certainty.
     field_basis: dict[str, str] = {}
-    # Structured impact breakdown: what is actually verified, what is
-    # logically inferred, and what remains unknown — prevents the report
-    # from stating "the operator was non-compliant" unless verified.
     impact_observed: str | None = None   # what is objectively verified
     impact_inferred: str | None = None   # what is logically inferred from evidence
     impact_unknown: str | None = None    # what remains unknown
@@ -459,6 +522,7 @@ class InvestigationReport(BaseModel):
     overall_confidence: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
     confidence: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"  # backwards compatibility
     investigation_required: Literal["YES", "NO", "LIMITED"]
+    investigation_mode: InvestigationMode = InvestigationMode.NORMAL
     root_cause: RootCauseAnalysis
     contributing_factors: list[ContributingFactor] = []
     investigation: InvestigationPlan
@@ -467,26 +531,16 @@ class InvestigationReport(BaseModel):
     impact_assessment: ImpactAssessment
     evidence_gaps: list[EvidenceGap] = []
     evidence: list[EvidenceItem] = []
-    # Full claim-level decomposition with provenance — the authoritative
-    # record of what was observed vs. reported vs. inferred vs. unknown.
+    propositions: list[Proposition] = []
     evidence_claims: list[EvidenceClaim] = []
-    # Detected conflicts between claims about the same proposition.
     evidence_conflicts: list[EvidenceConflict] = []
+    referenced_documents: list[ReferencedDocumentInfo] = []
     human_review_required: bool = True  # always True -- enforced here, not just prompted
-    # "LLM" = normal causal synthesis ran; "DETERMINISTIC" = evidence-grounded
-    # deterministic causal synthesis succeeded; "DEGRADED" = safety fallback.
     analysis_mode: Literal["LLM", "DETERMINISTIC", "DEGRADED"] = "LLM"
     analysis_engine: Literal["LLM", "DETERMINISTIC"] = "LLM"
-    # Provider-router metadata (infrastructure only, no analytical meaning):
-    # which provider actually answered, whether Groq -> OpenRouter -> Gemini
-    # failover was needed, and the full attempt order.
     provider_used: str | None = None
     fallback_used: bool = False
     provider_attempts: list[str] = []
-    # "SKIPPED" (deterministic pre-gate found nothing to check), "OK" (LLM
-    # critic ran), or "UNAVAILABLE" (critic call failed/timed out — the
-    # core_synthesis result above was preserved as-is; the critic is a
-    # secondary quality check, not the primary source of truth).
     critic_status: str | None = None
 
     @field_validator("human_review_required")

@@ -21,7 +21,6 @@ Return ONLY this JSON:
     "candidate_hypotheses": [
       {{
         "id": "H1", "name": "CODE", "statement": "1 sentence",
-        "causal_level": "CONTRIBUTING_CAUSE",
         "supporting_claim_ids": ["C1"], "contradicting_claim_ids": [],
         "status": "POSSIBLE", "evidence_needed": "record name",
         "confirms_if": "1 sentence", "refutes_if": "1 sentence"

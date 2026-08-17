@@ -93,6 +93,11 @@ class AgentState(TypedDict, total=False):
     # a deterministic fallback ran) -- must be surfaced to the final report
     # so degraded analysis is never mistaken for a normal result.
     analysis_mode: str
+    # Internal execution-state record (not part of the public report
+    # contract): which path actually produced the result
+    # (PRIMARY_LLM/RECOVERY_LLM/DETERMINISTIC) plus validation repair/
+    # rejection counts, distinct from the public analysis_mode string.
+    synthesis_execution: dict
     # Infrastructure metadata from the LLM provider router (app/services/
     # llm_router.py) — which provider actually answered core_synthesis's
     # call, whether a fallback was needed, and the full attempt order. No

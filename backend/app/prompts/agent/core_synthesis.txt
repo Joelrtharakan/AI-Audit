@@ -31,7 +31,6 @@ Return ONLY this JSON:
         "id": "H1",
         "name": "SHORT_CODE",
         "statement": "1 sentence: the specific plausible cause",
-        "causal_level": "CONTRIBUTING_CAUSE",
         "supporting_claim_ids": ["C1"],
         "contradicting_claim_ids": [],
         "status": "POSSIBLE",

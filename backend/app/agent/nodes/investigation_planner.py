@@ -210,7 +210,11 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
         # Section 8: Ensure plan.questions is NEVER empty
         if not plan.questions:
             from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
-            _, fallback_plan = build_deterministic_investigation_plan(request.finding_text, state.get("evidence_ledger", []))
+            _canonical = state.get("canonical_finding_state")
+            _, fallback_plan = build_deterministic_investigation_plan(
+                request.finding_text, state.get("evidence_ledger", []),
+                canonical_subject=getattr(_canonical, "finding_subject", None),
+            )
             plan = fallback_plan
             trace.append(AgentTraceStep.warn("Investigation Planner: generated fallback questions and evidence plan"))
 
@@ -229,7 +233,11 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
         errors.append(f"Planner error: {exc}")
         needs_investigation = False
         from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
-        _, plan = build_deterministic_investigation_plan(request.finding_text, state.get("evidence_ledger", []))
+        _canonical = state.get("canonical_finding_state")
+        _, plan = build_deterministic_investigation_plan(
+            request.finding_text, state.get("evidence_ledger", []),
+            canonical_subject=getattr(_canonical, "finding_subject", None),
+        )
 
     return {
         **state,

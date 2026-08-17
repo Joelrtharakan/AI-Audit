@@ -32,6 +32,14 @@ def _build_state(finding_text: str, verified: list[str], reported: list[str]) ->
     canonical = CanonicalFindingState(
         raw_finding=finding_text,
         observed_deviation=verified[0] if verified else "not extracted",
+        # Real production states always have finding_subject populated by
+        # understand_finding_node before core_synthesis ever runs -- these
+        # hand-built test states previously omitted it, which only matters
+        # now that final_evidence_verification's causal-proposition
+        # eligibility layer falls back to re-deriving a subject from raw
+        # text when it's missing (a fallback meant for genuinely
+        # unstructured input, not a substitute for normal extraction).
+        finding_subject=verified[0] if verified else "not extracted",
         deviation_condition="not completed",
         facts=verified,
         reported_statements=reported,
@@ -198,6 +206,8 @@ async def test_case_d_training_completed_deficiency_hypothesis_rejected():
                     "statement": "A training deficiency may have caused the operator not to follow the procedure.",
                     "status": "POSSIBLE",
                     "evidence_needed": "Training records",
+                    "supporting_claim_ids": ["C1"],
+                    "contradicting_claim_ids": [],
                 },
                 {
                     "id": "H2",
@@ -205,6 +215,8 @@ async def test_case_d_training_completed_deficiency_hypothesis_rejected():
                     "statement": "The procedure steps may not have been clear to the operator despite training.",
                     "status": "POSSIBLE",
                     "evidence_needed": "Procedure clarity review",
+                    "supporting_claim_ids": ["C2"],
+                    "contradicting_claim_ids": [],
                 },
             ],
             "narrative": "The operator did not follow the procedure despite completed training.",

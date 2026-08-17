@@ -48,7 +48,9 @@ _CLAUSE_SPLIT_RE = re.compile(
 _REPORT_VERB_RE = re.compile(
     r"^(?P<speaker>[A-Z][\w\s-]{0,50}?)\s+"
     r"(?:stated|reported|confirmed|indicated|noted|mentioned|claimed|said|"
-    r"explained|advised|acknowledged)\s+"
+    r"explained|advised|acknowledged|"
+    r"states|reports|confirms|indicates|notes|mentions|claims|says|"
+    r"explains|advises|acknowledges)\s+"
     r"(?:that\s+)?(?P<claim>.+)$",
     re.IGNORECASE,
 )
@@ -81,10 +83,11 @@ _NEGATIVE_POLARITY_RE = re.compile(
     r"\b(not\s+(?:received|completed|performed|conducted|done|provided|given|attended|"
     r"assigned|delivered|available|accessible|found|present|documented|recorded|"
     r"maintained|updated|followed|applied|verified|confirmed|communicated|informed|"
-    r"notified|acknowledged)|"
+    r"notified|acknowledged|opened|accessed|viewed|retrieved|approved|granted|authorized)|"
     r"had\s+not\s+(?:received|completed|been)|"
     r"did\s+not\s+(?:receive|complete|attend|perform)|"
-    r"never\s+(?:received|completed|performed|attended|been)|"
+    r"never\s+(?:received|completed|performed|attended|been|given|granted|approved)|"
+    r"was\s+never\s+(?:available|accessible|found|present|opened|given|granted)|"
     r"missing|absent|unavailable|incomplete|unaware|not\s+aware|"
     # A leading "No <noun phrase> was/were <state-word>" negates the whole
     # clause even though it contains a positive-looking state verb (e.g. "No
@@ -105,9 +108,16 @@ _POSITIVE_POLARITY_RE = re.compile(
     # every active-voice claim entirely.
     r"\b(?:(?:was|were|has\s+been|have\s+been|had\s+been)\s+)?"
     r"(?:completed|performed|conducted|provided|given|received|attended|"
-    r"delivered|assigned|documented|recorded|"
+    r"delivered|assigned|documented|recorded|opened|accessed|viewed|retrieved|approved|"
+    r"granted|authorized|"
     r"maintained|updated|followed|applied|verified|confirmed|informed|notified|acknowledged)\b|"
-    r"\b(?:was|were|has\s+been|have\s+been|had\s+been)\s+(?:done|available|accessible|found|present)\b",
+    r"\b(?:was|were|has\s+been|have\s+been|had\s+been)\s+(?:done|available|accessible|found|present)\b|"
+    # "<Record/system/log> shows/show/records/indicates <completion/
+    # approval/delivery/receipt>" -- the record-side claim in a
+    # record-vs-statement conflict often states the outcome as a noun
+    # ("shows completion"/"shows approval") rather than a past-participle
+    # verb ("was completed"/"was approved") -- both are equally positive.
+    r"\b(?:shows?|records?|indicates?)\s+(?:completion|approval|delivery|receipt)\b",
     re.IGNORECASE,
 )
 
@@ -159,10 +169,21 @@ def extract_claims(
     """
     claims: list[EvidenceClaim] = []
     claim_counter = 0
+    group_idx = -1
 
     sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(finding_text.strip()) if s.strip()]
 
     for sentence in sentences:
+        # A sentence that opens with a discourse connector ("However, ...")
+        # continues the PREVIOUS sentence's proposition rather than starting
+        # a new one -- keep it in the same sentence_group so anaphoric
+        # references ("it was never received") can still be paired with the
+        # earlier sentence's claim even without repeating its noun.
+        if _LEADING_DISCOURSE_CONNECTOR_RE.match(sentence) and group_idx >= 0:
+            pass
+        else:
+            group_idx += 1
+
         # First check if the sentence is a compound with conflicting clauses
         clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(sentence) if c.strip()]
 
@@ -173,11 +194,13 @@ def extract_claims(
             for clause in clauses:
                 claim_counter += 1
                 claim = _extract_single_claim(clause, claim_counter)
+                claim.sentence_group = group_idx
                 claims.append(claim)
         else:
             # Check for attribution patterns
             claim_counter += 1
             claim = _extract_single_claim(sentence, claim_counter)
+            claim.sentence_group = group_idx
             claims.append(claim)
 
     # NOTE: a REPORTED claim is NOT separately re-extracted as an "UNKNOWN"
@@ -189,11 +212,32 @@ def extract_claims(
     return claims
 
 
+_LEADING_DISCOURSE_CONNECTOR_RE = re.compile(
+    r"^(?:however|but|nevertheless|yet|still|in\s+contrast|conversely|"
+    r"on\s+the\s+other\s+hand)\s*,\s*", re.IGNORECASE,
+)
+
+
+def _strip_leading_discourse_connector(text: str) -> str:
+    """Strip a leading discourse connector ("However, ", "But, ",
+    "Nevertheless, ") from a sentence/clause before attribution-pattern
+    matching. Without this, "However, three operators stated that..."
+    never matches `_REPORT_VERB_RE` (anchored with `^`, and the comma
+    right after "However" breaks the speaker capture group) -- the
+    attributed statement silently falls through to the "no attribution
+    pattern" branch and gets misclassified as a direct AUDITOR_OBSERVED
+    VERIFIED claim instead of a REPORTED one, which then makes it
+    invisible to conflict detection (VERIFIED-vs-VERIFIED pairs are never
+    checked, only REPORTED-vs-REPORTED and VERIFIED-vs-REPORTED)."""
+    return _LEADING_DISCOURSE_CONNECTOR_RE.sub("", text.strip())
+
+
 def _extract_single_claim(text: str, counter: int) -> EvidenceClaim:
     """Extract a single claim from a sentence or clause."""
+    matchable_text = _strip_leading_discourse_connector(text.strip())
     # Check for attribution patterns
     for pattern in _ATTRIBUTION_PATTERNS:
-        m = pattern.match(text.strip())
+        m = pattern.match(matchable_text)
         if m:
             speaker = m.group("speaker").strip()
             claim_text = m.group("claim").strip().rstrip(".")
@@ -229,6 +273,78 @@ def _extract_single_claim(text: str, counter: int) -> EvidenceClaim:
 # ---------------------------------------------------------------------------
 # Conflict detection
 # ---------------------------------------------------------------------------
+
+# Verb-concept vocabularies for structural conflict-proposition
+# classification (Section 13, Conflict-Center hardening). Deliberately
+# generic English verbs, not tied to any single domain -- "delivered" fires
+# for email, SOP notifications, shipments, etc. equally.
+_DELIVERY_VERBS = {"deliver", "delivered", "send", "sent", "transmit", "transmitted", "dispatch", "dispatched", "distribute", "distributed"}
+_RECEIPT_ACCESS_VERBS = {"receive", "received", "get", "got", "obtain", "obtained", "access", "accessed", "accessible", "open", "opened", "view", "viewed", "retrieve", "retrieved"}
+_COMPLETION_VERBS = {"complete", "completed", "perform", "performed", "conduct", "conducted", "finish", "finished", "carry", "carried", "execute", "executed"}
+_MISSING_MARKERS_RE = re.compile(
+    r"\bnever\b|\bnot\s+(?:performed|completed|conducted|done|given|carried|received|attended)\b",
+    re.IGNORECASE,
+)
+# A verb like "received"/"delivered"/"accessed" is only about TRANSMISSION
+# of a communicable artifact (a notification/email/document/message) when
+# its object is one of these -- "received TRAINING" is a completion-of-
+# activity idiom, not a transmission-of-content one, even though it shares
+# the verb "received". Distinguishing by object noun (not verb alone) is
+# what keeps this from misclassifying the training-conflict case.
+_COMMUNICATION_ARTIFACT_WORDS = {
+    "notification", "notifications", "email", "emails", "message", "messages",
+    "memo", "memos", "letter", "letters", "document", "documents", "notice",
+    "notices", "communication", "communications", "alert", "alerts", "bulletin",
+    "bulletins", "attachment", "attachments", "copy", "copies",
+}
+_ACTIVITY_OBJECT_WORDS = {
+    "training", "retraining", "instruction", "briefing", "orientation",
+    "induction", "onboarding", "assessment", "certification", "qualification",
+    "inspection", "calibration", "maintenance", "review", "audit",
+}
+
+
+def classify_conflict_proposition_type(c1: EvidenceClaim, c2: EvidenceClaim) -> str:
+    """Structural (verb+object-shape, not per-domain-keyword) classification
+    of WHAT the two conflicting claims disagree about -- e.g. whether
+    something was delivered vs. actually received (DELIVERY_VS_RECEIPT,
+    covers email/notification/document-access shapes alike) vs. whether an
+    activity was completed at all (COMPLETION_VS_MISSING_RECORD) vs. a
+    record asserting one thing against a person's contradicting statement
+    with no transmission/completion verb involved (RECORD_VS_STATEMENT,
+    e.g. an approval record vs. "approval was never given").
+
+    DELIVERY_VS_RECEIPT requires BOTH a transmission verb (delivered/sent/
+    received/accessed/etc.) AND a communicable-artifact object
+    (notification/email/document/message/etc.) with NO activity-type object
+    present -- "had not received TRAINING" shares the verb "received" with
+    "never received the NOTIFICATION" but is a completion dispute, not a
+    transmission one; checking the object noun (not just the verb) is what
+    tells these apart.
+
+    This exists so downstream investigation-question generation can tell a
+    "did the recipient ever get it" conflict apart from a "was the task
+    ever done" conflict -- treating every conflict as a completion dispute
+    produces a fabricated NOT_COMPLETED hypothesis for conflicts that were
+    never about completion at all (e.g. system-delivered-but-not-received)."""
+    combined = f"{c1.text} {c2.text}".lower()
+    stems = {_stem(w) for w in re.findall(r"[a-z]+", combined)}
+
+    def _has_any(words: set[str]) -> bool:
+        return bool(stems & {_stem(w) for w in words})
+
+    has_transmission_verb = _has_any(_DELIVERY_VERBS) or _has_any(_RECEIPT_ACCESS_VERBS)
+    has_comm_artifact = _has_any(_COMMUNICATION_ARTIFACT_WORDS)
+    has_activity_object = _has_any(_ACTIVITY_OBJECT_WORDS)
+    if has_transmission_verb and has_comm_artifact and not has_activity_object:
+        return "DELIVERY_VS_RECEIPT"
+    if (_has_any(_COMPLETION_VERBS) or has_transmission_verb) and _MISSING_MARKERS_RE.search(combined):
+        return "COMPLETION_VS_MISSING_RECORD"
+    statuses = {c1.status, c2.status}
+    if EvidenceStatus.VERIFIED in statuses and EvidenceStatus.REPORTED in statuses:
+        return "RECORD_VS_STATEMENT"
+    return "CONFLICTING_REPORTS"
+
 
 def detect_evidence_conflicts(claims: list[EvidenceClaim]) -> list[EvidenceConflict]:
     """Detect conflicts between claims about the same proposition.
@@ -274,6 +390,7 @@ def detect_evidence_conflicts(claims: list[EvidenceClaim]) -> list[EvidenceConfl
                 conflicts.append(EvidenceConflict(
                     conflict_id=f"CONF{conflict_counter}",
                     conflict_type="CONFLICTING_REPORTS",
+                    proposition_type=classify_conflict_proposition_type(c1, c2),
                     status="UNRESOLVED",
                     claims=[c1.claim_id, c2.claim_id],
                     proposition=proposition,
@@ -291,6 +408,7 @@ def detect_evidence_conflicts(claims: list[EvidenceClaim]) -> list[EvidenceConfl
                 conflicts.append(EvidenceConflict(
                     conflict_id=f"CONF{conflict_counter}",
                     conflict_type="CONTRADICTED_BY_EVIDENCE",
+                    proposition_type=classify_conflict_proposition_type(vc, rc),
                     status="UNRESOLVED",
                     claims=[vc.claim_id, rc.claim_id],
                     proposition=proposition,
@@ -364,6 +482,14 @@ def _claims_conflict(c1: EvidenceClaim, c2: EvidenceClaim) -> bool:
     # Polarities must be opposite
     if c1.polarity == c2.polarity:
         return False
+    # Two clauses from the SAME original sentence (joined with but/however/;
+    # or a discourse-connector-led follow-on sentence) are already
+    # grammatically linked by the finding's own author -- that structural
+    # adjacency alone is sufficient, even when the second clause uses a
+    # bare pronoun instead of repeating the first clause's noun ("the email
+    # was delivered; it was never received" never re-states "email").
+    if c1.sentence_group is not None and c1.sentence_group == c2.sentence_group:
+        return True
     # Subjects/predicates must overlap (stem-level comparison)
     words1 = {_stem(w) for w in significant_words(c1.text)}
     words2 = {_stem(w) for w in significant_words(c2.text)}
