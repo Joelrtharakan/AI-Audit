@@ -279,29 +279,66 @@
 
         var candList = rc.candidate_hypotheses || [];
         var leadingHyp = rc.leading_hypothesis || "";
+        var isEstablishedOrSupported = (rc.status === "SUPPORTED" || rc.status === "ESTABLISHED" || rc.status === "VERIFIED");
 
-        if (leadingHyp && !leadingHyp.startsWith("NONE") && !leadingHyp.startsWith("TIED")) {
+        if (isEstablishedOrSupported && leadingHyp && !leadingHyp.startsWith("NONE") && !leadingHyp.startsWith("TIED")) {
+            var leadObj = candList.find(function(item) { return item.id === leadingHyp; });
+            var leadTitle = leadObj ? (leadObj.name || "").replace(/SHORT[_-]?CODE/gi, "").replace(/PLACEHOLDER/gi, "").replace(/^[_\s-]+|[_\s-]+$/g, "").replace(/_/g, " ").trim() : "";
+            var leadLabel = leadObj ? (leadObj.id + (leadTitle && leadTitle.length > 2 ? (" — " + leadTitle) : "") + ": " + (leadObj.statement || "")) : leadingHyp;
             html += "<div style='background:linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); border:1px solid #86efac; border-left:5px solid #22c55e; border-radius:12px; padding:16px 18px; margin-bottom:16px; box-shadow:0 2px 4px rgba(34,197,94,0.05);'>";
-            html += "<div style='font-weight:800; font-size:12px; color:#15803d; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:6px; display:flex; align-items:center; gap:6px;'><span class='glyphicon glyphicon-ok-sign'></span> Current Leading Hypothesis</div>";
-            html += "<p style='font-size:14px; font-weight:700; color:#14532d; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(leadingHyp) + "</p>";
-            html += "<div style='font-size:11px; color:#166534; font-weight:600;'>Status: <span style='background:#ffffff; color:#15803d; padding:3px 10px; border-radius:6px; border:1px solid #86efac; font-weight:800;'>POSSIBLE — REQUIRES OBJECTIVE VERIFICATION</span></div>";
+            html += "<div style='font-weight:800; font-size:12px; color:#15803d; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:6px; display:flex; align-items:center; gap:6px;'><span class='glyphicon glyphicon-ok-sign'></span> Established / Supported Causal Mechanism</div>";
+            html += "<p style='font-size:14px; font-weight:700; color:#14532d; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(leadLabel) + "</p>";
+            html += "<div style='font-size:11px; color:#166534; font-weight:600;'>Causal Support: <span style='background:#ffffff; color:#15803d; padding:3px 10px; border-radius:6px; border:1px solid #86efac; font-weight:800;'>SUPPORTED BY OBJECTIVE EVIDENCE</span></div>";
             html += "</div>";
-        } else if (candList.length) {
+        } else if (candList.length === 1 && (candList[0].status === "POSSIBLE" || !isEstablishedOrSupported)) {
+            var singleH = candList[0];
+            var singleTitle = (singleH.name || "").replace(/SHORT[_-]?CODE/gi, "").replace(/PLACEHOLDER/gi, "").replace(/^[_\s-]+|[_\s-]+$/g, "").replace(/_/g, " ").trim();
+            var singleLabel = singleH.id + (singleTitle && singleTitle.length > 2 ? (" — " + singleTitle) : "") + ": " + (singleH.statement || "");
+            html += "<div style='background:linear-gradient(135deg, #fffdf5 0%, #fef3c7 100%); border:1px solid #fde68a; border-left:5px solid #f59e0b; border-radius:12px; padding:16px 18px; margin-bottom:16px;'>";
+            html += "<div style='font-weight:800; font-size:12px; color:#b45309; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:6px; display:flex; align-items:center; gap:6px;'><span class='glyphicon glyphicon-info-sign'></span> Leading Hypothesis</div>";
+            html += "<p style='font-size:14px; font-weight:700; color:#92400e; margin-bottom:8px; line-height:1.5;'>" + escapeHtml(singleLabel) + "</p>";
+            html += "<div style='font-size:11px; color:#b45309; font-weight:600;'>Status: <span style='background:#ffffff; color:#b45309; padding:3px 10px; border-radius:6px; border:1px solid #fde68a; font-weight:800;'>POSSIBLE — REQUIRES OBJECTIVE VERIFICATION</span></div>";
+            html += "</div>";
+        } else if (candList.length > 1) {
             html += "<div style='background:#fffbe6; border:1px solid #ffe58f; border-left:5px solid #d97706; border-radius:10px; padding:14px 18px; margin-bottom:16px;'>";
-            html += "<div style='font-weight:800; font-size:12px; color:#b45309; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:4px;'><span class='glyphicon glyphicon-info-sign'></span> Leading Hypothesis: NONE (Competing Hypotheses Tied)</div>";
-            html += "<p style='font-size:13px; color:#78350f; margin:0; font-weight:500; line-height:1.4;'>Available evidence does not definitively single out one cause. The following competing hypotheses require objective record verification:</p>";
+            html += "<div style='font-weight:800; font-size:12px; color:#b45309; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:4px;'><span class='glyphicon glyphicon-info-sign'></span> Leading Hypothesis: NONE &nbsp;|&nbsp; Competing Hypotheses: " + candList.length + "</div>";
+            html += "<p style='font-size:13px; color:#78350f; margin:0 0 6px 0; font-weight:500; line-height:1.4;'>Multiple candidate hypotheses remain equally plausible pending investigation. Objective record verification is required to discriminate among them:</p>";
+            html += "<div style='font-size:11px; color:#b45309; font-weight:600;'>Status: <span style='background:#ffffff; color:#b45309; padding:2px 8px; border-radius:4px; border:1px solid #fde68a; font-weight:800;'>TIED / REQUIRES INVESTIGATION</span></div>";
             html += "</div>";
         } else {
-            html += "<p style='font-size:13px; color:#64748b; margin-bottom:16px; font-style:italic;'>No hypotheses established from available evidence. Auditor investigation is required.</p>";
+            html += "<p style='font-size:13px; color:#64748b; margin-bottom:16px; font-style:italic;'>No causal hypotheses established from available evidence. Auditor investigation is required.</p>";
         }
 
         if (candList.length) {
             html += "<div style='display:flex; flex-direction:column; gap:12px; margin-bottom:16px;'>";
             candList.forEach(function(h) {
+                var badgeBg = "#fef3c7";
+                var badgeColor = "#b45309";
+                var badgeBorder = "#fde68a";
+                var badgeText = "POSSIBLE — UNVERIFIED";
+
+                if (h.status === "SUPPORTED" || h.status === "ESTABLISHED" || h.status === "VERIFIED") {
+                    badgeBg = "#dcfce7";
+                    badgeColor = "#15803d";
+                    badgeBorder = "#bbf7d0";
+                    badgeText = "SUPPORTED — EVIDENCE VERIFIED";
+                } else if (h.status === "REFUTED") {
+                    badgeBg = "#fee2e2";
+                    badgeColor = "#b91c1c";
+                    badgeBorder = "#fca5a5";
+                    badgeText = "REFUTED";
+                }
+
+                var cleanName = (h.name || "").replace(/SHORT[_-]?CODE/gi, "").replace(/PLACEHOLDER/gi, "").replace(/^[_\s-]+|[_\s-]+$/g, "").replace(/_/g, " ").trim();
+                var headingPrefix = safeEsc(h.id);
+                if (cleanName && cleanName.toUpperCase() !== (h.id || "").toUpperCase() && cleanName.length > 2) {
+                    headingPrefix += " — " + escapeHtml(cleanName);
+                }
+
                 html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:5px solid #3b82f6; border-radius:10px; padding:14px 18px; transition:all 0.2s;'>";
                 html += "<div style='display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;'>";
-                html += "<strong style='color:#0f172a; font-size:14px; font-weight:700; line-height:1.4;'>" + safeEsc(h.id) + " (" + safeEsc(h.name) + "): <span style='font-weight:500; color:#334155;'>" + safeEsc(h.statement) + "</span></strong>";
-                html += "<span style='background:#eff6ff; color:#1d4ed8; border:1px solid #dbeafe; font-size:10px; font-weight:800; padding:3px 10px; border-radius:14px; text-transform:uppercase; letter-spacing:0.5px; flex-shrink:0; margin-left:12px;'>" + safeEsc(h.status) + "</span>";
+                html += "<strong style='color:#0f172a; font-size:14px; font-weight:700; line-height:1.4;'>" + headingPrefix + ": <span style='font-weight:500; color:#334155;'>" + safeEsc(h.statement) + "</span></strong>";
+                html += "<span style='background:" + badgeBg + "; color:" + badgeColor + "; border:1px solid " + badgeBorder + "; font-size:10px; font-weight:800; padding:3px 10px; border-radius:14px; text-transform:uppercase; letter-spacing:0.5px; flex-shrink:0; margin-left:12px;'>" + badgeText + "</span>";
                 html += "</div>";
                 if (h.evidence_needed) {
                     html += "<div style='font-size:12px; color:#475569; margin-top:6px; background:#ffffff; padding:8px 12px; border-radius:6px; border:1px solid #f1f5f9;'><span style='color:#2563eb; font-weight:700;'>↳ Evidence needed:</span> " + safeEsc(h.evidence_needed) + "</div>";
@@ -481,12 +518,20 @@
         html += "<span style='font-size:10px; font-weight:800; background:#dcfce7; color:#15803d; padding:4px 10px; border-radius:12px; border:1px solid #bbf7d0; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(capa.status || "INVESTIGATION_REQUIRED") + "</span>";
         html += "</div>";
 
-        var potentialAreas = capa.potential_areas || [];
+        var potentialAreas = (capa.potential_areas || []).filter(function(text) {
+            if (!text) return false;
+            var lower = text.toLowerCase().trim();
+            if (lower === "short code" || lower === "placeholder" || lower === "candidate mechanism") return false;
+            if (/^h\d+$/i.test(lower) || /^hyp[_-]?\d+$/i.test(lower) || /^short[_-]?code/i.test(lower)) return false;
+            return true;
+        });
         if (potentialAreas.length) {
             html += "<ul style='padding-left:0; list-style:none; margin-bottom:0; font-size:13px; color:#334155;'>";
             potentialAreas.forEach(function(text) {
+                var clean = text.replace(/SHORT[_-]?CODE/gi, "").replace(/PLACEHOLDER/gi, "").replace(/^[_\s-]+|[_\s-]+$/g, "").trim();
+                if (!clean || clean.length < 3) return;
                 html += "<li style='margin-bottom:10px; display:flex; align-items:flex-start; gap:8px; font-weight:500;'>";
-                html += "<span style='color:#22c55e; font-weight:800;'>✔</span> <span>" + escapeHtml(text) + "</span>";
+                html += "<span style='color:#22c55e; font-weight:800;'>✔</span> <span>" + escapeHtml(clean) + "</span>";
                 html += "</li>";
             });
             html += "</ul>";

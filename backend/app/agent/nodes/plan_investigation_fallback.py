@@ -708,6 +708,12 @@ def build_deterministic_investigation_plan(
             f"{finding_text} {resolved.condition or ''}",
             re.IGNORECASE,
         ))
+        is_notification_or_dispatch_failure = bool(re.search(
+            r"\b(?:notification|dispatch|alert|email|message)\b.*?\b(?:failed|not\s+sent|failure|not\s+dispatched|missing)\b|"
+            r"\b(?:automated\s+notification|notification\s+system)\b",
+            f"{finding_text} {resolved.condition or ''}",
+            re.IGNORECASE,
+        ))
 
         _control_proof_pattern = re.compile(
             r"\b(?:interlock|block|guard|safety|verification)\b.*?\b(?:disabled|bypassed|defeated|deactivated|switched off)\b|"
@@ -802,6 +808,109 @@ def build_deterministic_investigation_plan(
                     activation_condition="If operation outside validated range is confirmed",
                     status="CONDITIONAL",
                 ),
+            ])
+        elif is_notification_or_dispatch_failure:
+            plan_areas = [
+                "Notification workflow and event-processing verification",
+                "Recipient resolution and delivery verification",
+                "Technical and configuration failure analysis",
+            ]
+            questions.extend([
+                InvestigationQuestion(
+                    question_id="Q_EVENT_TRIGGER",
+                    id="Q_EVENT_TRIGGER",
+                    question=f"Did the approved revision or release event generate the expected notification trigger for {subject}?",
+                    purpose="Verify event generation and trigger initiation upon procedure release",
+                    objective="Verify event generation and trigger initiation upon procedure release",
+                    evidence="System event audit trail and revision dispatch triggers",
+                    evidence_required="System event audit trail and revision dispatch triggers",
+                    priority="P1",
+                    target_proposition_id="P_TRIGGER",
+                    status="ACTIVE",
+                    possible_outcomes=[
+                        "Event trigger generated successfully → verify queue creation and processing.",
+                        "No trigger generated → investigate revision release workflow configuration.",
+                    ],
+                ),
+                InvestigationQuestion(
+                    question_id="Q_JOB_PROCESSING",
+                    id="Q_JOB_PROCESSING",
+                    question=f"Was a notification dispatch job or queue entry created and processed for {subject}?",
+                    purpose="Verify queue creation and processing execution",
+                    objective="Verify queue creation and processing execution",
+                    evidence="Notification service queue logs, worker task history, and processing status records",
+                    evidence_required="Notification service queue logs, worker task history, and processing status records",
+                    priority="P2",
+                    target_proposition_id="P_QUEUE",
+                    depends_on="Q_EVENT_TRIGGER",
+                    activation_condition="If event generation is confirmed",
+                    status="CONDITIONAL",
+                    possible_outcomes=[
+                        "Job processed successfully → check recipient resolution and transmission.",
+                        "Job failed or remained queued → investigate service error logs.",
+                    ],
+                ),
+                InvestigationQuestion(
+                    question_id="Q_SERVICE_ERRORS",
+                    id="Q_SERVICE_ERRORS",
+                    question="Did the notification service, mail transfer agent, or integration endpoint return any error or rejection records?",
+                    purpose="Identify technical transmission errors or failure responses",
+                    objective="Identify technical transmission errors or failure responses",
+                    evidence="Notification server error logs, delivery failure reports, and API integration diagnostics",
+                    evidence_required="Notification server error logs, delivery failure reports, and API integration diagnostics",
+                    priority="P3",
+                    target_proposition_id="P_ERRORS",
+                    depends_on="Q_JOB_PROCESSING",
+                    activation_condition="If dispatch job processing was attempted",
+                    status="CONDITIONAL",
+                    possible_outcomes=[
+                        "Error logs confirm technical service outage or API failure.",
+                        "No service errors logged → check recipient address and filtering rules.",
+                    ],
+                ),
+                InvestigationQuestion(
+                    question_id="Q_RECIPIENT_RESOLUTION",
+                    id="Q_RECIPIENT_RESOLUTION",
+                    question="Were recipient distribution lists, user account mappings, and delivery addresses resolved accurately?",
+                    purpose="Verify recipient resolution and account mapping integrity",
+                    objective="Verify recipient resolution and account mapping integrity",
+                    evidence="User directory mappings, distribution list membership records, and recipient configuration logs",
+                    evidence_required="User directory mappings, distribution list membership records, and recipient configuration logs",
+                    priority="P3",
+                    target_proposition_id="P_RECIPIENTS",
+                    depends_on="Q_JOB_PROCESSING",
+                    activation_condition="If dispatch job commenced",
+                    status="CONDITIONAL",
+                    possible_outcomes=[
+                        "Recipient mappings resolved accurately.",
+                        "Misconfiguration or missing user mapping identified.",
+                    ],
+                ),
+                InvestigationQuestion(
+                    question_id="Q_DOWNSTREAM_OPERATIONS",
+                    id="Q_DOWNSTREAM_OPERATIONS",
+                    question=f"Did affected personnel perform operational tasks prior to receiving or acknowledging {subject}?",
+                    purpose="Determine whether operational activity occurred prior to revision awareness",
+                    objective="Determine whether operational activity occurred prior to revision awareness",
+                    evidence=f"Operational activity records, batch records, or system execution logs relative to {subject}",
+                    evidence_required=f"Operational activity records, batch records, or system execution logs relative to {subject}",
+                    priority="P4",
+                    target_proposition_id="P_OPERATIONS",
+                    depends_on="Q_SERVICE_ERRORS",
+                    activation_condition="If notification failure is confirmed",
+                    status="CONDITIONAL",
+                    possible_outcomes=[
+                        "Operational activity occurred prior to awareness → assess scope and compliance impact.",
+                        "No operational activity occurred.",
+                    ],
+                ),
+            ])
+            evidence_items.extend([
+                "System event audit trail and revision dispatch triggers",
+                "Notification service queue logs and worker processing records",
+                "Server error logs, delivery failure reports, and API integration diagnostics",
+                "User directory mappings and distribution list membership records",
+                "Batch production records and operational activity logs",
             ])
         else:
             questions.extend([

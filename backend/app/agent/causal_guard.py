@@ -560,31 +560,25 @@ _GENERIC_HYPOTHESIS_NAME_RE = re.compile(
     r"^\s*(?:process\s+(?:oversight|failure|inconsistency|gap|weakness|issue)|"
     r"(?:communication|documentation|training|system|quality|procedural|management)\s+"
     r"(?:issue|problem|gap|inconsistency|weakness)|"
+    r"short[_-]?code.*|placeholder.*|candidate[_-]?mechanism.*|internal[_-]?code.*|"
     r"human\s+error|oversight)\s*$",
     re.IGNORECASE,
 )
 # A name that is literally just the hypothesis's own ID pattern ("H2",
-# "HYP_003") is a raw internal identifier leaking into what's supposed to
+# "HYP_003") or a generic code is a raw internal identifier leaking into what's supposed to
 # be a human-readable title -- checked independent of the hypothesis's
 # actual assigned id (any LLM-produced hypothesis could echo any Hn/HYP_n
 # shape here), not tied to one specific id value.
-_BARE_HYPOTHESIS_ID_NAME_RE = re.compile(r"^\s*(?:H\d+|HYP[_-]?\d+)\s*$", re.IGNORECASE)
+_BARE_HYPOTHESIS_ID_NAME_RE = re.compile(r"^\s*(?:H\d+|HYP[_-]?\d+|SHORT[_-]?CODE|CODE|NAME)\s*$", re.IGNORECASE)
 
 
 def hypothesis_name_is_generic(name: str | None) -> bool:
     """True if a hypothesis's `name`/title is either a vague relabeling of
     the finding ("Process Oversight", "Communication Issue", "Training
-    Problem") or a raw internal identifier ("H2") rather than a precise,
-    testable causal proposition. These titles carry no discriminating
-    content -- they could be attached to almost any nonconformity in any
-    domain (or, worse, expose implementation detail directly to the
-    auditor) -- and their vagueness is itself a sign the underlying
-    statement is equally unmoored from this finding's specific evidence. A
-    hypothesis must be nameable as a specific, falsifiable mechanism (e.g.
-    REVISION_COMMUNICATION_OR_ACKNOWLEDGEMENT_GAP), not a generic category
-    label or its own ID."""
+    Problem"), an internal placeholder ("SHORT_CODE"), or a raw internal
+    identifier ("H2") rather than a precise, testable causal proposition."""
     if not name:
-        return False
+        return True
     stripped = name.strip()
     return bool(_GENERIC_HYPOTHESIS_NAME_RE.match(stripped) or _BARE_HYPOTHESIS_ID_NAME_RE.match(stripped))
 
@@ -1561,19 +1555,30 @@ def determine_hypothesis_status(
             if hyp_words and conf_words and (hyp_words & conf_words):
                 return "UNRESOLVED", "CONFLICTING"
 
-    # 3. Verified evidence match -> SUPPORTED
+    # 3. Verified evidence match -> SUPPORTED ONLY when direct causal mechanism proof exists
+    # Direct objective confirmation of control bypass, disablement, system outage, or unvalidated action.
+    # Event/observation facts (e.g. "notification sent", "temperature measured") do NOT prove mechanism.
     if verified_facts and allow_verified_promotion:
-        hyp_words = significant_words(statement)
-        if subject_words:
-            hyp_words = hyp_words - subject_words
+        stmt_low = statement.lower()
+        has_verified_causal_proof = False
         for fact in verified_facts:
-            fact_words = significant_words(fact)
-            if subject_words:
-                fact_words = fact_words - subject_words
-            if hyp_words and fact_words:
-                overlap = len(hyp_words & fact_words) / min(len(hyp_words), len(fact_words))
-                if overlap >= 0.5:
-                    return "SUPPORTED", "VERIFIED"
+            f_low = fact.lower()
+            has_disabled_control = bool(re.search(
+                r"\b(?:interlock|block|check|control|guard|safety|verification|validation)\b.*?\b(?:disabled|bypassed|defeated|deactivated|switched off|overridden)\b|"
+                r"\b(?:disabled|bypassed|defeated|deactivated|switched off|overridden)\b.*?\b(?:interlock|block|check|control|guard|safety|verification|validation)\b",
+                f_low,
+            ))
+            has_system_outage = bool(re.search(r"\b(?:server|system|service|channel|network|queue)\b.*?\b(?:outage|failure|down|crashed|unresponsive|failed)\b", f_low))
+            has_unauthorized_action = bool(re.search(r"\b(?:authorized|approved|executed|operated)\b.*?\b(?:without|unvalidated|unqualified|untrained|no\s+completed)\b", f_low))
+            has_explicit_audit_proof = ("audit log" in f_low or "audit trail" in f_low or "system log" in f_low or "server log" in f_low) and any(
+                w in f_low for w in ("disabled", "bypassed", "failure", "outage", "defeated", "overridden")
+            )
+            if has_disabled_control or has_system_outage or has_unauthorized_action or has_explicit_audit_proof:
+                if any(w in stmt_low for w in ("disable", "bypass", "outage", "service failure", "workflow", "authorization", "control", "interlock", "block")):
+                    has_verified_causal_proof = True
+                    break
+        if has_verified_causal_proof:
+            return "SUPPORTED", "VERIFIED"
 
     # 4. Reported evidence match -> POSSIBLE (with REPORTED strength, NEVER SUPPORTED)
     if reported_claims:

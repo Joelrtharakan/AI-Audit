@@ -229,15 +229,24 @@ def build_deterministic_five_why(
             status_note="EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
         )
 
-    # 4. General fallback when no mechanism is present:
-    # An observation (L0) CANNOT answer why it occurred. When no causal
-    # proposition is established, state the evidence boundary explicitly and STOP at 1 step.
     from app.services.semantic_subject import _strip_framing
     deviation_fact = fact_claims[0] if fact_claims else deviation_desc
     deviation_clause = _strip_framing(deviation_fact).strip().rstrip(".")
     if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
         deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
-    why_boundary_answer = f"The available evidence establishes that {deviation_clause}, but does not establish why."
+
+    import re
+    if re.search(r"\b(?:notification|dispatch|alert|email|message)\b", finding_text, re.IGNORECASE):
+        why_boundary_answer = (
+            "The available evidence establishes that notification delivery did not occur, but does not "
+            "establish whether the failure occurred during event generation, job creation, queue processing, "
+            "recipient resolution, or delivery."
+        )
+    else:
+        why_boundary_answer = (
+            f"The available evidence establishes that {deviation_clause}, but does not establish the specific "
+            "underlying mechanism or root cause responsible."
+        )
 
     steps.append(FiveWhyStep(
         question=format_deviation_why_question(
@@ -249,5 +258,5 @@ def build_deterministic_five_why(
     return FiveWhyAnalysis(
         steps=steps,
         is_complete=False,
-        status_note="EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
+        status_note="Evidence boundary reached — causal mechanism requires investigation.",
     )

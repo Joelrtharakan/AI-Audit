@@ -34,7 +34,7 @@ Respond with JSON:
   "candidate_hypotheses": [
     {{
       "id": "H1",
-      "name": "SHORT_CODE_SPECIFIC_TO_THIS_FINDING",
+      "name": "DESCRIPTIVE_MECHANISM_TITLE",
       "statement": "the hypothesis and why it is plausible for this specific finding",
       "evidence_needed": "the specific record/evidence type that would confirm or refute this hypothesis"
     }}

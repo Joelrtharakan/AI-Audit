@@ -170,16 +170,18 @@ def select_authoritative_leading_hypothesis(
     hypotheses: list[CandidateHypothesis],
     conflicts: list[EvidenceConflict] | None = None,
     evidence_ledger: list[EvidenceItem] | None = None,
-) -> tuple[str | None, Literal["SELECTED", "TIED", "NONE"], RootCauseStatus, str | None]:
+) -> tuple[str | None, Literal["SELECTED", "POSSIBLE", "TIED", "NONE"], RootCauseStatus, str | None]:
     """Select the leading hypothesis deterministically.
 
     Rules:
-      - 0 eligible candidates -> (None, "NONE", NOT_ESTABLISHED, "No eligible causal hypotheses")
-      - If unresolved conflicts exist -> (None, "NONE", NOT_ESTABLISHED, "Unresolved evidence conflicts prevent root cause selection")
+      - 0 eligible candidates -> (None, "NONE", NOT_ESTABLISHED, "No eligible causal hypotheses identified")
+      - If unresolved conflicts exist -> (None, "NONE", NOT_ESTABLISHED, "Available evidence contains unresolved conflicts requiring investigation")
       - 1 or more candidates:
         - If exactly 1 candidate is SUPPORTED with promotion allowed -> (H.id, "SELECTED", SUPPORTED, H.rationale)
-        - If all candidates are POSSIBLE -> (None, "NONE", NOT_ESTABLISHED, "Available evidence does not discriminate among candidate hypotheses")
-        - If multiple candidates are tied for highest support -> (None, "TIED", NOT_ESTABLISHED, "Multiple candidate hypotheses remain equally supported")
+        - If multiple candidates are SUPPORTED -> (None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses are supported by available evidence")
+        - If exactly 1 candidate is POSSIBLE -> (H.id, "POSSIBLE", RootCauseStatus.NOT_ESTABLISHED, "Single leading hypothesis pending objective verification")
+        - If multiple candidates are POSSIBLE:
+          - If tied for rank/score -> (None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses remain equally plausible pending investigation")
     """
     if not hypotheses:
         return None, "NONE", RootCauseStatus.NOT_ESTABLISHED, "No eligible causal hypotheses identified"
@@ -196,7 +198,11 @@ def select_authoritative_leading_hypothesis(
         return None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses are supported by available evidence"
 
     # All are POSSIBLE
-    return None, "NONE", RootCauseStatus.NOT_ESTABLISHED, "Initial evidence is insufficient to establish causation; all hypotheses remain unverified"
+    if len(hypotheses) == 1:
+        leading = hypotheses[0]
+        return leading.id, "POSSIBLE", RootCauseStatus.NOT_ESTABLISHED, "Single candidate hypothesis pending objective verification"
+
+    return None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses remain equally plausible pending investigation"
 
 
 def validate_final_analysis(state: dict[str, Any]) -> tuple[bool, list[str]]:

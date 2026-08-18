@@ -64,8 +64,9 @@ def test_ab_case_1_training_workflow_bypass():
     eligible_b, supp_b, _, _, _, promo_b = evaluate_root_cause_eligibility(hyp_b, evidence_items=evidence_b)
     assert eligible_b and supp_b == SupportLevel.POSSIBLE and not promo_b
     hyp_b.status = "POSSIBLE"
-    lead_b, _, stat_b, _ = select_authoritative_leading_hypothesis([hyp_b], evidence_ledger=evidence_b)
-    assert lead_b is None
+    lead_b, lead_mode_b, stat_b, _ = select_authoritative_leading_hypothesis([hyp_b], evidence_ledger=evidence_b)
+    assert lead_b == "H1"
+    assert lead_mode_b == "POSSIBLE"
     assert stat_b == RootCauseStatus.NOT_ESTABLISHED
 
 
@@ -108,8 +109,9 @@ def test_ab_case_2_calibration_block_disablement():
     eligible_b, supp_b, _, _, _, promo_b = evaluate_root_cause_eligibility(hyp_b, evidence_items=evidence_b)
     assert eligible_b and supp_b == SupportLevel.POSSIBLE and not promo_b
     hyp_b.status = "POSSIBLE"
-    lead_b, _, stat_b, _ = select_authoritative_leading_hypothesis([hyp_b], evidence_ledger=evidence_b)
-    assert lead_b is None
+    lead_b, lead_mode_b, stat_b, _ = select_authoritative_leading_hypothesis([hyp_b], evidence_ledger=evidence_b)
+    assert lead_b == "H1"
+    assert lead_mode_b == "POSSIBLE"
     assert stat_b == RootCauseStatus.NOT_ESTABLISHED
 
 
@@ -152,8 +154,9 @@ def test_ab_case_3_notification_service_outage():
     eligible_b, supp_b, _, _, _, promo_b = evaluate_root_cause_eligibility(hyp_b, evidence_items=evidence_b)
     assert eligible_b and supp_b == SupportLevel.POSSIBLE and not promo_b
     hyp_b.status = "POSSIBLE"
-    lead_b, _, stat_b, _ = select_authoritative_leading_hypothesis([hyp_b], evidence_ledger=evidence_b)
-    assert lead_b is None
+    lead_b, lead_mode_b, stat_b, _ = select_authoritative_leading_hypothesis([hyp_b], evidence_ledger=evidence_b)
+    assert lead_b == "H1"
+    assert lead_mode_b == "POSSIBLE"
     assert stat_b == RootCauseStatus.NOT_ESTABLISHED
 
 
@@ -199,8 +202,9 @@ def test_ab_case_4_validated_range_interlock_disablement():
     eligible_b, supp_b, _, _, _, promo_b = evaluate_root_cause_eligibility(hyp_b, evidence_items=evidence_b)
     assert eligible_b and supp_b == SupportLevel.POSSIBLE and not promo_b
     hyp_b.status = "POSSIBLE"
-    lead_b, _, stat_b, _ = select_authoritative_leading_hypothesis([hyp_b], evidence_ledger=evidence_b)
-    assert lead_b is None
+    lead_b, lead_mode_b, stat_b, _ = select_authoritative_leading_hypothesis([hyp_b], evidence_ledger=evidence_b)
+    assert lead_b == "H1"
+    assert lead_mode_b == "POSSIBLE"
     assert stat_b == RootCauseStatus.NOT_ESTABLISHED
 
 

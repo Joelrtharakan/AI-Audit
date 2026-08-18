@@ -385,7 +385,12 @@ def classify_finding_specificity(
     """
     text = finding_text or ""
     has_entity = bool(_ENTITY_RE.search(text))
-    has_date_or_period = bool(_DATE_RE.search(text) or _RELATIVE_TIME_RE.search(text))
+    has_date_or_period = bool(
+        _DATE_RE.search(text)
+        or _DATE_SINGLE_RE.search(text)
+        or _DATE_RANGE_RE.search(text)
+        or _RELATIVE_TIME_RE.search(text)
+    )
     has_reported = bool(reported_claims)
     has_mechanism = bool(mechanism_status) and mechanism_status not in ("UNKNOWN", "NONE")
     has_condition = bool(deviation_condition) and deviation_condition.strip() not in _DEGRADED_CONDITIONS

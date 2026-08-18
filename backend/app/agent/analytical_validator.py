@@ -606,14 +606,23 @@ def derive_investigation_areas(
 
     areas: list[str] = []
 
-    # 1) Hypothesis-named areas (unchanged, generic-by-construction: derived
-    #    from the hypothesis's own name/topic, not a fixed vocabulary).
+    # 1) Hypothesis-named areas (derived from the hypothesis's own topic or
+    #    statement, never leaking internal metadata like SHORT_CODE or H1).
     for h in (candidate_hypotheses or []):
         if getattr(h, "status", None) == "REFUTED":
             continue
         name = (getattr(h, "name", "") or "").upper()
+        if not name or "SHORT_CODE" in name or name in ("CODE", "NAME", "INTERNAL_CODE", "UNSPECIFIED") or re.match(r"^H\d+$", name):
+            # Derive meaningful area from statement instead
+            stmt = getattr(h, "statement", "") or ""
+            if stmt:
+                from app.agent.causal_guard import derive_hypothesis_title_from_statement
+                title = derive_hypothesis_title_from_statement(stmt, getattr(h, "id", "H1"))
+                if title and not any(w in title.lower() for w in ("failure", "breakdown", "gap")):
+                    areas.append(f"{title} verification")
+            continue
         topic_raw = name.split("_")[0] if name else ""
-        topic = topic_raw.capitalize() if topic_raw.isalpha() else None
+        topic = topic_raw.capitalize() if topic_raw.isalpha() and len(topic_raw) > 2 else None
         area = None
         if topic:
             if name.endswith("NOT_COMPLETED"):
@@ -625,7 +634,9 @@ def derive_investigation_areas(
             elif "VERIFICATION_CONTROL" in name or "RECORDING_AND_VERIFICATION" in name:
                 area = f"{topic} verification/authorization"
         if not area and getattr(h, "name", None):
-            area = h.name.replace("_", " ").title()
+            raw_title = h.name.replace("_", " ").title()
+            if not any(w in raw_title.lower() for w in ("short code", "placeholder", "candidate mechanism", "h1", "h2", "h3")):
+                area = raw_title
         if area:
             areas.append(area)
 
@@ -663,7 +674,8 @@ def derive_investigation_areas(
     if existing_areas:
         areas.extend(
             ea for ea in existing_areas
-            if ea and not any(w in ea.lower() for w in ("failure", "ineffective", "breakdown"))
+            if ea and not any(w in ea.lower() for w in ("failure", "ineffective", "breakdown", "short code", "placeholder", "candidate mechanism"))
+            and not re.search(r"\b(?:h\d+|short[_-]?code)\b", ea, re.IGNORECASE)
         )
     else:
         # Question-derived areas: cluster by generic control family, one

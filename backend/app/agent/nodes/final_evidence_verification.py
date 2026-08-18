@@ -1122,7 +1122,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 ))
                 rc.status = RootCauseStatus.NOT_ESTABLISHED
 
-        # Authoritative promotion check: if any candidate hypothesis is proven by verified evidence, promote it
+        # Authoritative promotion check: if any candidate hypothesis is proven by verified evidence, promote it; otherwise enforce POSSIBLE
         from app.agent.causal_graph import evaluate_root_cause_eligibility, select_authoritative_leading_hypothesis
         for h in rc.candidate_hypotheses:
             el, supp, _, _, c_lvl, promo = evaluate_root_cause_eligibility(
@@ -1134,6 +1134,9 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             if promo and supp == SupportLevel.SUPPORTED:
                 h.status = "SUPPORTED"
                 h.causal_level = c_lvl
+            else:
+                h.status = "POSSIBLE"
+                h.evidence_strength = "NONE"
 
         lead_id, lead_mode, authoritative_rc_status, lead_rationale = select_authoritative_leading_hypothesis(
             rc.candidate_hypotheses,
@@ -1147,6 +1150,12 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             if lead_rationale:
                 rc.leading_hypothesis_rationale = lead_rationale
                 rc.category = "TO_BE_CONFIRMED"
+        else:
+            rc.status = RootCauseStatus.NOT_ESTABLISHED
+            rc.leading_hypothesis = lead_id if (lead_mode == "POSSIBLE" and lead_id) else None
+            rc.leading_hypothesis_status = lead_mode
+            if lead_rationale:
+                rc.leading_hypothesis_rationale = lead_rationale
 
         # Causal-verb firewall on the "Why" text (narrative/root_cause_basis):
         # the same "because"/"due to"/"caused by" over-claim that a

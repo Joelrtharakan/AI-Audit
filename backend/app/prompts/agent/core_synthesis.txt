@@ -29,7 +29,7 @@ Return ONLY this JSON:
     "candidate_hypotheses": [
       {{
         "id": "H1",
-        "name": "SHORT_CODE",
+        "name": "MECHANISM_TITLE",
         "statement": "1 sentence: the specific plausible cause",
         "supporting_claim_ids": ["C1"],
         "contradicting_claim_ids": [],
