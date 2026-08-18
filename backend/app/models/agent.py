@@ -271,12 +271,18 @@ class CanonicalFindingState(BaseModel):
     # subject and the deviation asserted about it are never conflated into
     # one opaque string.
     deviation_condition: str = "UNKNOWN"
+    relevant_change: str | None = None
+    semantic_type: str | None = None
     affected_objects: list[str] = []
     affected_people: list[str] = []
     affected_departments: list[str] = []
     affected_equipment: list[str] = []
     affected_records: list[str] = []
     affected_period: str = "UNKNOWN"
+    finding_detected_period: str | None = None
+    transaction_period: str | None = None
+    control_at_risk: str | None = None
+    financial_amount: FinancialAmount | None = None
     time_period: str = "UNKNOWN"
     # The person/role identified as responsible/involved, if the finding names one
     # (e.g. "the responsible technician") — distinct from affected_people (who was
@@ -333,6 +339,7 @@ class CanonicalFindingState(BaseModel):
     previous_capa_status: str | None = None  # "COMPLETED" | None
     previous_capa_effectiveness: str = "NOT_VERIFIED"  # "EFFECTIVE" | "NOT_VERIFIED"
     recurrence_rationale: str | None = None
+    cost_impact: CostImpact | None = None
 
 
 
@@ -439,6 +446,8 @@ class CandidateHypothesis(BaseModel):
     # LLM — set by app.agent.analytical_validator.hypothesis_confidence so
     # every hypothesis in a report carries a grade, not just the leading one.
     confidence: Literal["HIGH", "MEDIUM", "LOW"] | None = None
+    source_type: str = "INFERRED_INVESTIGATION_HYPOTHESIS"
+    causal_role: Literal["PRIMARY_CAUSE", "CONTRIBUTING_CAUSE", "DETECTION_FAILURE", "SYSTEMIC_CAUSE", "IMPACT_FACTOR"] = "PRIMARY_CAUSE"
 
 
 
@@ -585,6 +594,10 @@ class InvestigationQuestion(BaseModel):
     presupposes_cause: bool = False
     presupposes_outcome: bool = False
     possible_outcomes: list[str] = []
+    question_type: Literal["ROOT_CAUSE", "DETECTION_CONTROL", "FINANCIAL_IMPACT", "SYSTEMIC", "UNSPECIFIED"] = "ROOT_CAUSE"
+    category: str | None = None
+    decision_effect: str | None = None
+    target_hypothesis_ids: list[str] = []
 
     def model_post_init(self, __context: Any) -> None:
         if not self.question_id and self.id:
@@ -599,6 +612,8 @@ class InvestigationQuestion(BaseModel):
             self.evidence_required = self.evidence
         elif not self.evidence and self.evidence_required:
             self.evidence = self.evidence_required
+        if not self.target_hypothesis_ids and self.hypothesis_tested:
+            self.target_hypothesis_ids = [self.hypothesis_tested]
         if self.activation_condition and self.status == "ACTIVE":
             self.status = "CONDITIONAL"
 
@@ -607,6 +622,10 @@ class InvestigationPlan(BaseModel):
     areas: list[str] = []
     questions: list[InvestigationQuestion] = []
     evidence_to_collect: list[str] = []
+    root_cause_questions: list[InvestigationQuestion] = []
+    detection_control_questions: list[InvestigationQuestion] = []
+    financial_questions: list[InvestigationQuestion] = []
+    systemic_questions: list[InvestigationQuestion] = []
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +681,10 @@ class ImpactAssessment(BaseModel):
     affected_object: str | None = None   # the actual process/record/output impacted
     affected_people: str | None = None   # who specifically was affected
     affected_period: str | None = None   # stated period or "requires confirmation"
+    finding_detected_period: str | None = None
+    transaction_period: str | None = None
     process_at_risk: str | None = None   # the process whose output is in question
+    control_at_risk: str | None = None   # the control/prevention mechanism
     relevant_change: str | None = None   # what specifically changed (Rule 18: never assumed)
     potential_effect: str | None = None  # plausible downstream consequence
     evidence_needed: str | None = None   # what would bound the scope
@@ -670,7 +692,97 @@ class ImpactAssessment(BaseModel):
     impact_observed: str | None = None   # what is objectively verified
     impact_inferred: str | None = None   # what is logically inferred from evidence
     impact_unknown: str | None = None    # what remains unknown
+    financial_amount: FinancialAmount | None = None
 
+
+# ---------------------------------------------------------------------------
+# Cost & Financial Impact (Sections 26-42)
+# ---------------------------------------------------------------------------
+
+
+class CostEvidenceStatus(str, Enum):
+    VERIFIED = "VERIFIED"
+    REPORTED = "REPORTED"
+    ESTIMATED = "ESTIMATED"
+    INFERRED = "INFERRED"
+    REQUIRES_ASSESSMENT = "REQUIRES_ASSESSMENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class CostFactorType(str, Enum):
+    DUPLICATE_PAYMENT = "DUPLICATE PAYMENT"
+    OVERPAYMENT = "OVERPAYMENT"
+    TRANSACTION_AMOUNT = "TRANSACTION AMOUNT"
+    PAYMENT_AMOUNT = "PAYMENT AMOUNT"
+    PURCHASE_VALUE = "PURCHASE VALUE"
+    REWORK = "REWORK"
+    SCRAP = "SCRAP"
+    DOWNTIME = "DOWNTIME"
+    REPLACEMENT = "REPLACEMENT"
+    OVERTIME = "OVERTIME"
+    LABOR = "LABOR"
+    MATERIAL = "MATERIAL"
+    MATERIAL_LOSS = "MATERIAL LOSS"
+    PENALTY = "PENALTY"
+    FINE = "FINE"
+    REFUND = "REFUND"
+    REVENUE_LOSS = "REVENUE LOSS"
+    RECOVERY_COST = "RECOVERY COST"
+    INVESTIGATION_COST = "INVESTIGATION COST"
+    OPERATIONAL_LOSS = "OPERATIONAL LOSS"
+    OTHER = "OTHER"
+
+
+class FinancialAmount(BaseModel):
+    amount: float | None = None
+    formatted: str | None = None  # e.g. "₹125,000"
+    currency: str | None = "INR"  # e.g. "INR", "USD", "EUR"
+    factor: str | None = None  # e.g. "DUPLICATE_PAYMENT"
+    source_claim_ids: list[str] = []
+    support_status: Literal["VERIFIED", "REPORTED", "ESTIMATED", "UNVERIFIED", "UNKNOWN"] = "VERIFIED"
+    confidence: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
+
+
+class CostComponent(BaseModel):
+    name: str
+    amount: float | None = None
+    currency: str | None = None
+    category: str | None = None
+    basis: str | None = None
+    provenance: str = "UNKNOWN"  # VERIFIED, REPORTED, ESTIMATED, INFERRED, UNKNOWN
+
+
+class CostImpact(BaseModel):
+    cost_factor_detected: bool = False
+    cost_factor_type: str | None = None
+    financial_factor: str | None = None  # e.g. "DUPLICATE PAYMENT", "REWORK"
+    financial_status: str | None = None  # VERIFIED_TRANSACTION, VERIFIED_LOSS, POTENTIAL_EXPOSURE, RECOVERED, RECOVERABLE, VERIFIED, REPORTED, ESTIMATED, REQUIRES_ASSESSMENT, UNKNOWN
+    currency: str | None = None
+    financial_amount: FinancialAmount | None = None
+    transaction_amount: float | None = None
+    actual_loss: float | None = None
+    actual_loss_status: str | None = None  # "NOT_ESTABLISHED", "VERIFIED", "UNKNOWN", "ESTABLISHED"
+    potential_exposure: float | None = None
+    potential_cost_exposure: str | None = None
+    recoverable_amount: float | None = None
+    recovered_amount: float | None = None
+    unrecovered_amount: float | None = None
+    recoverability: str | None = None  # "UNKNOWN", "RECOVERABLE", "RECOVERED", "IRRECOVERABLE"
+    recoverability_status: str | None = None  # "UNKNOWN", "REQUIRES_VERIFICATION", "RECOVERED", "PARTIALLY_RECOVERED", "IRRECOVERABLE"
+    verified_cost: float | None = None
+    reported_cost: float | None = None
+    estimated_cost: float | None = None
+    lower_bound: float | None = None
+    upper_bound: float | None = None
+    cost_components: list[CostComponent] = []
+    cost_drivers: list[str] = []
+    calculation_basis: str | None = None
+    assumptions: list[str] = []
+    missing_cost_inputs: list[str] = []
+    evidence_required: list[str] = []
+    evidence_ids: list[str] = []
+    confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+    narrative: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +804,9 @@ class EvidenceGap(BaseModel):
 class InvestigationReport(BaseModel):
     observation_quality: Literal["SUFFICIENT", "INSUFFICIENT", "CONFLICTING"]
     observation_confidence: Literal["LOW", "MEDIUM", "HIGH"] = "HIGH"
+    mechanism_confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
     root_cause_confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+    impact_confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
     overall_confidence: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
     confidence: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"  # backwards compatibility
     investigation_required: Literal["YES", "NO", "LIMITED"]
@@ -704,6 +818,8 @@ class InvestigationReport(BaseModel):
     five_why: FiveWhyAnalysis
     capa: CapaAnalysis
     impact_assessment: ImpactAssessment
+    cost_impact: CostImpact | None = None
+    financial_amount: FinancialAmount | None = None
     evidence_gaps: list[EvidenceGap] = []
     evidence: list[EvidenceItem] = []
     propositions: list[Proposition] = []

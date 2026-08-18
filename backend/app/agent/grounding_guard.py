@@ -170,6 +170,10 @@ def mentions_unsupported_domain(text: str, source_text: str) -> bool:
         "train": ["competenc", "analyst", "operator", "instruction", "qualif"],
         "competenc": ["train", "qualification", "evaluat", "matrix"],
         "maintenanc": ["calibrat", "service", "work order", "pm-", "sensor"],
+        "authoriz": ["approval", "override", "bypass", "payment", "sign-off", "permission"],
+        "vendor": ["supplier", "payable", "procurement", "invoice"],
+        "supplier": ["vendor", "payable", "procurement", "invoice"],
+        "billing": ["invoice", "payment", "payable", "charge"],
     }
 
     for stem in _DOMAIN_TRIGGER_STEMS:
@@ -210,7 +214,7 @@ def build_source_text(
 # identifier heuristic below -- e.g. "DEGRADED MODE" in a degraded-mode
 # narrative isn't a fabricated entity, it's this system labeling its own
 # analysis quality. Deliberately small and generic, not case-specific.
-_SYSTEM_LABEL_WORDS = {"DEGRADED", "MODE", "LLM", "CAPA"}
+_SYSTEM_LABEL_WORDS = {"DEGRADED", "MODE", "LLM", "CAPA", "ERP", "AP", "QMS", "RCA"}
 
 # Ordinary short English function words that legitimately appear in ALL
 # CAPS when this system writes its own shouting-case status language (e.g.

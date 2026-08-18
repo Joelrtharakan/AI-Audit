@@ -151,3 +151,59 @@ def test_negative_case_5_training_record_missing():
     assert lead_id is None
     assert lead_stat == "NONE"
     assert rc_stat == RootCauseStatus.NOT_ESTABLISHED
+
+
+def test_negative_case_6_duplicate_payment_finding_only():
+    """Case 6: Duplicate payment of ₹125,000 identified with NO logs/history.
+    Must NOT infer any specific primary cause or detection failure as established root cause.
+    Expected: Root Cause = NOT_ESTABLISHED, Leading = NONE, Candidates = POSSIBLE.
+    """
+    evidence = [
+        EvidenceItem(
+            claim="During the audit, duplicate payment of ₹1,25,000 to a supplier was identified",
+            source="audit_observation",
+            status=EvidenceStatus.VERIFIED,
+        )
+    ]
+    hyps = [
+        CandidateHypothesis(
+            id="H1",
+            name="DUPLICATE_DETECTION_MATCHING_GAP",
+            statement="The second payment transaction was processed without triggering duplicate matching warnings.",
+            evidence_needed="ERP duplicate-detection configuration",
+            causal_role="PRIMARY_CAUSE",
+        ),
+        CandidateHypothesis(
+            id="H2",
+            name="APPROVAL_OR_WORKFLOW_BYPASS",
+            statement="The duplicate payment was executed under an exception override or authorization bypass.",
+            evidence_needed="Payment approval logs",
+            causal_role="PRIMARY_CAUSE",
+        ),
+        CandidateHypothesis(
+            id="H3",
+            name="DUPLICATE_MASTER_DATA_OR_INVOICE_VARIANCE",
+            statement="Duplicate vendor numbering or altered invoice reference data allowed transaction processing.",
+            evidence_needed="Supplier master data records",
+            causal_role="CONTRIBUTING_CAUSE",
+        ),
+        CandidateHypothesis(
+            id="H4",
+            name="RECONCILIATION_DETECTION_GAP",
+            statement="The duplicate payment was not identified during periodic accounts-payable reconciliation.",
+            evidence_needed="AP reconciliation logs",
+            causal_role="DETECTION_FAILURE",
+        ),
+    ]
+    for h in hyps:
+        eligible, supp_lvl, reason, missing, lvl, promo_allowed = evaluate_root_cause_eligibility(
+            h, evidence_items=evidence
+        )
+        assert eligible
+        assert supp_lvl == SupportLevel.POSSIBLE
+        assert not promo_allowed
+
+    lead_id, lead_stat, rc_stat, rationale = select_authoritative_leading_hypothesis(hyps, evidence_ledger=evidence)
+    assert lead_id is None
+    assert lead_stat in ("NONE", "TIED")
+    assert rc_stat == RootCauseStatus.NOT_ESTABLISHED

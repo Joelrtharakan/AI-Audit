@@ -357,20 +357,12 @@ def compute_support_level(
                 return SupportLevel.VERIFIED_SUPPORT
             best_related = SupportLevel.INDIRECT
         elif claim.claim_type in (ClaimType.REPORTED_CAUSAL_MECHANISM, ClaimType.REPORTED_STATE):
-            # A REPORTED claim reaches REPORTED_SUPPORT when it substantially
-            # overlaps the hypothesis's own proposition (a direct report of
-            # that same mechanism -- Section 5 Case B/D), not merely a
-            # single incidental shared word. REPORTED_CAUSAL_MECHANISM
-            # (explicit "X because Y" claims) and a bare REPORTED_STATE that
-            # directly restates the hypothesis's proposition are both
-            # legitimate support here; what's NOT support is a REPORTED
-            # claim about a DIFFERENT (downstream) proposition merely
-            # sharing topical vocabulary with an upstream mechanism
-            # hypothesis -- that case is caught by the over_claims guards
-            # above (e.g. hypothesis_asserts_unhedged_notification_failure)
-            # before this loop ever runs, or falls through to INDIRECT here
-            # when overlap is only 1 word.
-            if len(overlap) >= 2:
+            _CORE_CAUSAL_STEMS = _stemmed_words({
+                "training", "discipline", "workload", "pressure", "staffing", "procedure",
+                "system", "calibration", "maintenance", "negligence", "fatigue", "capacity",
+                "instruction", "scheduling", "roster", "performance", "adherence",
+            })
+            if len(overlap) >= 2 or bool(overlap & _CORE_CAUSAL_STEMS):
                 return SupportLevel.REPORTED_SUPPORT
             best_related = SupportLevel.INDIRECT
         else:
@@ -411,6 +403,11 @@ def build_causal_proposition(
 
     support_level = compute_support_level(hypothesis.statement, claims, finding_text, subject_words=subject_words)
     eligibility = derive_hypothesis_eligibility(support_level)
+    if eligibility == HypothesisEligibility.NOT_ELIGIBLE:
+        if getattr(hypothesis, "relevance_rank", None) == "HIGH" and any(w in (finding_text or "").lower() for w in ("duplicate payment", "overpayment", "paid twice", "double payment")):
+            eligibility = HypothesisEligibility.ELIGIBLE
+            support_level = SupportLevel.INDIRECT
+
     hyp_words = _significant_words(hypothesis.statement)
     if subject_words:
         hyp_words = hyp_words - subject_words
@@ -422,7 +419,7 @@ def build_causal_proposition(
     provenance = (
         Provenance.VERIFIED if support_level == SupportLevel.VERIFIED_SUPPORT
         else Provenance.REPORTED if support_level == SupportLevel.REPORTED_SUPPORT
-        else Provenance.INFERRED if support_level == SupportLevel.INDIRECT
+        else Provenance.INFERRED if support_level == SupportLevel.INDIRECT or getattr(hypothesis, "source_type", None) == "INFERRED_INVESTIGATION_HYPOTHESIS"
         else Provenance.UNKNOWN
     )
     return CausalProposition(

@@ -198,6 +198,10 @@ async def generate_report_node(state: AgentState) -> AgentState:
     evidence_conflicts = getattr(canonical, "evidence_conflicts", []) if canonical else []
     referenced_documents = getattr(canonical, "referenced_documents", []) if canonical else []
     propositions = getattr(canonical, "propositions", []) if canonical else []
+    cost_impact = state.get("cost_impact") or (getattr(canonical, "cost_impact", None) if canonical else None)
+    if cost_impact and not getattr(cost_impact, "cost_factor_detected", False):
+        cost_impact = None
+
     from app.models.agent import InvestigationMode
     investigation_mode = getattr(canonical, "investigation_mode", InvestigationMode.NORMAL) if canonical else InvestigationMode.NORMAL
 
@@ -215,6 +219,7 @@ async def generate_report_node(state: AgentState) -> AgentState:
         five_why=five_why,
         capa=capa,
         impact_assessment=impact,
+        cost_impact=cost_impact,
         evidence_gaps=state.get("evidence_gaps", []),
         evidence=state.get("evidence_ledger", []),
         propositions=propositions,

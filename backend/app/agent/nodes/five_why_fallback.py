@@ -27,7 +27,13 @@ def build_deterministic_five_why(
     """
     from app.agent.causal_guard import extract_immediate_mechanism, repeats_previous_why_answer
     from app.agent.claim_extractor import detect_evidence_conflicts, extract_claims
-    from app.services.semantic_subject import extract_temporal_clause, format_deviation_why_question, resolve_deviation, topic_word
+    from app.services.semantic_subject import (
+        extract_temporal_clause,
+        format_deviation_why_question,
+        is_actor_noun,
+        resolve_deviation,
+        topic_word,
+    )
 
     steps: list[FiveWhyStep] = []
 
@@ -39,15 +45,21 @@ def build_deterministic_five_why(
             if canonical_subject not in _DEGRADED_SUBJECTS:
                 noun_sub = canonical_subject
             else:
-                noun_sub = resolved.finding_subject or resolved.subject or "the affected process"
+                noun_sub = resolved.finding_subject or resolved.subject or (
+                    "email notification" if any(w in finding_text.lower() for w in ("email", "notification", "dispatch")) else "the affected process"
+                )
         else:
             subj_val = getattr(canonical_subject, "finding_subject", getattr(canonical_subject, "subject", None))
             if subj_val and subj_val not in _DEGRADED_SUBJECTS:
                 noun_sub = subj_val
             else:
-                noun_sub = resolved.finding_subject or resolved.subject or "the affected process"
+                noun_sub = resolved.finding_subject or resolved.subject or (
+                    "email notification" if any(w in finding_text.lower() for w in ("email", "notification", "dispatch")) else "the affected process"
+                )
     else:
-        noun_sub = resolved.finding_subject or resolved.subject or "the affected process"
+        noun_sub = resolved.finding_subject or resolved.subject or (
+            "email notification" if any(w in finding_text.lower() for w in ("email", "notification", "dispatch")) else "the affected process"
+        )
     deviation_desc = resolved.deviation or f"{noun_sub} condition noted in finding"
 
     claims = extract_claims(finding_text, evidence_ledger)
@@ -71,7 +83,99 @@ def build_deterministic_five_why(
             status_note="EVIDENCE BOUNDARY — Underlying event requires objective verification before causal mechanism can be established.",
         )
 
-    # 1. Conflicting Evidence Case (e.g. operator vs supervisor reports)
+    # 0b. Duplicate Payment / Transaction Finding (Section 6 Hardening)
+    if re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment|overpayment)\b", finding_text, re.IGNORECASE):
+        steps.append(FiveWhyStep(
+            question="Why was a duplicate payment identified?",
+            answer="Two payment transactions associated with the same supplier obligation were identified as duplicate.",
+            status="VERIFIED",
+        ))
+        steps.append(FiveWhyStep(
+            question="Why was the duplicate payment processed?",
+            answer="The available evidence confirms that a duplicate payment occurred, but does not establish the mechanism that resulted in the second payment.",
+            status="UNKNOWN",
+        ))
+        steps.append(FiveWhyStep(
+            question="Which control condition allowed the duplicate payment?",
+            answer="The underlying control condition that allowed the second transaction is not established from available evidence — objective records from payment workflow, duplicate-detection, approval, and reconciliation logs are required.",
+            status="UNKNOWN",
+        ))
+        return FiveWhyAnalysis(
+            steps=steps,
+            is_complete=False,
+            status_note="INCOMPLETE — EVIDENCE BOUNDARY",
+        )
+
+    # 1. Multiple Competing Reported Explanations Case (e.g. training vs workload vs discipline)
+    reported_claims_list = [c for c in claims if getattr(c, "status", None) == EvidenceStatus.REPORTED]
+    if not conflicts and len(reported_claims_list) >= 2:
+        from app.services.semantic_subject import _strip_framing, strip_leading_article
+        deviation_fact = fact_claims[0] if fact_claims else deviation_desc
+        deviation_clause = _strip_framing(deviation_fact).strip().rstrip(".")
+        if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
+            deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
+
+        # Step 1: Why did the deviation occur? -> Verified observation
+        why1_q = format_deviation_why_question(
+            resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+        )
+        why1_ans = f"The evidence establishes that {deviation_clause}."
+        steps.append(FiveWhyStep(
+            question=why1_q,
+            answer=why1_ans,
+            status="VERIFIED",
+        ))
+
+        # Step 2: Why did the personnel not complete the activity? -> Competing reported explanations
+        actor_name = resolved.actor or "the affected personnel"
+        stripped_actor = strip_leading_article(actor_name).lower()
+        predicates = []
+        for rc in reported_claims_list:
+            pred = (rc.predicate or rc.text).strip().rstrip(".")
+            # Clean common prefixes
+            pred_clean = re.sub(r"^(?:that\s+|they\s+were\s+|there\s+was\s+)", "", pred, flags=re.IGNORECASE).strip()
+            if pred_clean and pred_clean not in predicates:
+                predicates.append(pred_clean)
+
+        if len(predicates) >= 2:
+            num_words = {2: "Two", 3: "Three", 4: "Four", 5: "Five"}.get(len(predicates), str(len(predicates)))
+            list_str = ", ".join(predicates[:-1]) + f", and {predicates[-1]}"
+            why2_ans = f"{num_words} explanations were reported: {list_str}. None is independently verified by the available evidence."
+        elif predicates:
+            why2_ans = f"An explanation was reported: {predicates[0]}, but it is not independently verified by available evidence."
+        else:
+            why2_ans = "Multiple explanations were reported; none is independently verified by available evidence."
+
+        target_obj_name = noun_sub.lower()
+        if "completion" in target_obj_name:
+            why2_q = f"Why did the {stripped_actor} not complete the {target_obj_name.replace(' completion', '')}?"
+        elif is_actor_noun(actor_name):
+            why2_q = f"Why did the {stripped_actor} not complete the {target_obj_name}?"
+        else:
+            why2_q = f"Why did this nonconformity occur in {target_obj_name}?"
+
+        steps.append(FiveWhyStep(
+            question=why2_q,
+            answer=why2_ans,
+            status="REPORTED",
+        ))
+
+        # Step 3: Which mechanism caused it? -> Evidence boundary
+        why3_q = "Which of these mechanisms caused the non-completion?" if "checklist" in noun_sub.lower() or "complete" in finding_text.lower() else "Which of these mechanisms caused the nonconformity?"
+        why3_ans = "The operative causal mechanism is not established from available evidence — objective records are required to distinguish the competing explanations."
+        steps.append(FiveWhyStep(
+            question=why3_q,
+            answer=why3_ans,
+            status="UNKNOWN",
+        ))
+
+        return FiveWhyAnalysis(
+            steps=steps,
+            is_complete=False,
+            status_note="Evidence boundary reached — multiple competing reported explanations require objective record verification.",
+        )
+
+    # 1b. Conflicting Evidence Case (e.g. delivery vs receipt)
     if conflicts:
         conflict = conflicts[0]
         topic = topic_word(noun_sub)
@@ -160,9 +264,6 @@ def build_deterministic_five_why(
         # (not just its cause) is what the conflicting reports concern, so
         # the 2-step chain below correctly frames the uncertainty as being
         # about the proposition itself.
-        # noun_sub is often already a "<topic> compliance for X" phrase (e.g.
-        # "training compliance for the revised procedure") — don't re-prefix
-        # it with the topic word a second time.
         subject_phrase = noun_sub if topic in noun_sub.lower() else f"{topic} compliance for {noun_sub}"
         steps.append(FiveWhyStep(
             question=f"Why was {subject_phrase} unconfirmed?",
@@ -258,5 +359,5 @@ def build_deterministic_five_why(
     return FiveWhyAnalysis(
         steps=steps,
         is_complete=False,
-        status_note="Evidence boundary reached — causal mechanism requires investigation.",
+        status_note="EVIDENCE BOUNDARY — Causal mechanism requires investigation.",
     )

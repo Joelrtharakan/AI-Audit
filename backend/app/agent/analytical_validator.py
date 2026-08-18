@@ -62,31 +62,38 @@ def select_leading_hypothesis(candidate_hypotheses: list) -> str | None:
     if not candidate_hypotheses:
         return None
 
-    supported = [h for h in candidate_hypotheses if h.status == "SUPPORTED"]
+    primary_hyps = [h for h in candidate_hypotheses if getattr(h, "causal_role", "PRIMARY_CAUSE") == "PRIMARY_CAUSE" or h.status == "SUPPORTED"]
+    hyps_to_evaluate = primary_hyps if primary_hyps else candidate_hypotheses
+
+    supported = [h for h in hyps_to_evaluate if h.status == "SUPPORTED"]
     if supported:
         pool = supported
     else:
-        pool = [h for h in candidate_hypotheses if h.status != "REFUTED"]
+        pool = [h for h in hyps_to_evaluate if h.status != "REFUTED"]
         if len(pool) <= 1:
             return None
-    if not pool:
-        return None
+
+    if len(pool) == 1:
+        best = pool[0]
+        return f"{best.id} — {best.statement}"
 
     ranks = {_RANK_ORDER.get(h.relevance_rank, 1) for h in pool}
-    if len(pool) > 1 and len(ranks) == 1:
-        # All tied at the same rank -- try structural scoring to break tie
-        scored = [(h, score_hypothesis(h)) for h in pool]
-        scored.sort(key=lambda x: x[1], reverse=True)
-        best_score = scored[0][1]
-        second_score = scored[1][1] if len(scored) > 1 else 0.0
-        if best_score - second_score > 0.1:
-            # Enough differentiation to declare a leader
-            best = scored[0][0]
-            return f"{best.id} — {best.statement}"
-        # Still tied -- no defensible single leader.
+    if len(ranks) == 1:
+        if supported:
+            scored = [(h, score_hypothesis(h)) for h in pool]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            best_score = scored[0][1]
+            second_score = scored[1][1] if len(scored) > 1 else 0.0
+            if best_score - second_score > 0.1:
+                best = scored[0][0]
+                return f"{best.id} — {best.statement}"
         return None
 
     best = min(pool, key=lambda h: _RANK_ORDER.get(h.relevance_rank, 1))
+    best_rank_val = _RANK_ORDER.get(best.relevance_rank, 1)
+    best_rank_hyps = [h for h in pool if _RANK_ORDER.get(h.relevance_rank, 1) == best_rank_val]
+    if len(best_rank_hyps) > 1:
+        return None
     return f"{best.id} — {best.statement}"
 
 

@@ -18,11 +18,16 @@ import re
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
-# "<Speaker> stated/reported/confirmed/indicated/... that <claim>"
+# "<Speaker> stated/reported/claimed/... (that) <claim>"
 _REPORT_VERB_RE = re.compile(
     r"^(?P<speaker>[A-Z][\w\s-]{0,50}?)\s+"
-    r"(?:stated|reported|confirmed|indicated|noted|mentioned|claimed|said|explained|advised|acknowledged)\s+"
-    r"that\s+(?P<claim>.+)$",
+    r"(?:stated|reported|confirmed|indicated|noted|mentioned|claimed|said|"
+    r"explained|advised|acknowledged|attributed\s+(?:this|it|the\s+issue|the\s+failure)?\s*to|cited|"
+    r"states|reports|confirms|indicates|notes|mentions|claims|says|"
+    r"explains|advises|acknowledges|"
+    r"state|report|confirm|indicate|note|mention|claim|say|"
+    r"explain|advise|acknowledge)\s+"
+    r"(?:that\s+)?(?P<claim>.+)$",
     re.IGNORECASE,
 )
 

@@ -150,11 +150,11 @@ def evaluate_root_cause_eligibility(
         has_system_outage = bool(re.search(r"\b(?:server|system|service|channel|network|queue)\b.*?\b(?:outage|failure|down|crashed|unresponsive|failed)\b", f_low))
         has_unauthorized_action = bool(re.search(r"\b(?:authorized|approved|executed|operated)\b.*?\b(?:without|unvalidated|unqualified|untrained|no\s+completed)\b", f_low))
         has_explicit_audit_proof = ("audit log" in f_low or "audit trail" in f_low or "system log" in f_low or "server log" in f_low) and any(
-            w in f_low for w in ("disabled", "bypassed", "failure", "outage", "defeated", "overridden")
+            w in f_low for w in ("disabled", "bypassed", "failure", "outage", "defeated", "overridden", "never assigned", "not assigned", "unassigned")
         )
 
         if has_disabled_control or has_system_outage or has_unauthorized_action or has_explicit_audit_proof:
-            if any(w in stmt_low for w in ("disable", "bypass", "outage", "service failure", "workflow", "authorization", "control", "interlock", "block")):
+            if any(w in stmt_low for w in ("disable", "bypass", "outage", "service failure", "workflow", "authorization", "control", "interlock", "block", "assignment", "assign")):
                 has_verified_causal_proof = True
                 break
 
@@ -189,7 +189,11 @@ def select_authoritative_leading_hypothesis(
     if conflicts and len(conflicts) > 0:
         return None, "NONE", RootCauseStatus.NOT_ESTABLISHED, "Available evidence contains unresolved conflicts requiring investigation"
 
-    supported_hyps = [h for h in hypotheses if getattr(h, "status", "") == "SUPPORTED"]
+    # Separate primary root-cause candidates from detection failures and contributing factors
+    primary_hyps = [h for h in hypotheses if getattr(h, "causal_role", "PRIMARY_CAUSE") == "PRIMARY_CAUSE" or getattr(h, "status", "") == "SUPPORTED"]
+    candidates_to_evaluate = primary_hyps if primary_hyps else hypotheses
+
+    supported_hyps = [h for h in candidates_to_evaluate if getattr(h, "status", "") == "SUPPORTED"]
     if len(supported_hyps) == 1:
         leading = supported_hyps[0]
         return leading.id, "SELECTED", RootCauseStatus.SUPPORTED, getattr(leading, "rationale", "Supported by verified evidence")
@@ -198,96 +202,53 @@ def select_authoritative_leading_hypothesis(
         return None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses are supported by available evidence"
 
     # All are POSSIBLE
-    if len(hypotheses) == 1:
-        leading = hypotheses[0]
+    if len(candidates_to_evaluate) == 1:
+        leading = candidates_to_evaluate[0]
+        if evidence_ledger is not None and not getattr(leading, "supporting_evidence", None) and not getattr(leading, "supporting_claim_ids", None):
+            return None, "NONE", RootCauseStatus.NOT_ESTABLISHED, "Candidate hypothesis lacks supporting evidence"
         return leading.id, "POSSIBLE", RootCauseStatus.NOT_ESTABLISHED, "Single candidate hypothesis pending objective verification"
 
     return None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses remain equally plausible pending investigation"
 
 
 def validate_final_analysis(state: dict[str, Any]) -> tuple[bool, list[str]]:
-    """Canonical final validator validating all 20 causal invariants across all execution paths.
+    """Canonical final validator validating all production invariants across all execution paths.
 
     Returns:
       (is_valid, warnings_or_violations)
     """
+    from app.agent.invariants import evaluate_all_invariants
+
     violations: list[str] = []
     canonical = state.get("canonical_finding_state")
     rc = state.get("root_cause")
     fw = state.get("five_why")
-    inv = state.get("investigation_plan")
     capa = state.get("capa_analysis")
     impact = state.get("impact_assessment")
-    evidence = state.get("evidence_ledger", [])
     conflicts = getattr(canonical, "evidence_conflicts", []) if canonical else []
     ref_docs = getattr(canonical, "referenced_documents", []) if canonical else []
 
-    # 1. Provenance: Every candidate hypothesis must have supporting evidence
-    if rc and rc.candidate_hypotheses:
-        for h in rc.candidate_hypotheses:
-            if not getattr(h, "supporting_evidence", []) and not getattr(h, "supporting_claim_ids", []):
-                violations.append(f"Hypothesis {h.id} lacks supporting evidence provenance")
+    # 1. Evaluate formalized invariant registry
+    inv_valid, inv_violations = evaluate_all_invariants(state)
+    violations.extend(inv_violations)
 
-    # 2. Document Availability & Content Isolation: Unavailable documents cannot have inferred contents
-    if ref_docs:
-        unavail = [getattr(d, "document_type", "").lower() for d in ref_docs if getattr(d, "reference_status", "") == "REFERENCED_UNAVAILABLE"]
-        if rc and rc.candidate_hypotheses:
-            for h in rc.candidate_hypotheses:
-                stmt_low = h.statement.lower()
-                for ut in unavail:
-                    if ut and ut in stmt_low and re.search(r"\b(showed|indicated|proved|contained|recorded|stated)\b", stmt_low):
-                        violations.append(f"Hypothesis {h.id} infers contents of unavailable document '{ut}'")
-
-    # 3. Conflict Consistency: Conflicted findings cannot promote root cause without objective resolution
-    if conflicts and len(conflicts) > 0:
-        if rc and rc.status in (RootCauseStatus.ESTABLISHED, RootCauseStatus.SUPPORTED):
-            violations.append("Root cause was promoted despite unresolved evidence conflicts")
-        if rc and rc.leading_hypothesis_status == "SELECTED":
-            violations.append("Leading hypothesis was selected despite unresolved evidence conflicts")
-
-    # 4. 5-Why Evidence Boundary: Must stop at evidence boundary with UNKNOWN, MIXED, or not complete
-    if fw and fw.steps:
-        if rc and rc.status == RootCauseStatus.NOT_ESTABLISHED:
-            if fw.is_complete and not any(s.status in ("UNKNOWN", "MIXED", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED") for s in fw.steps):
-                violations.append("5-Why chain claimed completion without established root cause")
-
-    # 5. 5-Why Non-Circular & Non-Restating: Why answer cannot merely repeat or restate the observation
-    from app.agent.causal_guard import restates_observation, repeats_previous_why_answer, is_circular_why_answer
-    if fw and fw.steps:
-        obs_dev = canonical.observed_deviation if canonical else None
-        for i, step in enumerate(fw.steps):
-            ans = step.answer or ""
-            # If answer merely restates the observation as a verified causal explanation:
-            if obs_dev and restates_observation(ans, obs_dev, step.question):
-                if step.status not in ("UNKNOWN", "NOT_ESTABLISHED") and not ("does not establish why" in ans.lower() or "not establish" in ans.lower()):
-                    violations.append(f"5-Why step {i+1} merely restated the observation as a verified causal explanation")
-            if is_circular_why_answer(step.question, ans) and step.status not in ("UNKNOWN", "NOT_ESTABLISHED"):
-                violations.append(f"5-Why step {i+1} answer restated its question without explaining it")
-            if i > 0 and repeats_previous_why_answer(fw.steps[i-1].answer, ans) and step.status not in ("UNKNOWN", "NOT_ESTABLISHED"):
-                violations.append(f"5-Why step {i+1} merely repeated step {i}'s answer")
-
-    # 6. Execution Mode Consistency: Evidence boundary is NOT degraded execution
+    # 2. Execution Mode Consistency: Evidence boundary is NOT degraded execution
     analysis_mode = state.get("analysis_mode", "LLM")
-    if analysis_mode == "LLM" and fw and fw.status_note:
+    if analysis_mode == "LLM" and fw and getattr(fw, "status_note", None):
         if "DEGRADED MODE" in fw.status_note.upper():
             violations.append("Reasoning evidence boundary was erroneously labeled as DEGRADED MODE in execution metadata")
 
-    # 7. CAPA Traceability: 0 candidate hypotheses must yield 0 causal CAPAs
-    if (not rc or not rc.candidate_hypotheses) and capa and capa.conditional_actions:
+    # 3. CAPA Traceability: 0 candidate hypotheses must yield 0 causal CAPAs
+    if (not rc or not getattr(rc, "candidate_hypotheses", None)) and capa and getattr(capa, "conditional_actions", None):
         causal_actions = [c for c in capa.conditional_actions if getattr(c, "action_type", "") in ("CORRECTIVE_ACTION", "SYSTEMIC_ACTION")]
         if causal_actions:
             violations.append("Causal CAPA actions were generated with zero candidate hypotheses")
 
-    # 8. Semantic Ownership: Subject, affected_object, affected_period must be consistent
+    # 4. Semantic Ownership: Subject, affected_object, affected_period must be consistent
     if canonical and impact:
-        if canonical.finding_subject != "UNKNOWN" and impact.affected_object:
+        if getattr(canonical, "finding_subject", None) and canonical.finding_subject != "UNKNOWN" and getattr(impact, "affected_object", None):
             if impact.affected_object == "UNKNOWN" and canonical.finding_subject:
                 violations.append("Impact affected_object drifted from canonical finding_subject")
-
-    # 9. Root Cause Promotion Requirement: ESTABLISHED requires explicit supporting evidence IDs and proof
-    if rc and rc.status == RootCauseStatus.ESTABLISHED:
-        if not getattr(rc, "leading_hypothesis", None) and getattr(rc, "leading_hypothesis_status", "") != "SELECTED":
-            violations.append("Root cause marked ESTABLISHED without selected leading hypothesis")
 
     return len(violations) == 0, violations
 

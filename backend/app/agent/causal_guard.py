@@ -841,7 +841,7 @@ def validate_why_question(
 # treated symmetrically on both sides of the check.
 _SCHEDULING_CONCEPT_PATTERN = (
     r"\bschedul\w*\b|\bshift[\s-]plan\b|\bduty[\s-]?(?:plan|roster)\b|"
-    r"\btask\s+assignment\b|\bstaffing\s+plan\b|\bnot\s+assigned\s+to\b"
+    r"\btask\s+assign\w*\b|\bassign(?:ment|ed|ing|s)?\b|\bstaffing\s+plan\b"
 )
 
 # Same technique for the notification/communication/distribution/
@@ -1124,7 +1124,8 @@ _SYSTEMIC_ESCALATION_RE = re.compile(
 # generic "something was actually checked/found" verbs, not a list of
 # per-domain record names.
 _SYSTEMIC_EVIDENCE_RE = re.compile(
-    r"\b(?:review\s+(?:showed|found|revealed)|audit\s+(?:showed|found|revealed)|"
+    r"\b(?:review\s+(?:showed|found|revealed|identified|noted)|audit\s+(?:showed|found|revealed|identified|noted|observed)|"
+    r"during\s+the\s+audit\b|"
     r"documentation\s+(?:shows|showed|confirms|confirmed)|records?\s+(?:shows?|showed|confirms?|confirmed)|"
     r"log\s+(?:shows?|showed)|investigation\s+(?:found|showed|revealed)|"
     r"(?:process|system|control)\s+documentation\s+(?:shows?|showed|confirms?)|"

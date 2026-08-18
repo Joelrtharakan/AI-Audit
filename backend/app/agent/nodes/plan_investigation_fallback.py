@@ -127,7 +127,143 @@ def build_deterministic_investigation_plan(
 
     text_low = finding_text.lower()
 
-    # 1. Conflicting Evidence Branch — hypotheses, discrimination criteria and
+    # 1. Multiple Competing Reported Explanations Branch (e.g. training vs workload vs discipline)
+    reported_claims_list = [c for c in claims if getattr(c, "status", None) == EvidenceStatus.REPORTED]
+    if not conflicts and len(reported_claims_list) >= 2:
+        plan_areas = [
+            f"Training matrix, authorization, and LMS records for {subject}",
+            f"Staffing, shift allocation, and workload distribution for {subject}",
+            f"Objective execution history and supervisory logs for {subject}",
+        ]
+        h_idx = 1
+        for rc in reported_claims_list:
+            rc_text = rc.text.lower()
+            rc_pred = (rc.predicate or "").lower()
+            h_id = f"H{h_idx}"
+
+            if "training" in rc_text or "training" in rc_pred or "unaware" in rc_text or "trained" in rc_text:
+                h_name = "INSUFFICIENT_TRAINING_CONTRIBUTING_FACTOR"
+                h_stmt = f"Insufficient training contributed to checklist non-completion." if "checklist" in subject.lower() else f"Insufficient training on {subject} contributed to the nonconformity."
+                ev_need = f"Authenticated training records, LMS records, training matrix, revised checklist training requirement, effective date, and employee authorization records"
+                conf_if = f"Authenticated records show required retraining for {subject} was not completed before the effective date"
+                ref_if = f"Authenticated records show all affected employees completed required retraining before the effective date"
+                disc_crit = f"H{h_idx} strengthens if authenticated records show required retraining was not completed before the revised checklist became effective; H{h_idx} weakens if authenticated records show all affected employees completed required retraining before the effective date."
+
+                questions.append(InvestigationQuestion(
+                    question_id=f"Q{h_idx}_TRAINING_VERIFICATION",
+                    id=f"Q{h_idx}_TRAINING_VERIFICATION",
+                    question=f"Did each affected employee complete training required for the revised inspection checklist before its effective date?" if "checklist" in subject.lower() else f"Did each affected employee complete training required for {subject} before its effective date?",
+                    purpose="Verify whether required training was completed before the revision became effective",
+                    objective="Verify whether required training was completed before the revision became effective",
+                    evidence="Authenticated training records, LMS records, training matrix",
+                    evidence_required="Authenticated training records, LMS records, training matrix",
+                    target_type="HYPOTHESIS",
+                    target_proposition_id=f"P_{h_id}",
+                    priority="P1",
+                    hypothesis_tested=h_id,
+                    confirms_if=conf_if,
+                    refutes_if=ref_if,
+                ))
+                evidence_items.extend(["Authenticated training records", "LMS completion logs", "Training matrix"])
+
+            elif "workload" in rc_text or "workload" in rc_pred or "pressure" in rc_text or "staffing" in rc_text:
+                h_name = "WORKLOAD_PRESSURE_CONTRIBUTING_FACTOR"
+                h_stmt = f"Workload pressure contributed to checklist non-completion." if "checklist" in subject.lower() else f"Workload pressure or staffing constraints contributed to the deviation."
+                ev_need = f"Staffing rosters, shift logs, task assignment records, overtime records, production volume logs for the affected period"
+                conf_if = f"Shift and staffing records confirm abnormal workload, concurrent conflicting assignments, or understaffing during the affected period"
+                ref_if = f"Staffing logs confirm standard staffing levels and nominal workload during the affected period"
+                disc_crit = f"H{h_idx} strengthens if records show abnormal workload or understaffing; H{h_idx} weakens if staffing and task volume were nominal."
+
+                questions.append(InvestigationQuestion(
+                    question_id=f"Q{h_idx}_WORKLOAD_RECORDS",
+                    id=f"Q{h_idx}_WORKLOAD_RECORDS",
+                    question="What staffing, workload, shift, and task-allocation records exist for the affected period?",
+                    purpose="Assess whether workload, resource, or shift constraints contributed to non-completion",
+                    objective="Assess whether workload, resource, or shift constraints contributed to non-completion",
+                    evidence="Shift roster, workload records, task assignment records, overtime records",
+                    evidence_required="Shift roster, workload records, task assignment records, overtime records",
+                    target_type="HYPOTHESIS",
+                    target_proposition_id=f"P_{h_id}",
+                    priority="P2",
+                    hypothesis_tested=h_id,
+                    confirms_if=conf_if,
+                    refutes_if=ref_if,
+                ))
+                evidence_items.extend(["Shift rosters", "Task assignment records", "Overtime records"])
+
+            elif "discipline" in rc_text or "discipline" in rc_pred or "performance" in rc_text or "negligence" in rc_text:
+                h_name = "PERFORMANCE_OR_DISCIPLINE_FACTOR"
+                h_stmt = f"Performance or discipline issue contributed to checklist non-completion." if "checklist" in subject.lower() else f"Individual performance or adherence issue contributed to the deviation."
+                ev_need = f"Prior checklist completion records, documented supervisory records, objective performance logs independent of the current finding"
+                conf_if = f"Documented history confirms repeated non-completion by the same personnel under normal workload and confirmed training"
+                ref_if = f"Objective records show consistent compliance history and no prior performance deviations"
+                disc_crit = f"H{h_idx} strengthens if prior independent records establish repeated non-performance; H{h_idx} weakens if prior compliance history is consistent."
+
+                questions.append(InvestigationQuestion(
+                    question_id=f"Q{h_idx}_PERFORMANCE_HISTORY",
+                    id=f"Q{h_idx}_PERFORMANCE_HISTORY",
+                    question=f"Is there objective documented evidence of repeated failure to perform the checklist independent of the current finding?" if "checklist" in subject.lower() else f"Is there objective documented evidence of repeated failure to perform {subject} independent of the current finding?",
+                    purpose="Determine whether the non-completion represents an isolated occurrence or repeated performance deviation",
+                    objective="Determine whether the non-completion represents an isolated occurrence or repeated performance deviation",
+                    evidence="Prior checklist records, supervisory records, documented performance records",
+                    evidence_required="Prior checklist records, supervisory records, documented performance records",
+                    target_type="HYPOTHESIS",
+                    target_proposition_id=f"P_{h_id}",
+                    priority="P3",
+                    hypothesis_tested=h_id,
+                    confirms_if=conf_if,
+                    refutes_if=ref_if,
+                ))
+                evidence_items.extend(["Prior checklist execution records", "Supervisory review logs"])
+
+            else:
+                pred_clean = (rc.predicate or rc.text).strip().rstrip(".")
+                h_name = f"REPORTED_FACTOR_{h_idx}"
+                h_stmt = f"Reported factor ({pred_clean}) contributed to non-completion of {subject}, but remains unverified."
+                ev_need = f"Objective documentation and records capable of confirming or refuting whether {pred_clean} occurred"
+                conf_if = f"Objective records confirm {pred_clean} during the affected period"
+                ref_if = f"Objective records contradict {pred_clean}"
+                disc_crit = f"H{h_idx} strengthens if objective records corroborate {pred_clean}; weakens if contradicted."
+
+                questions.append(InvestigationQuestion(
+                    question_id=f"Q{h_idx}_REPORTED_FACTOR",
+                    id=f"Q{h_idx}_REPORTED_FACTOR",
+                    question=f"Do objective records confirm or refute whether {pred_clean} affected performance of {subject}?",
+                    purpose=f"Independently verify reported statement from {rc.speaker or 'personnel'}",
+                    objective=f"Independently verify reported statement from {rc.speaker or 'personnel'}",
+                    evidence=f"Objective operational records relevant to {pred_clean}",
+                    evidence_required=f"Objective operational records relevant to {pred_clean}",
+                    target_type="HYPOTHESIS",
+                    target_proposition_id=f"P_{h_id}",
+                    priority="P3",
+                    hypothesis_tested=h_id,
+                    confirms_if=conf_if,
+                    refutes_if=ref_if,
+                ))
+                evidence_items.append(f"Objective records relevant to {pred_clean}")
+
+            hypotheses.append(CandidateHypothesis(
+                id=h_id,
+                name=h_name,
+                statement=h_stmt,
+                status="POSSIBLE",
+                evidence_needed=ev_need,
+                confirms_if=conf_if,
+                refutes_if=ref_if,
+                discrimination_evidence=disc_crit,
+                relevance_rank="HIGH",
+                supporting_claim_ids=[rc.claim_id],
+                evidence_strength="REPORTED",
+            ))
+            h_idx += 1
+
+        return hypotheses, InvestigationPlan(
+            areas=plan_areas,
+            questions=questions,
+            evidence_to_collect=list(dict.fromkeys(evidence_items)),
+        )
+
+    # 1b. Conflicting Evidence Branch — hypotheses, discrimination criteria and
     # investigation questions are all derived from the finding's own topic
     # word, subject phrase, temporal clause, and the actual reported claim
     # text that produced the conflict, so the wording is finding-specific
@@ -606,23 +742,38 @@ def build_deterministic_investigation_plan(
                 f"Task assignment/scheduling controls for {subject}",
                 f"Completion and secondary-record verification for {subject}",
             ]
+            from app.services.semantic_subject import is_actor_noun
+            if is_actor_noun(subject):
+                q1 = "What procedure and responsibility requirements applied to personnel during the affected period?"
+                q2 = "What evidence establishes whether the required activity was performed but not recorded by assigned personnel?"
+                q3 = "Is there a documented event or constraint that could have affected execution during the affected period?"
+            elif any(w in subject.lower() for w in ("checklist", "log", "record", "sheet", "form")):
+                q1 = f"What requirement and responsibility applied to {subject} during the affected period?"
+                q2 = f"What evidence establishes whether {subject} was performed but not recorded during the affected period?"
+                q3 = f"Is there a documented event that could have affected completion of {subject} during the affected period?"
+            elif any(w in subject.lower() for w in ("balance", "equipment", "instrument", "machine")):
+                q1 = f"What requirement and specification applied to {subject} during the affected period?"
+                q2 = f"What records establish whether the activity for {subject} was performed but not recorded?"
+                q3 = f"Is there a documented event that could have affected operation of {subject} during the affected period?"
+            else:
+                q1 = f"What requirement and responsibility applied to {subject} during the affected period?"
+                q2 = f"Is there objective evidence that the required activity for {subject} was performed but not recorded?"
+                q3 = f"Is there a documented event that could have affected {subject} during the affected period?"
+
             questions.append(InvestigationQuestion(
-                question=f"What requirement and responsibility applied to {subject} during the affected period?",
+                question=q1,
                 purpose="Establish the applicable requirement and responsibility/assignment/scheduling controls before any specific mechanism can be investigated",
                 evidence=f"Applicable procedure, responsibility matrix, duty/shift assignment records for {subject}",
                 hypothesis_tested=None,
             ))
-            # Two independent causal branches (unrecorded performance vs. a
-            # separate execution-affecting event) never share one question --
-            # each is its own discriminating test with its own evidence.
             questions.append(InvestigationQuestion(
-                question=f"Is there objective evidence that {subject} was performed but not recorded?",
+                question=q2,
                 purpose="Distinguishes non-performance from an unrecorded performance",
                 evidence=f"Secondary records, electronic/instrument audit trail, supervisory verification for {subject}",
                 hypothesis_tested=None,
             ))
             questions.append(InvestigationQuestion(
-                question=f"Is there a documented event that could have affected completion of {subject} during the affected period?",
+                question=q3,
                 purpose="Identifies whether a contemporaneous event could explain the missed activity",
                 evidence=f"Deviation, incident, equipment alarm, maintenance, or staffing records for {subject}, where applicable",
                 hypothesis_tested=None,
@@ -669,7 +820,175 @@ def build_deterministic_investigation_plan(
         ))
         evidence_items.extend([f"{subject} execution log", "system audit trail"])
 
-    # 5. General / Unresolved Branch: no conflict, no reported mechanism, no
+    # 5. Duplicate Payment / Transaction Branch (Section 5 Hardening)
+    elif re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment|overpayment)\b", finding_text, re.IGNORECASE):
+        amt_str = ""
+        from app.services.cost_analysis import extract_explicit_amounts, format_currency_amount
+        explicit_amts = extract_explicit_amounts(finding_text)
+        if explicit_amts:
+            a_val, a_curr = explicit_amts[0]
+            amt_str = f" of {format_currency_amount(a_val, a_curr)}"
+
+        plan_areas = [
+            "Payment transaction verification and duplicate detection controls",
+            "ERP exception handling, approval, and workflow bypass controls",
+            "Supplier master data and invoice indexing controls",
+            "Accounts-payable reconciliation and recovery controls",
+        ]
+
+        hypotheses = [
+            CandidateHypothesis(
+                id="H1",
+                name="DUPLICATE_DETECTION_MATCHING_GAP",
+                statement="The second payment transaction was processed without triggering duplicate invoice or amount matching warnings.",
+                status="POSSIBLE",
+                evidence_needed="ERP duplicate-detection configuration and transaction processing logs",
+                confirms_if="ERP audit logs show duplicate detection rules did not trigger on invoice/amount matching",
+                refutes_if="ERP logs show duplicate detection operated and raised an exception",
+                discrimination_evidence="Distinguishes automated detection gap from workflow bypass",
+                relevance_rank="HIGH",
+                causal_role="PRIMARY_CAUSE",
+            ),
+            CandidateHypothesis(
+                id="H2",
+                name="APPROVAL_OR_WORKFLOW_BYPASS",
+                statement="The duplicate payment was executed under an exception override or authorization bypass.",
+                status="POSSIBLE",
+                evidence_needed="Payment approval logs, exception override records, and user authorization trails",
+                confirms_if="Audit trail shows warning or exception was manually overridden without dual authorization",
+                refutes_if="Audit trail confirms standard dual authorization was followed for both transactions",
+                discrimination_evidence="Distinguishes workflow override from detection failure",
+                relevance_rank="HIGH",
+                causal_role="PRIMARY_CAUSE",
+            ),
+            CandidateHypothesis(
+                id="H3",
+                name="DUPLICATE_MASTER_DATA_OR_INVOICE_VARIANCE",
+                statement="Duplicate vendor numbering or altered invoice reference data allowed transaction processing.",
+                status="POSSIBLE",
+                evidence_needed="Supplier master data records, invoice indexing records, and vendor ID audit logs",
+                confirms_if="Supplier records reveal duplicate vendor IDs or altered invoice numbering",
+                refutes_if="Master data audit confirms identical single vendor record and exact invoice number",
+                discrimination_evidence="Distinguishes master data variance from detection rule failure",
+                relevance_rank="HIGH",
+                causal_role="CONTRIBUTING_CAUSE",
+            ),
+            CandidateHypothesis(
+                id="H4",
+                name="RECONCILIATION_DETECTION_GAP",
+                statement="The duplicate payment was not identified or flagged during periodic accounts-payable reconciliation.",
+                status="POSSIBLE",
+                evidence_needed="Periodic AP reconciliation logs and supervisory review records",
+                confirms_if="AP reconciliation records show monthly supplier sub-ledger was not reconciled against bank disbursements",
+                refutes_if="Reconciliation records show timely matching or documented exception logging",
+                discrimination_evidence="Distinguishes post-payment reconciliation delay from transaction-time controls",
+                relevance_rank="HIGH",
+                causal_role="DETECTION_FAILURE",
+            ),
+        ]
+
+        questions = [
+            # A. ROOT-CAUSE INVESTIGATION
+            InvestigationQuestion(
+                question="Do the two payment records correspond to the same supplier, invoice, purchase order, amount, or underlying obligation?",
+                purpose="Establish whether the payments represent a true duplicate transaction vs distinct obligations",
+                evidence="Payment records, supplier invoice records, purchase orders, and transaction IDs",
+                question_type="ROOT_CAUSE",
+                category="ROOT_CAUSE_INVESTIGATION",
+                decision_effect="Establishes duplicate transaction validity",
+            ),
+            InvestigationQuestion(
+                question="Did the ERP duplicate-payment control execute when the second transaction was processed?",
+                purpose="Determine automated control execution status during transaction processing",
+                evidence="ERP audit trail, duplicate detection logs, and exception logs",
+                question_type="ROOT_CAUSE",
+                category="ROOT_CAUSE_INVESTIGATION",
+                hypothesis_tested="H1",
+                decision_effect="Distinguishes detection rule failure from workflow override",
+            ),
+            InvestigationQuestion(
+                question="Was the approval workflow bypassed or overridden using elevated authorization?",
+                purpose="Evaluate potential workflow override or authorization bypass",
+                evidence="Override logs, approval records, and user audit trail",
+                question_type="ROOT_CAUSE",
+                category="ROOT_CAUSE_INVESTIGATION",
+                hypothesis_tested="H2",
+                decision_effect="Identifies authorization override mechanism",
+            ),
+            InvestigationQuestion(
+                question="Did duplicate supplier master data or altered invoice indexing permit transaction creation?",
+                purpose="Verify master data integrity and invoice reference indexing",
+                evidence="Supplier master data logs, vendor ID tables, and invoice indexing entries",
+                question_type="ROOT_CAUSE",
+                category="ROOT_CAUSE_INVESTIGATION",
+                hypothesis_tested="H3",
+                decision_effect="Identifies master data indexing discrepancy",
+            ),
+            # B. DETECTION-CONTROL INVESTIGATION
+            InvestigationQuestion(
+                question="Was the duplicate payment identified or flagged during periodic accounts-payable reconciliation?",
+                purpose="Assess detective post-payment reconciliation controls",
+                evidence="Accounts-payable reconciliation records, sub-ledger review evidence",
+                question_type="DETECTION_CONTROL",
+                category="DETECTION_CONTROL_INVESTIGATION",
+                hypothesis_tested="H4",
+                decision_effect="Evaluates effectiveness of post-payment detective controls",
+            ),
+            InvestigationQuestion(
+                question="Did supervisory review or secondary approval identify the duplicate transaction prior to disbursement?",
+                purpose="Verify secondary supervisory review execution and exception notification",
+                evidence="Supervisory sign-off logs, banking batch approvals, and exception queue audit trails",
+                question_type="DETECTION_CONTROL",
+                category="DETECTION_CONTROL_INVESTIGATION",
+                hypothesis_tested="H4",
+                decision_effect="Assesses pre-disbursement detective review",
+            ),
+            # C. FINANCIAL INVESTIGATION
+            InvestigationQuestion(
+                question=f"Has the duplicate payment{amt_str} been reversed, recovered, or credited by the supplier?",
+                purpose="Determine actual financial loss and current recoverability status",
+                evidence="Bank records, supplier credit note, and recovery documentation",
+                question_type="FINANCIAL_IMPACT",
+                category="FINANCIAL_INVESTIGATION",
+                decision_effect="Calculates net actual financial loss vs exposure",
+            ),
+            InvestigationQuestion(
+                question="What amount remains unrecovered, if any?",
+                purpose="Establish net unrecovered financial exposure",
+                evidence="Bank reconciliation statement and supplier credit balance",
+                question_type="FINANCIAL_IMPACT",
+                category="FINANCIAL_INVESTIGATION",
+                decision_effect="Bounds outstanding balance requiring recovery",
+            ),
+            # D. SYSTEMIC INVESTIGATION
+            InvestigationQuestion(
+                question="Were other duplicate payments processed during the same period population?",
+                purpose="Assess whether the duplicate payment issue is isolated or systemic across accounts payable",
+                evidence="Accounts payable audit trail and full-period payment reconciliation report",
+                question_type="SYSTEMIC",
+                category="SYSTEMIC_INVESTIGATION",
+                decision_effect="Determines scope of population review and systemic recurrence risk",
+            ),
+        ]
+        evidence_items.extend([
+            "Payment transaction records",
+            "Supplier invoice records and purchase orders",
+            "ERP duplicate-detection logs and override audit trails",
+            "Approval workflow and authorization records",
+            "Bank/payment records and supplier credit notes",
+            "Accounts-payable reconciliation records",
+        ])
+        return hypotheses, InvestigationPlan(
+            areas=plan_areas,
+            questions=questions,
+            evidence_to_collect=list(dict.fromkeys(evidence_items)),
+            root_cause_questions=[q for q in questions if q.question_type == "ROOT_CAUSE"],
+            detection_control_questions=[q for q in questions if q.question_type == "DETECTION_CONTROL"],
+            financial_questions=[q for q in questions if q.question_type == "FINANCIAL_IMPACT"],
+            systemic_questions=[q for q in questions if q.question_type == "SYSTEMIC"],
+        )
+
+    # 6. General / Unresolved Branch: no conflict, no reported mechanism, no
     # recognized mechanism polarity -- by definition NOTHING in the finding
     # states or implies a candidate causal mechanism. Generating two
     # hypotheses here regardless (as this branch previously did) is exactly

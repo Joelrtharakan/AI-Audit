@@ -60,6 +60,7 @@ from app.config import get_settings
 from app.models.agent import (
     AgentTraceStep,
     CandidateHypothesis,
+    CanonicalFindingState,
     CapaAnalysis,
     CapaStatus,
     ContributingFactor,
@@ -725,7 +726,17 @@ def _derive_ca_draft_fields(root_cause, impact) -> dict:
     # dependency this finding never establishes; the appropriate action is
     # verifying notification/receipt/acknowledgement status, conditional on
     # reliance (Section 16).
-    if affected.strip().lower().endswith(" receipt"):
+    # For duplicate payment / transaction findings: containment and recovery review
+    search_text = f"{affected} {getattr(impact, 'narrative', '') or ''}"
+    if _re.search(r"\b(?:duplicate\s+payment|overpayment|paid\s+twice|double\s+payment)\b", search_text, _re.IGNORECASE):
+        from app.services.cost_analysis import extract_explicit_amounts, format_currency_amount
+        explicit_amts = extract_explicit_amounts(search_text)
+        amt_str = f" {format_currency_amount(explicit_amts[0][0], explicit_amts[0][1])}" if explicit_amts else ""
+        immediate_action = (
+            f"Verify whether the duplicate{amt_str} payment has been reversed, recovered, or credited by the supplier "
+            "and place the transaction under appropriate financial reconciliation review."
+        )
+    elif affected.strip().lower().endswith(" receipt"):
         _base_subject = affected[: -len(" receipt")]
         _base_subject = _base_subject[0].lower() + _base_subject[1:] if _base_subject else _base_subject
         immediate_action = (
@@ -984,26 +995,31 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
                 f"may have proceeded without confirmed qualification for {tail}."
             )
             derived_evidence_needed = f"Approved {topic} completion and authorization record"
-        elif re.search(r"\b(records?|logs?|documentation|report|checklist|form|sheet)\b", clean_noun, re.IGNORECASE):
-            # Record/documentation-shaped subject (e.g. "temperature
-            # monitoring records for refrigerator QC-REF-02") -- the
-            # subject itself IS already a clean, specific affected object;
-            # forcing it through the actor/qualification template above
-            # would double the whole subject into its own "status for"
-            # clause (e.g. "Technician temperature status for temperature
-            # monitoring records..."). Use it directly instead.
+        elif re.search(r"\b(records?|logs?|documentation|report|checklist|form|sheet|completion)\b", clean_noun, re.IGNORECASE):
             derived_obj = clean_noun[0].upper() + clean_noun[1:]
-            derived_process = f"{topic_cap} monitoring and record control"
+            if "checklist" in clean_noun.lower():
+                derived_process = "Inspection checklist completion and record control"
+            elif "completion" in clean_noun.lower():
+                derived_process = f"{topic_cap} monitoring and record control"
+            else:
+                derived_process = f"{topic_cap} monitoring and record control"
             condition = (
                 canonical.deviation_condition if (canonical and canonical.deviation_condition not in (None, "UNKNOWN"))
                 else "incomplete"
             )
-            derived_effect = (
-                f"Potential inability to confirm the required activity was performed: {condition} {topic} "
-                "records prevent confirmation that the required activity was performed during the "
-                "affected period. Any downstream impact requires assessment of actual conditions and "
-                "applicable requirements."
-            )
+            if "checklist" in clean_noun.lower() or "completion" in clean_noun.lower():
+                derived_effect = (
+                    f"Failure to complete {clean_noun.lower()} may prevent confirmation that required inspection "
+                    "activities were performed during the affected period. Any product, process, or compliance "
+                    "impact requires assessment against the applicable requirement and objective records."
+                )
+            else:
+                derived_effect = (
+                    f"Potential inability to confirm the required activity was performed: {condition} {topic} "
+                    "records prevent confirmation that the required activity was performed during the "
+                    "affected period. Any downstream impact requires assessment of actual conditions and "
+                    "applicable requirements."
+                )
             derived_evidence_needed = f"Independent {topic} verification record (e.g. instrument audit trail, electronic log, or supervisory review)"
         else:
             # Plain entity/physical-object subject (e.g. "equipment",
@@ -1039,17 +1055,13 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
                 )
                 derived_evidence_needed = (
                     f"Approved validation/qualification records, operating logs, exception/deviation records, "
-                    f"and control system/interlock logs for {clean_noun}"
+                    "and control system/interlock logs for {clean_noun}"
                 )
             else:
-                # Domain-neutral default: states the condition without
-                # presupposing an operation/use/validated-range concept the
-                # finding never actually establishes. Uses the full subject
-                # phrase (not just its single-word topic, which can be a
-                # leading adjective/participle like "missed" rather than
-                # the core noun -- "Missed inspections control" reads far
-                # better than "Missed control").
-                derived_process = f"{derived_obj} control"
+                if canonical and getattr(canonical, "affected_process", None) and canonical.affected_process not in ("UNKNOWN", "NOT ESTABLISHED", ""):
+                    derived_process = canonical.affected_process
+                else:
+                    derived_process = f"{derived_obj} control"
                 derived_effect = (
                     f"{derived_obj} was reportedly {condition}. Scope and downstream consequence require "
                     "assessment against the applicable requirement and objective records. This does not "
@@ -1057,17 +1069,31 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
                 )
                 derived_evidence_needed = f"Applicable requirement/specification for {clean_noun}, and objective records relevant to the affected period"
     else:
-        derived_process = "NOT ESTABLISHED"
+        derived_process = canonical.affected_process if (canonical and getattr(canonical, "affected_process", None) and canonical.affected_process not in ("UNKNOWN", "NOT ESTABLISHED", "")) else "NOT ESTABLISHED"
         derived_obj = "NOT ESTABLISHED"
         derived_effect = "Scope and downstream consequence require auditor assessment."
         derived_evidence_needed = "Auditor assessment of records relevant to this finding"
+
+    rel_change = (
+        canonical.relevant_change if (canonical and canonical.relevant_change)
+        else (
+            "Revision of the inspection checklist" if ("revised" in request_finding_text.lower() and "checklist" in request_finding_text.lower())
+            else ("Revision of the procedure" if ("revised" in request_finding_text.lower() or "revision" in request_finding_text.lower())
+            else "NOT ESTABLISHED")
+        )
+    )
+
+    derived_control = canonical.control_at_risk if (canonical and getattr(canonical, "control_at_risk", None)) else None
 
     impact = ImpactAssessment(
         status=ImpactStatus.IMPACT_REQUIRES_ASSESSMENT,
         affected_object=derived_obj,
         affected_period=degraded_period,
+        finding_detected_period=getattr(canonical, "finding_detected_period", None),
+        transaction_period=getattr(canonical, "transaction_period", None),
         process_at_risk=derived_process,
-        relevant_change="NOT ESTABLISHED",
+        control_at_risk=derived_control,
+        relevant_change=rel_change,
         potential_effect=derived_effect,
         evidence_needed=derived_evidence_needed,
         impact_observed=observed_deviation,

@@ -11,9 +11,9 @@ FINDING (context only, do not restate): {finding_text}
 RULES:
 1. Verified > Reported. Never call a reported claim verified.
 2. Every hypothesis MUST cite supporting_claim_ids and/or contradicting_claim_ids using ONLY the ids
-   listed above. A hypothesis with no citable claim is not a hypothesis -- omit it.
+   listed above. If evidence contains reported explanations (e.g. training, workload, discipline), convert EACH into a separate CandidateHypothesis with status="POSSIBLE" citing its claim id.
 3. Max 3 hypotheses. Fewer, evidence-grounded ones beat padding the count.
-4. If evidence conflicts, keep competing hypotheses POSSIBLE -- do not pick a side.
+4. If evidence conflicts or contains competing reported explanations, keep hypotheses POSSIBLE and root_cause status="NOT_ESTABLISHED" (statement=null) -- do not pick a side.
 5. 5-Why: 1-3 steps, stop with UNKNOWN/MIXED at the evidence boundary.
 6. If root cause is not established: status="NOT_ESTABLISHED", statement=null.
 7. Every string is ONE short sentence. No markdown, no prose outside the JSON.

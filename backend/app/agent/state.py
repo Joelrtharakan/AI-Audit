@@ -23,6 +23,7 @@ from app.models.agent import (
     CanonicalFindingState,
     CapaAnalysis,
     ContributingFactor,
+    CostImpact,
     EvidenceClaim,
     EvidenceConflict,
     EvidenceGap,
@@ -59,6 +60,7 @@ class AgentState(TypedDict, total=False):
     canonical_finding_state: CanonicalFindingState | None
 
 
+
     # ------------------------------------------------------------------
     # Investigation planning
     # ------------------------------------------------------------------
@@ -88,6 +90,7 @@ class AgentState(TypedDict, total=False):
     contributing_factors: list[ContributingFactor]
     five_why: FiveWhyAnalysis | None
     impact_assessment: ImpactAssessment | None
+    cost_impact: CostImpact | None
     capa_analysis: CapaAnalysis | None
     # "LLM" (normal path) or "DEGRADED" (core_synthesis's LLM call failed and
     # a deterministic fallback ran) -- must be surfaced to the final report

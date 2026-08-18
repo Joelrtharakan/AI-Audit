@@ -124,14 +124,16 @@ async def understand_finding_node(state: AgentState) -> AgentState:
                     trace.append(AgentTraceStep.warn(f"Untrusted instruction in attributed statement ignored: {claim!r}"))
                     continue
                 text = f"{speaker}: {claim}" if speaker else str(claim)
+                from app.agent.claim_extractor import _SYSTEM_RECORD_SPEAKER_RE
+                is_sys = bool(_SYSTEM_RECORD_SPEAKER_RE.search(speaker)) if speaker else False
                 if text and not any(e.claim == text for e in ledger):
                     ledger.append(EvidenceItem(
                         claim=text,
-                        source="REPORTED_STATEMENT",
-                        source_reference="Attributed statement in finding text",
-                        status=EvidenceStatus.REPORTED,
+                        source="SYSTEM_RECORD" if is_sys else "REPORTED_STATEMENT",
+                        source_reference="System record in finding text" if is_sys else "Attributed statement in finding text",
+                        status=EvidenceStatus.VERIFIED if is_sys else EvidenceStatus.REPORTED,
                         relevance="HIGH",
-                        notes="Reported statement — unverified causal explanation",
+                        notes="System record verification" if is_sys else "Reported statement — unverified causal explanation",
                     ))
 
     # Build CanonicalFindingState as the single source of truth for all downstream nodes (Section 1)
@@ -275,6 +277,8 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         referenced_documents=referenced_documents,
         investigation_mode=investigation_mode,
         propositions=propositions,
+        relevant_change=resolved.relevant_change,
+        semantic_type=resolved.semantic_type,
         recurrence_signal=recurrence.is_recurring,
         previous_capa_referenced=recurrence.has_previous_capa_reference,
         previous_capa_status=recurrence.previous_capa_status,
@@ -282,6 +286,19 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         recurrence_rationale=recurrence.rationale,
     )
 
+    # Deterministic Cost & Financial Impact Analysis (Sections 26-42)
+    from app.services.cost_analysis import analyze_cost_and_financial_impact
+    cost_impact = analyze_cost_and_financial_impact(
+        request.finding_text,
+        ledger,
+        evidence_claims=evidence_claims,
+    )
+    canonical_state.cost_impact = cost_impact
+    if cost_impact and cost_impact.cost_factor_detected:
+        trace.append(AgentTraceStep.ok(
+            f"Cost & financial factor detected: status={cost_impact.financial_status}, "
+            f"exposure={cost_impact.potential_cost_exposure or 'REQUIRES_ASSESSMENT'}"
+        ))
 
     # Deterministically enforce Observation Quality Sufficiency (Section 1 & 2):
     # If a concrete affected object and observed deviation exist, quality is SUFFICIENT.
@@ -299,8 +316,8 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         **state,
         "observation_quality": quality,
         "extraction": extraction,
-
         "canonical_finding_state": canonical_state,
+        "cost_impact": cost_impact,
         "trace": trace,
         "errors": errors,
         "iteration_count": state.get("iteration_count", 0),

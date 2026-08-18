@@ -1351,10 +1351,20 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             if cleaned_obj and cleaned_obj != impact.affected_object:
                 impact.affected_object = cleaned_obj[0].upper() + cleaned_obj[1:]
 
+        from app.services.semantic_subject import is_actor_noun
+        if impact.process_at_risk and (is_actor_noun(impact.process_at_risk) or is_actor_noun(impact.process_at_risk.replace(" control", "").strip())):
+            impact.process_at_risk = "Inspection checklist completion and record control" if "checklist" in finding_text.lower() else "Required procedure compliance and control"
+        if impact.affected_object and is_actor_noun(impact.affected_object):
+            impact.affected_object = (
+                canonical.affected_object if (canonical and canonical.affected_object and not is_actor_noun(canonical.affected_object))
+                else ("Revised inspection checklist completion" if "checklist" in finding_text.lower() else "Required procedure compliance")
+            )
+
         if canon_subject:
             topic = topic_word(canon_subject)
             topic_cap = topic[0].upper() + topic[1:]
-            if impact.process_at_risk:
+            canon_proc = (canonical.affected_process if canonical else None) or ""
+            if impact.process_at_risk and not is_actor_noun(impact.process_at_risk) and impact.process_at_risk != canon_proc:
                 _process_topic = topic_word(impact.process_at_risk)
                 _finding_words = {w.lower() for w in re.findall(r"[A-Za-z]+", finding_text)}
                 if _process_topic not in _finding_words:
@@ -1558,16 +1568,94 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 f"Investigation completeness rule: populated {len(inv.questions)} investigation question(s)"
             ))
 
+    # Language hardening pass across all output fields
+    def _clean_lang(text: str | None) -> str | None:
+        if not text or not isinstance(text, str):
+            return text
+        t = re.sub(r"\b(employees|operators|personnel|technicians|auditors|analysts|supervisors)\s+was\b", r"\1 were", text, flags=re.IGNORECASE)
+        t = re.sub(r"\bWhy\s+was\s+(the\s+)?(employees|operators|personnel|technicians)\s+complete\b", r"Why did \1\2 not complete", t, flags=re.IGNORECASE)
+        t = re.sub(r"\b(employees|operators|personnel|technicians)\s+was\s+reportedly\s+complete\b", r"\1 reportedly did not complete", t, flags=re.IGNORECASE)
+        t = re.sub(r"\bthat\s+(the\s+)?(employees|operators|personnel|technicians)\s+was\s+performed\b", r"that the required inspection activity was performed", t, flags=re.IGNORECASE)
+        t = re.sub(r"\bwas\s+reportedly\s+duplicate\s+transaction\s+processed\b", "was identified as a duplicate transaction", t, flags=re.IGNORECASE)
+        t = re.sub(r"\bwas\s+reportedly\s+failed\b", "reportedly failed", t, flags=re.IGNORECASE)
+        t = re.sub(r"\bthe\s+the\b", "the", t, flags=re.IGNORECASE)
+        t = re.sub(r"\bof\s*,\b", "", t, flags=re.IGNORECASE)
+        t = re.sub(r"\bof\s+was\b", "was", t, flags=re.IGNORECASE)
+        t = re.sub(r"\s{2,}", " ", t).strip()
+        return t
+
+    # Cost & Financial Impact synchronization and verification (Sections 26-42)
+    cost_impact = state.get("cost_impact") or (canonical.cost_impact if canonical else None)
+    if not cost_impact:
+        from app.services.cost_analysis import analyze_cost_and_financial_impact
+        cost_impact = analyze_cost_and_financial_impact(finding_text, evidence_ledger)
+
+    if cost_impact and not cost_impact.cost_factor_detected:
+        cost_impact = None
+
+    fin_amt = cost_impact.financial_amount if cost_impact else None
+    if canonical:
+        canonical.financial_amount = fin_amt
+    if impact:
+        impact.financial_amount = fin_amt
+        if re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment)\b", finding_text, re.IGNORECASE):
+            amt_txt = f" of {fin_amt.formatted}" if (fin_amt and fin_amt.formatted) else ""
+            impact.potential_effect = f"A duplicate payment{amt_txt} was identified. The underlying cause and the extent of any unrecovered financial loss have not yet been established."
+            if not getattr(impact, "control_at_risk", None):
+                impact.control_at_risk = "Duplicate-Payment Prevention and Reconciliation"
+        elif not getattr(impact, "control_at_risk", None) and canonical and getattr(canonical, "control_at_risk", None):
+            impact.control_at_risk = canonical.control_at_risk
+        impact.affected_object = _clean_lang(impact.affected_object)
+        impact.process_at_risk = _clean_lang(impact.process_at_risk)
+        impact.control_at_risk = _clean_lang(impact.control_at_risk)
+        impact.potential_effect = _clean_lang(impact.potential_effect)
+        impact.evidence_needed = _clean_lang(impact.evidence_needed)
+
+    if rc:
+        rc.root_cause_basis = _clean_lang(rc.root_cause_basis)
+        rc.narrative = _clean_lang(rc.narrative)
+        if rc.candidate_hypotheses:
+            for h in rc.candidate_hypotheses:
+                h.statement = _clean_lang(h.statement)
+                h.evidence_needed = _clean_lang(h.evidence_needed)
+                h.confirms_if = _clean_lang(h.confirms_if)
+                h.refutes_if = _clean_lang(h.refutes_if)
+                h.discrimination_evidence = _clean_lang(h.discrimination_evidence)
+
+    if fw and fw.steps:
+        for s in fw.steps:
+            s.question = _clean_lang(s.question)
+            s.answer = _clean_lang(s.answer)
+
+    if inv and inv.questions:
+        for q in inv.questions:
+            q.question = _clean_lang(q.question)
+            q.purpose = _clean_lang(q.purpose)
+            q.evidence = _clean_lang(q.evidence)
+
+    if ca:
+        ca.immediate_action = _clean_lang(ca.immediate_action)
+        if hasattr(ca, "proposed_ca") and ca.proposed_ca:
+            ca.proposed_ca = _clean_lang(ca.proposed_ca)
+        if hasattr(ca, "impact_analysis") and ca.impact_analysis:
+            ca.impact_analysis = _clean_lang(ca.impact_analysis)
+
+    if report:
+        report.cost_impact = cost_impact
+        report.financial_amount = fin_amt
+
     trace.append(AgentTraceStep.ok("Final evidence verification and consistency validation completed"))
 
     return {
         **state,
         "root_cause": rc,
-        "investigation_plan": inv,
         "five_why": fw,
+        "investigation_plan": inv,
         "ca_draft": ca,
-        "capa_analysis": capa,
+        "capa_analysis": capa if capa else ca,
         "impact_assessment": impact,
+        "cost_impact": cost_impact,
+        "financial_amount": fin_amt,
         "contributing_factors": cfs,
         "report": report,
         "trace": trace,

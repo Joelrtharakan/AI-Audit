@@ -601,6 +601,72 @@
         }
         html += "</div>";
 
+        // --- 7b. Cost & Financial Impact Card (Conditional: Section 26-42) ---
+        var costImpact = report.cost_impact;
+        if (costImpact && costImpact.cost_factor_detected) {
+            var costStatus = costImpact.financial_status || "REQUIRES_ASSESSMENT";
+            var statusColor = (costStatus === "VERIFIED") ? "#059669" : (costStatus === "REPORTED" || costStatus === "ESTIMATED") ? "#0284c7" : "#d97706";
+            var statusBg = (costStatus === "VERIFIED") ? "#ecfdf5" : (costStatus === "REPORTED" || costStatus === "ESTIMATED") ? "#f0f9ff" : "#fffbe6";
+            var statusBorder = (costStatus === "VERIFIED") ? "#a7f3d0" : (costStatus === "REPORTED" || costStatus === "ESTIMATED") ? "#bae6fd" : "#ffe58f";
+
+            html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
+            html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
+            html += "<div style='display:flex; align-items:center; gap:10px;'>";
+            html += "<span style='font-size:16px;'>💰</span>";
+            html += "<h5 style='font-weight:800; font-size:16px; color:#0f172a; margin:0; letter-spacing:-0.2px;'>Cost & Financial Impact</h5>";
+            html += "</div>";
+            html += "<span style='font-size:11px; font-weight:800; background:" + statusBg + "; color:" + statusColor + "; border:1px solid " + statusBorder + "; padding:5px 12px; border-radius:20px; text-transform:uppercase; letter-spacing:0.5px;'>" + safeEsc(costStatus) + "</span>";
+            html += "</div>";
+
+            if (costImpact.narrative) {
+                html += "<p style='font-size:13px; color:#334155; margin-bottom:16px; line-height:1.6; background:#f8fafc; padding:12px 16px; border-radius:10px; border:1px solid #f1f5f9; font-weight:500;'>" + safeEsc(costImpact.narrative) + "</p>";
+            }
+
+            var costSummaryFields = [
+                { label: "Financial Factor", val: costImpact.financial_factor || costImpact.cost_factor_type },
+                { label: "Potential Exposure", val: costImpact.potential_cost_exposure },
+                { label: "Actual Financial Loss", val: costImpact.actual_loss !== null && costImpact.actual_loss !== undefined ? ((costImpact.currency || "INR") + " " + costImpact.actual_loss.toLocaleString()) : (costImpact.actual_loss_status || "NOT ESTABLISHED") },
+                { label: "Recovery Status", val: costImpact.recoverability_status || costImpact.recoverability },
+                { label: "Calculation Basis", val: costImpact.calculation_basis },
+                { label: "Confidence", val: costImpact.confidence }
+            ].filter(function(f) { return f.val && safeStr(f.val); });
+
+            if (costSummaryFields.length) {
+                html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;'>";
+                costSummaryFields.forEach(function(f) {
+                    html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px;'>";
+                    html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;'>" + escapeHtml(f.label) + "</div>";
+                    html += "<div style='font-size:13px; color:#0f172a; font-weight:700;'>" + safeEsc(f.val) + "</div>";
+                    html += "</div>";
+                });
+                html += "</div>";
+            }
+
+            if (costImpact.cost_drivers && costImpact.cost_drivers.length) {
+                html += "<div style='margin-bottom:14px;'>";
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:6px;'>Potential Cost Drivers:</div>";
+                html += "<div style='display:flex; flex-wrap:wrap; gap:6px;'>";
+                costImpact.cost_drivers.forEach(function(d) {
+                    html += "<span style='background:#f1f5f9; color:#334155; border:1px solid #cbd5e1; font-size:11px; font-weight:600; padding:4px 10px; border-radius:6px;'>&bull; " + safeEsc(d) + "</span>";
+                });
+                html += "</div>";
+                html += "</div>";
+            }
+
+            if (costImpact.evidence_required && costImpact.evidence_required.length) {
+                html += "<div style='background:#fefce8; border:1px solid #fef08a; border-radius:10px; padding:12px 16px;'>";
+                html += "<div style='font-size:11px; font-weight:800; color:#854d0e; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;'>Financial Evidence Required for Assessment:</div>";
+                html += "<ul style='margin:0; padding-left:18px; font-size:12px; color:#713f12; line-height:1.6;'>";
+                costImpact.evidence_required.forEach(function(e) {
+                    html += "<li>" + safeEsc(e) + "</li>";
+                });
+                html += "</ul>";
+                html += "</div>";
+            }
+
+            html += "</div>";
+        }
+
         // --- 8. AI Form Pre-fill Applied Notice ---
         if (caDraft) {
             html += "<div style='background:linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border:1px solid #bfdbfe; border-radius:14px; padding:16px 20px; display:flex; justify-content:space-between; align-items:center; box-shadow:0 4px 12px rgba(37,99,235,0.08);'>";

@@ -143,3 +143,81 @@ def test_case_c_confirmed_notification_service_failure():
     assert lead_id == "H1"
     assert lead_stat == "SELECTED"
     assert rc_stat in (RootCauseStatus.SUPPORTED, RootCauseStatus.ESTABLISHED)
+
+
+def test_case_d_confirmed_duplicate_payment_detection_failure():
+    """CASE D — CONFIRMED DUPLICATE PAYMENT DETECTION CONTROL FAILURE
+    C1: Duplicate payment rule was active and mandatory. (VERIFIED)
+    C2: Second invoice with identical vendor ID and invoice number was submitted. (VERIFIED)
+    C3: System audit log confirms duplicate detection rule was disabled at 14:32. (VERIFIED)
+    C4: Transaction log confirms duplicate payment of ₹1,25,000 was executed at 14:47 without validation. (VERIFIED)
+    
+    Expected: Root Cause Status = SUPPORTED/ESTABLISHED, Leading = H1 (duplicate detection rule failure/disabled).
+    """
+    evidence = [
+        EvidenceItem(claim="C1: Duplicate payment rule was mandatory before payment execution", source="financial_policy", status=EvidenceStatus.VERIFIED),
+        EvidenceItem(claim="C2: Second invoice with identical vendor ID and invoice number was submitted", source="invoice_registry", status=EvidenceStatus.VERIFIED),
+        EvidenceItem(claim="C3: System audit log confirms duplicate detection rule was disabled at 14:32", source="erp_audit_trail", status=EvidenceStatus.VERIFIED),
+        EvidenceItem(claim="C4: Transaction log confirms payment of ₹125,000 was executed at 14:47 without validation", source="disbursement_log", status=EvidenceStatus.VERIFIED),
+    ]
+
+    hyp = CandidateHypothesis(
+        id="H1",
+        name="DUPLICATE_DETECTION_DISABLED",
+        statement="Duplicate payment validation rule was disabled in the ERP system, allowing the duplicate transaction to process.",
+        evidence_needed="ERP audit logs",
+        supporting_evidence=[e.claim for e in evidence],
+        causal_level=CausalLevel.L5_SYSTEMIC_CAUSE,
+    )
+
+    eligible, supp_lvl, reason, missing, lvl, promo_allowed = evaluate_root_cause_eligibility(
+        hyp, evidence_items=evidence
+    )
+    assert eligible
+    assert supp_lvl == SupportLevel.SUPPORTED
+    assert promo_allowed
+    hyp.status = "SUPPORTED"
+
+    lead_id, lead_stat, rc_stat, rationale = select_authoritative_leading_hypothesis([hyp], evidence_ledger=evidence)
+    assert lead_id == "H1"
+    assert lead_stat == "SELECTED"
+    assert rc_stat in (RootCauseStatus.SUPPORTED, RootCauseStatus.ESTABLISHED)
+
+
+def test_case_e_confirmed_approval_workflow_admin_override():
+    """CASE E — CONFIRMED APPROVAL WORKFLOW ADMIN OVERRIDE
+    C1: Dual payment approval was required for amounts exceeding ₹100,000. (VERIFIED)
+    C2: Second payment was executed without second approver review. (VERIFIED)
+    C3: Security audit trail proves administrator override token was used to bypass approval workflow. (VERIFIED)
+    C4: Payment disbursement executed immediately following override. (VERIFIED)
+
+    Expected: Root Cause Status = SUPPORTED/ESTABLISHED, Leading = H1 (administrator workflow override).
+    """
+    evidence = [
+        EvidenceItem(claim="C1: Dual payment authorization was required for amounts exceeding ₹100,000", source="doa_matrix", status=EvidenceStatus.VERIFIED),
+        EvidenceItem(claim="C2: Second payment of ₹125,000 executed without second approver sign-off", source="ap_workflow", status=EvidenceStatus.VERIFIED),
+        EvidenceItem(claim="C3: Security audit trail proves administrator override token was used to bypass approval", source="security_audit_log", status=EvidenceStatus.VERIFIED),
+        EvidenceItem(claim="C4: Payment disbursement executed immediately following override", source="banking_gateway", status=EvidenceStatus.VERIFIED),
+    ]
+
+    hyp = CandidateHypothesis(
+        id="H1",
+        name="ADMIN_WORKFLOW_OVERRIDE_BYPASS",
+        statement="Approval workflow was bypassed using administrator override token, executing payment without dual authorization.",
+        evidence_needed="Security audit logs",
+        supporting_evidence=[e.claim for e in evidence],
+        causal_level=CausalLevel.L5_SYSTEMIC_CAUSE,
+    )
+
+    eligible, supp_lvl, reason, missing, lvl, promo_allowed = evaluate_root_cause_eligibility(
+        hyp, evidence_items=evidence
+    )
+    assert eligible
+    assert supp_lvl == SupportLevel.SUPPORTED
+    assert promo_allowed
+    hyp.status = "SUPPORTED"
+
+    lead_id, lead_stat, rc_stat, rationale = select_authoritative_leading_hypothesis([hyp], evidence_ledger=evidence)
+    assert lead_id == "H1"
+    assert lead_stat == "SELECTED"
+    assert rc_stat in (RootCauseStatus.SUPPORTED, RootCauseStatus.ESTABLISHED)

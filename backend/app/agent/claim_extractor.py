@@ -44,13 +44,15 @@ _CLAUSE_SPLIT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# "<Speaker> stated/reported/claimed/... that <claim>"
+# "<Speaker> stated/reported/claimed/... (that) <claim>"
 _REPORT_VERB_RE = re.compile(
     r"^(?P<speaker>[A-Z][\w\s-]{0,50}?)\s+"
     r"(?:stated|reported|confirmed|indicated|noted|mentioned|claimed|said|"
-    r"explained|advised|acknowledged|"
+    r"explained|advised|acknowledged|attributed\s+(?:this|it|the\s+issue|the\s+failure)?\s*to|cited|"
     r"states|reports|confirms|indicates|notes|mentions|claims|says|"
-    r"explains|advises|acknowledges)\s+"
+    r"explains|advises|acknowledges|"
+    r"state|report|confirm|indicate|note|mention|claim|say|"
+    r"explain|advise|acknowledge)\s+"
     r"(?:that\s+)?(?P<claim>.+)$",
     re.IGNORECASE,
 )
@@ -89,14 +91,9 @@ _NEGATIVE_POLARITY_RE = re.compile(
     r"never\s+(?:received|completed|performed|attended|been|given|granted|approved)|"
     r"was\s+never\s+(?:available|accessible|found|present|opened|given|granted)|"
     r"missing|absent|unavailable|incomplete|unaware|not\s+aware|"
-    # A leading "No <noun phrase> was/were <state-word>" negates the whole
-    # clause even though it contains a positive-looking state verb (e.g. "No
-    # training attendance record was available") -- without this, the
-    # sentence-initial "No" is missed and the clause is misread as positive
-    # because "was available" alone matches the positive pattern below.
-    r"^no\s+[\w\s-]{1,60}?\s+(?:was|were|has\s+been|have\s+been)\s+(?:completed|performed|conducted|"
+    r"\bno\s+[\w\s-]{1,60}?\s*(?:was|were|has\s+been|have\s+been|could\s+be)?\s*(?:completed|performed|conducted|"
     r"done|provided|given|received|attended|delivered|assigned|available|accessible|found|present|"
-    r"documented|recorded|maintained|updated|followed|applied|verified|confirmed|informed|notified))\b",
+    r"documented|recorded|maintained|updated|followed|applied|verified|confirmed|informed|notified|located))\b",
     re.IGNORECASE,
 )
 
@@ -110,14 +107,12 @@ _POSITIVE_POLARITY_RE = re.compile(
     r"(?:completed|performed|conducted|provided|given|received|attended|"
     r"delivered|assigned|documented|recorded|opened|accessed|viewed|retrieved|approved|"
     r"granted|authorized|"
-    r"maintained|updated|followed|applied|verified|confirmed|informed|notified|acknowledged)\b|"
+    r"maintained|updated|followed|applied|verified|confirmed|informed|notified|acknowledged|"
+    r"dispatched|dispatch|delivered|delivery|sent|transmitted|transmission)\b|"
     r"\b(?:was|were|has\s+been|have\s+been|had\s+been)\s+(?:done|available|accessible|found|present)\b|"
-    # "<Record/system/log> shows/show/records/indicates <completion/
-    # approval/delivery/receipt>" -- the record-side claim in a
-    # record-vs-statement conflict often states the outcome as a noun
-    # ("shows completion"/"shows approval") rather than a past-participle
-    # verb ("was completed"/"was approved") -- both are equally positive.
-    r"\b(?:shows?|records?|indicates?)\s+(?:completion|approval|delivery|receipt)\b",
+    # "<Record/system/log> shows/show/records/indicates/confirms <completion/
+    # approval/delivery/receipt/dispatch>"
+    r"\b(?:shows?|records?|indicates?|confirms?|establishes?)\s+(?:[\w\s]{0,20}?\s+)?(?:completion|approval|delivery|receipt|dispatch|transmission)\b",
     re.IGNORECASE,
 )
 
@@ -127,7 +122,7 @@ _AUDITOR_SPEAKER_RE = re.compile(
     re.IGNORECASE,
 )
 _SYSTEM_RECORD_SPEAKER_RE = re.compile(
-    r"\b(?:system\s+logs?|system\s+records?|audit\s+logs?|audit\s+trail|server\s+logs?|dispatch\s+logs?|lms\s+records?|distribution\s+logs?|calibration\s+records?|maintenance\s+logs?)\b",
+    r"\b(?:system\s+logs?|system\s+records?|audit\s+logs?|audit\s+trail|server\s+logs?|dispatch\s+logs?|lms\s+records?|training\s+records?|distribution\s+logs?|calibration\s+records?|maintenance\s+logs?|temperature\s+logs?|inspection\s+records?)\b",
     re.IGNORECASE,
 )
 _EVIDENCE_AVAILABILITY_RE = re.compile(
@@ -567,9 +562,16 @@ def _claims_conflict(c1: EvidenceClaim, c2: EvidenceClaim) -> bool:
     )}
     meaningful1 = words1 - ignore_role_stems - ignore_institutional_stems
     meaningful2 = words2 - ignore_role_stems - ignore_institutional_stems
-    if not meaningful1 or not meaningful2:
-        return False
     if meaningful1 & meaningful2:
+        return True
+
+    # Transmission/communication conflict: one claim mentions a communication artifact or delivery verb,
+    # and the other mentions a communication artifact or receipt/access verb.
+    comm_stems = {_stem(w) for w in _COMMUNICATION_ARTIFACT_WORDS}
+    deliv_stems = {_stem(w) for w in _DELIVERY_VERBS}
+    rec_stems = {_stem(w) for w in _RECEIPT_ACCESS_VERBS}
+    if ((meaningful1 & comm_stems or words1 & deliv_stems) and
+        (meaningful2 & comm_stems or words2 & rec_stems)):
         return True
 
     # Weak fallback: even without substantive vocabulary overlap, two

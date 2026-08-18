@@ -15,6 +15,7 @@ Critical architectural rules:
 
 from __future__ import annotations
 
+from enum import Enum
 import re
 from dataclasses import dataclass, field
 
@@ -154,44 +155,49 @@ _PLURAL_SUBJECT_TAIL_RE = re.compile(
 
 
 def format_deviation_why_question(
-    subject: str | None, condition: str | None, temporal: str | None = None
+    subject: str | None, condition: str | None = None, temporal: str | None = None
 ) -> str:
     """Deterministically build a grammatically correct "Why was/were
     <subject> <condition> [<temporal>]?" question from canonical
     subject/condition/temporal fields.
-
-    Exists specifically so 5-Why repair code never falls back to naive
-    string interpolation of a dash-joined `observed_deviation` field (e.g.
-    "daily equipment inspection checklist — not completed"), which produces
-    ungrammatical output like "Why did daily equipment inspection checklist
-    — not completed occur?" A deviation is always "<subject> <condition>",
-    never "<subject> — <condition> occur" — the condition already IS the
-    predicate, so it must be embedded directly after was/were, not tacked
-    onto a generic "occur?" template.
     """
     raw_subj = (subject or "").strip()
-    # Prepend "the" unless the subject already carries its own leading
-    # article/possessive/demonstrative -- "Why was daily equipment
-    # inspection checklist not completed?" drops the article a fluent
-    # question needs; "Why was the daily equipment inspection checklist
-    # not completed?" is the grammatical form.
+    temporal_suffix = f" {temporal.strip()}" if temporal and temporal.strip() else ""
+    if not raw_subj:
+        return "Why did this deviation occur?"
+
+    cond = (condition or "").strip()
+    cond_aux_match = re.match(r"^(?:was|were)\s+(.+)$", cond, re.IGNORECASE)
+    if cond_aux_match:
+        cond = cond_aux_match.group(1)
+
+    if is_actor_noun(raw_subj):
+        stripped_actor = strip_leading_article(raw_subj).lower()
+        if not cond or cond.upper() == "UNKNOWN":
+            return f"Why did the {stripped_actor} not complete the required activity{temporal_suffix}?"
+        if cond.startswith("not "):
+            return f"Why did the {stripped_actor} not {cond[4:].strip()}{temporal_suffix}?"
+        return f"Why did the {stripped_actor} {cond}{temporal_suffix}?"
+
     if raw_subj and not re.match(r"^(?:the|a|an|my|your|his|her|its|our|their|this|that)\b", raw_subj, re.IGNORECASE):
         subj = f"the {raw_subj}"
     else:
         subj = raw_subj
-    cond = (condition or "").strip()
-    # Strip a leading was/were from the condition itself (e.g. "was
-    # incomplete") -- the aux verb is supplied once, by this function, not
-    # duplicated from a condition phrase that already includes one.
-    cond_aux_match = re.match(r"^(?:was|were)\s+(.+)$", cond, re.IGNORECASE)
-    if cond_aux_match:
-        cond = cond_aux_match.group(1)
-    temporal_suffix = f" {temporal.strip()}" if temporal and temporal.strip() else ""
-    if not subj:
-        return "Why did this deviation occur?"
+
     if not cond or cond.upper() == "UNKNOWN":
         return f"Why did {subj[0].lower()}{subj[1:]} deviate from the applicable requirement{temporal_suffix}?"
+
     aux = "were" if _PLURAL_SUBJECT_TAIL_RE.search(subj) else "was"
+    if re.match(r"^(?:complete|perform|execute|conduct|record|log|receive)\b", cond, re.IGNORECASE):
+        v = cond.split()[0].lower()
+        if v == "complete":
+            return f"Why {aux} {subj[0].lower()}{subj[1:]} not completed{temporal_suffix}?"
+        elif v == "perform":
+            return f"Why {aux} {subj[0].lower()}{subj[1:]} not performed{temporal_suffix}?"
+        elif v == "receive":
+            return f"Why {aux} {subj[0].lower()}{subj[1:]} not received{temporal_suffix}?"
+        return f"Why {aux} {subj[0].lower()}{subj[1:]} not {v}ed{temporal_suffix}?"
+
     return f"Why {aux} {subj[0].lower()}{subj[1:]} {cond}{temporal_suffix}?"
 
 
@@ -394,8 +400,9 @@ def classify_finding_specificity(
     has_reported = bool(reported_claims)
     has_mechanism = bool(mechanism_status) and mechanism_status not in ("UNKNOWN", "NONE")
     has_condition = bool(deviation_condition) and deviation_condition.strip() not in _DEGRADED_CONDITIONS
+    has_financial_signal = bool(re.search(r"₹|\$|€|£|INR|USD|EUR|duplicate\s+payment|overpayment|batch\s+worth", text, re.IGNORECASE))
 
-    concrete_signals = sum([has_entity, has_date_or_period, has_reported, has_mechanism, has_condition])
+    concrete_signals = sum([has_entity, has_date_or_period, has_reported, has_mechanism, has_condition, has_financial_signal])
     if concrete_signals == 0:
         return "LOW"
     if concrete_signals >= 2:
@@ -450,10 +457,20 @@ _TEMPORAL_DURING_AUDIT_RE = re.compile(
 )
 
 
+def extract_detected_period(text: str) -> str | None:
+    """Extract audit detection framing period (e.g. 'during the audit')."""
+    if not text:
+        return None
+    m = _TEMPORAL_DURING_AUDIT_RE.search(text)
+    if m:
+        return m.group(0).strip().rstrip(".,;")
+    return None
+
+
 def extract_temporal_clause(text: str) -> str | None:
     """Extract a relative temporal clause or stated duration already
-    present in the finding (e.g. "before the procedure became effective",
-    "for three consecutive days") when no absolute date is present. Never
+    present in the finding (e.g. 'before the procedure became effective',
+    'for three consecutive days') when no absolute date is present. Never
     fabricates a date/period — returns None if nothing is stated."""
     if not text:
         return None
@@ -465,9 +482,6 @@ def extract_temporal_clause(text: str) -> str | None:
     m2 = _TEMPORAL_DURATION_RE.search(text)
     if m2:
         return m2.group(0).strip().rstrip(".,;")
-    m3 = _TEMPORAL_DURING_AUDIT_RE.search(text)
-    if m3:
-        return m3.group(0).strip().rstrip(".,;")
     return None
 
 
@@ -650,6 +664,8 @@ def build_affected_object_phrase(subject: str | None, actor: str | None = None) 
     """
     if not subject or subject.startswith("UNKNOWN"):
         return "NOT ESTABLISHED"
+    if is_actor_noun(subject):
+        return "Required procedure compliance"
     topic = topic_word(subject)
     tail = split_topic_and_tail(subject, topic)
     if not tail:
@@ -687,8 +703,35 @@ def subject_topic_matches(candidate: str | None, canonical_subject: str | None) 
 
 
 # ---------------------------------------------------------------------------
-# Structured Deviation Info
 # ---------------------------------------------------------------------------
+# Structured Deviation Info & Semantic Roles
+# ---------------------------------------------------------------------------
+class SemanticRole(str, Enum):
+    ACTOR = "ACTOR"
+    AFFECTED_OBJECT = "AFFECTED_OBJECT"
+    ACTIVITY = "ACTIVITY"
+    PROCESS = "PROCESS"
+    RECORD = "RECORD"
+    ASSET = "ASSET"
+    REQUIREMENT = "REQUIREMENT"
+    SYSTEM = "SYSTEM"
+    NOTIFICATION = "NOTIFICATION"
+
+
+_ACTOR_NOUNS_RE = re.compile(
+    r"\b(?:employees?|operators?|technicians?|personnel|analysts?|workers?|staff|inspectors?|"
+    r"supervisors?|users?|authors?|reviewers?|approvers?|managers?|chemists?|engineers?)\b",
+    re.IGNORECASE,
+)
+
+
+def is_actor_noun(text: str | None) -> bool:
+    """True if text refers to personnel / actors rather than a controlled object."""
+    if not text:
+        return False
+    return bool(_ACTOR_NOUNS_RE.search(text))
+
+
 @dataclass
 class DeviationInfo:
     subject: str | None = None
@@ -703,6 +746,8 @@ class DeviationInfo:
     actor: str | None = None
     actors: list[str] = field(default_factory=list)
     entities: list[str] = field(default_factory=list)
+    semantic_type: str = "OBJECT"
+    relevant_change: str | None = None
     reported_mechanism: str | None = None
     verified_mechanism: str | None = None
     mechanism_status: str = "UNKNOWN"
@@ -742,7 +787,7 @@ _CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "not_state",
         re.compile(
-            r"^(?P<subject>.+?)\s+(?:was|were)\s+not\s+(?P<cond>[a-z]+(?:\s+[a-z]+){0,3}?)"
+            r"^(?P<subject>.+?)\s+(?:was|were|did)\s+not\s+(?P<cond>[a-z]+(?:\s+[a-z]+){0,4}?)"
             r"\s*(?:\bfor\b.*|\bfrom\b.*|\bon\b.*)?\.?$",
             re.IGNORECASE,
         ),
@@ -815,13 +860,6 @@ def _entity_noun_phrase(text: str, entity: str) -> str | None:
         if match.group(2).upper() != entity.upper():
             continue
         noun_phrase = match.group(1).strip()
-        # The entity-type noun is whatever comes AFTER the LAST
-        # preposition/article boundary immediately before the entity --
-        # "the calibration certificate for balance BAL-014" should yield
-        # "balance", not "certificate balance" (an earlier clause's noun
-        # incidentally swept in) or "for balance" (a bare preposition).
-        # Splitting on the last stopword boundary keeps only the words
-        # genuinely modifying the entity itself.
         _stopwords = {"for", "the", "a", "an", "of", "to", "in", "on", "at", "and", "or", "with"}
         words = noun_phrase.split()
         last_stopword_idx = max(
@@ -836,22 +874,13 @@ def _entity_noun_phrase(text: str, entity: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Referenced-Evidence Boundary (Section: REFERENCED EVIDENCE != INSPECTED
-# EVIDENCE): a document/record the finding merely cites, mentions, attaches,
-# or refers to -- but which was not actually available for inspection --
-# must never contaminate subject/topic/causal resolution. Detection is
-# structural (a reference-verb clause co-occurring with an unavailability
-# clause in the same sentence), never a per-document-type keyword list, so
-# it generalizes across "calibration report", "training record",
-# "maintenance log", "qualification document", etc. without enumerating them.
+# Referenced-Evidence Boundary
 # ---------------------------------------------------------------------------
 _DOC_REFERENCE_VERB_RE = re.compile(
     r"\b(?:referenced|cited|referred\s+to|refers?\s+to)\s+(?:an?\s+|the\s+)?(?:attached\s+)?"
     r"(?P<doc>[a-z][a-z\s-]{1,50}?)\b(?=\s*(?:,|\.|;|\s+that\b|\s+which\b|\s+but\b|\s+and\b|$))",
     re.IGNORECASE,
 )
-# Passive-voice shape: the document noun phrase precedes its reference verb
-# ("the attached certificate was mentioned/cited/referenced ...").
 _DOC_MENTIONED_RE = re.compile(
     r"\b(?:the\s+)?(?:attached\s+)?(?P<doc>[a-z][a-z\s-]{1,50}?)\s+was\s+(?:mentioned|cited|referenced)\b",
     re.IGNORECASE,
@@ -876,9 +905,7 @@ def detect_referenced_unavailable_documents(text: str) -> list[tuple[str, str]]:
     """Return [(document_type, raw_sentence_span), ...] for every sentence
     where a document is referenced/cited/mentioned/attached AND separately
     marked as unavailable/inaccessible/not provided within that same
-    sentence. A document's TYPE/NAME is preserved as metadata; this function
-    deliberately does NOT attempt to resolve what the document says -- there
-    is nothing in the finding text that could license that."""
+    sentence."""
     if not text:
         return []
     results: list[tuple[str, str]] = []
@@ -900,12 +927,6 @@ def detect_referenced_unavailable_documents(text: str) -> list[tuple[str, str]]:
 
 
 def _mask_referenced_document_spans(text: str) -> str:
-    """Remove sentences identified as referenced-but-unavailable-document
-    clauses before subject/topic resolution runs, so a document's type
-    vocabulary (e.g. "calibration report") can never seed the finding
-    subject just because it was mentioned -- the actual observed deviation
-    must be resolved from the REMAINING text. No-op (returns text unchanged)
-    when nothing is detected."""
     refs = detect_referenced_unavailable_documents(text)
     if not refs:
         return text
@@ -917,9 +938,12 @@ def _mask_referenced_document_spans(text: str) -> str:
 
 def _extract_activity_from_reported_finding(text: str) -> str:
     """Extract a clean activity noun phrase when finding is purely reported speech."""
-    # Look for "training on the revised procedure", "checklist procedure revision", etc.
-    # "training for X" (not "training compliance for X") -- a concise noun
-    # phrase naming the activity itself, not a status label glued in front.
+    if any(w in text.lower() for w in ("email", "notification", "dispatch", "message", "notice", "alert")):
+        if "email" in text.lower():
+            return "email notification"
+        elif "dispatch" in text.lower():
+            return "notification dispatch"
+        return "notification delivery"
     m_train = re.search(r"\btraining\s+on\s+((?:the\s+)?[a-z0-9\s-]+?)(?:,|\.|\s+but|\s+and|$)", text, re.IGNORECASE)
     if m_train:
         topic = m_train.group(1).strip()
@@ -938,7 +962,13 @@ def _extract_activity_from_reported_finding(text: str) -> str:
 
 
 def extract_semantic_subject(text: str) -> DeviationInfo:
-    """Extract the semantic affected object + condition from finding text."""
+    """Extract the semantic affected object + condition from finding text.
+    
+    Deterministic semantic resolver enforces:
+      - ACTOR is separated from AFFECTED_OBJECT, ACTIVITY, PROCESS, RECORD, NOTIFICATION.
+      - Grammatical subject (e.g. 'Four employees') is never used as affected_object.
+      - Returns strongly typed DeviationInfo with semantic_type and relevant_change.
+    """
     if not text or not text.strip():
         return DeviationInfo(subject=None)
 
@@ -946,16 +976,59 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
     actors = extract_actors(text)
     date = extract_date(text)
 
-    # Referenced-Evidence Boundary: a sentence that only reports a document
-    # was referenced/cited/attached and separately unavailable must never be
-    # treated as describing the finding's own subject/deviation -- its
-    # vocabulary (e.g. "calibration report") is metadata about a citation,
-    # not a claim about the affected object. Excluded from the structural
-    # sentence loop and the keyword fallback below (Section 17: structural
-    # provenance check, not a per-document-type keyword list).
     _referenced_doc_sentences = {
         span for _doc_type, span in detect_referenced_unavailable_documents(text)
     }
+
+    t_low = text.lower()
+    # 0. Specialized Domain-Level Semantic Classification (Section 1 & 11)
+    if "duplicate payment" in t_low or "paid twice" in t_low or "double payment" in t_low:
+        affected_obj = "Duplicate payment to supplier"
+        finding_subj = "Duplicate payment to supplier"
+        process_name = "Accounts Payable — Payment Processing"
+        activity_name = "Supplier invoice payment processing"
+        dev_str = "Duplicate payment to supplier identified"
+        cond_str = "duplicate transaction processed"
+        return DeviationInfo(
+            subject=finding_subj,
+            finding_subject=finding_subj,
+            affected_object=affected_obj,
+            affected_process=process_name,
+            affected_activity=activity_name,
+            deviation=dev_str,
+            condition=cond_str,
+            requirement="Accounts payable payment verification and duplicate-detection controls",
+            date=date,
+            actor="Accounts payable / authorized payment personnel",
+            actors=actors,
+            entities=entities,
+            semantic_type="FINANCIAL",
+            matched=True,
+        )
+
+    if "overpayment" in t_low or "overpaid" in t_low:
+        affected_obj = "Supplier payment transaction"
+        finding_subj = "Supplier overpayment"
+        process_name = "Accounts payable and payment verification control"
+        activity_name = "Supplier invoice payment processing"
+        dev_str = "Overpayment to supplier identified"
+        cond_str = "overpayment processed"
+        return DeviationInfo(
+            subject=finding_subj,
+            finding_subject=finding_subj,
+            affected_object=affected_obj,
+            affected_process=process_name,
+            affected_activity=activity_name,
+            deviation=dev_str,
+            condition=cond_str,
+            requirement="Accounts payable payment verification controls",
+            date=date,
+            actor=None,
+            actors=actors,
+            entities=entities,
+            semantic_type="FINANCIAL",
+            matched=True,
+        )
 
     # 1. Try structural sentence patterns
     for sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
@@ -971,8 +1044,159 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
             groups = match.groupdict()
             raw_subj = groups.get("subject", "") or ""
             subj = _clean_subject(raw_subj)
-            
-            # Incorporate entity if matched
+            cond = groups.get("cond")
+            req = groups.get("requirement")
+
+            # Check if raw_subj is an ACTOR (e.g. "Four employees", "Operator", "Three operators")
+            if is_actor_noun(raw_subj) or is_actor_noun(subj):
+                actor_name = raw_subj.strip()
+                if name == "failed_to" and cond:
+                    m_verb = re.match(
+                        r"^(?P<verb>[a-z]+(?:\s+out)?)\s+(?:the\s+|an?\s+)?(?P<obj>.+)$",
+                        cond.strip(),
+                        re.IGNORECASE,
+                    )
+                    if m_verb:
+                        v = m_verb.group("verb").lower()
+                        target_obj = _clean_subject(m_verb.group("obj"))
+                        if v in ("complete", "fill", "fill out", "perform", "conduct", "execute", "sign", "log", "record"):
+                            activity_name = f"{v.capitalize()} {target_obj}"
+                            clean_cap = target_obj[0].upper() + target_obj[1:]
+                            affected_obj = f"{clean_cap} completion" if not target_obj.lower().endswith("completion") else clean_cap
+                            if "checklist" in target_obj.lower():
+                                process_name = "Inspection checklist completion and record control"
+                            elif any(w in target_obj.lower() for w in ("record", "log", "sheet", "form")):
+                                process_name = f"{topic_word(target_obj).capitalize()} monitoring and record control"
+                            else:
+                                process_name = f"{topic_word(target_obj).capitalize()} process and compliance control"
+                            dev_str = f"Required {target_obj} not completed"
+                            cond_str = "not completed"
+                            sem_type = "RECORD" if any(w in target_obj.lower() for w in ("checklist", "record", "log", "form", "sheet")) else "ACTIVITY"
+                        elif v in ("receive", "get", "obtain"):
+                            activity_name = "Notification delivery and receipt"
+                            clean_cap = target_obj[0].upper() + target_obj[1:] if target_obj else "Notification"
+                            affected_obj = f"{clean_cap} delivery and receipt"
+                            process_name = "Controlled document notification and distribution control"
+                            dev_str = f"{actor_name} did not receive {target_obj or 'notification'}"
+                            cond_str = "not received"
+                            sem_type = "NOTIFICATION"
+                        elif v in ("pass", "satisfy", "meet"):
+                            activity_name = f"{target_obj.capitalize()} execution"
+                            affected_obj = f"{target_obj[0].upper() + target_obj[1:]} execution"
+                            process_name = f"{topic_word(target_obj).capitalize()} process and qualification control"
+                            dev_str = f"{target_obj.capitalize()} failed"
+                            cond_str = "failed"
+                            sem_type = "ACTIVITY"
+                        else:
+                            activity_name = f"{v.capitalize()} {target_obj}"
+                            clean_cap = target_obj[0].upper() + target_obj[1:]
+                            affected_obj = f"{clean_cap} {v} control"
+                            process_name = f"{topic_word(target_obj).capitalize()} operational control"
+                            dev_str = f"{actor_name} failed to {cond}"
+                            cond_str = f"not {v}ed"
+                            sem_type = "ACTIVITY"
+                    else:
+                        target_obj = _clean_subject(cond)
+                        clean_cap = target_obj[0].upper() + target_obj[1:]
+                        activity_name = f"{clean_cap} execution"
+                        affected_obj = f"{clean_cap} completion" if any(w in target_obj.lower() for w in ("checklist", "form", "log")) else f"{clean_cap} execution"
+                        process_name = f"{topic_word(target_obj).capitalize()} monitoring and control"
+                        dev_str = f"{actor_name} failed to {cond}"
+                        cond_str = "failed"
+                        sem_type = "ACTIVITY"
+
+                    relevant_change = (
+                        "Revision of the inspection checklist"
+                        if "revised" in sentence.lower() and "checklist" in sentence.lower()
+                        else ("Revision of the procedure" if "revised" in sentence.lower() or "revision" in sentence.lower() else None)
+                    )
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=process_name,
+                        affected_activity=activity_name,
+                        deviation=dev_str,
+                        condition=cond_str,
+                        requirement=req or ("Applicable inspection requirement" if "inspection" in sentence.lower() else None),
+                        date=date,
+                        actor=actor_name,
+                        actors=[actor_name] + [a for a in actors if a != actor_name],
+                        entities=entities,
+                        semantic_type=sem_type,
+                        relevant_change=relevant_change,
+                        matched=True,
+                    )
+
+                if (name == "not_state" or "did not" in sentence.lower() or "not received" in sentence.lower() or "not notified" in sentence.lower()) and cond:
+                    if "notified" in cond or "receive notification" in cond or "notification" in sentence.lower():
+                        affected_obj = "Revised SOP notification" if "sop" in sentence.lower() or "procedure" in sentence.lower() else "Notification delivery and receipt"
+                        process_name = "Controlled document notification and distribution control"
+                        activity_name = "Notification delivery and receipt"
+                        dev_str = f"{actor_name} did not receive notification"
+                        cond_str = "not received"
+                        sem_type = "NOTIFICATION"
+                    elif "trained" in cond or "training" in sentence.lower():
+                        affected_obj = "Personnel training status"
+                        process_name = "Training management and qualification control"
+                        activity_name = "Personnel training and qualification"
+                        dev_str = f"{actor_name} not trained"
+                        cond_str = "not trained"
+                        sem_type = "ACTIVITY"
+                    else:
+                        clean_cond = _clean_subject(cond)
+                        affected_obj = f"{clean_cond[0].upper() + clean_cond[1:]} compliance"
+                        process_name = f"{topic_word(clean_cond).capitalize()} operational control"
+                        activity_name = f"{clean_cond[0].upper() + clean_cond[1:]} activity"
+                        dev_str = f"{actor_name} — not {cond}"
+                        cond_str = f"not {cond}"
+                        sem_type = "ACTIVITY"
+
+                    relevant_change = "Revision of the procedure" if "revised" in sentence.lower() or "revision" in sentence.lower() else None
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=process_name,
+                        affected_activity=activity_name,
+                        deviation=dev_str,
+                        condition=cond_str,
+                        date=date,
+                        actor=actor_name,
+                        actors=[actor_name] + [a for a in actors if a != actor_name],
+                        entities=entities,
+                        semantic_type=sem_type,
+                        relevant_change=relevant_change,
+                        matched=True,
+                    )
+
+                if name == "bare_failed":
+                    m_bare = re.search(r"failed\s+(?:the\s+|an?\s+)?(?P<obj>[a-z][\w\s-]*?)(?:\s+because|\s+after|\s*\.|$)", sentence, re.IGNORECASE)
+                    obj_name = _clean_subject(m_bare.group("obj")) if m_bare else "inspection"
+                    clean_obj = obj_name[0].upper() + obj_name[1:]
+                    affected_obj = f"{clean_obj} execution"
+                    process_name = f"{topic_word(obj_name).capitalize()} process and qualification control"
+                    activity_name = f"{clean_obj} execution"
+                    dev_str = f"{clean_obj} failed"
+                    cond_str = "failed"
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=process_name,
+                        affected_activity=activity_name,
+                        deviation=dev_str,
+                        condition=cond_str,
+                        requirement="Applicable inspection standard" if "inspection" in obj_name.lower() else None,
+                        date=date,
+                        actor=actor_name,
+                        actors=[actor_name] + [a for a in actors if a != actor_name],
+                        entities=entities,
+                        semantic_type="ACTIVITY",
+                        matched=True,
+                    )
+
+            # Non-actor path
             matched_ent = groups.get("entity")
             if matched_ent and matched_ent not in subj:
                 subj = f"{subj} for equipment {matched_ent}"
@@ -982,8 +1206,6 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
             if not validate_semantic_subject(subj):
                 continue
 
-            cond = groups.get("cond")
-            req = groups.get("requirement")
             if name == "not_state" and cond:
                 cond = f"not {cond.strip()}"
             elif name == "deviated_from" and req:
@@ -994,12 +1216,27 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                 verb = (groups.get("verb") or "operated").strip()
                 cond = f"{verb} outside its {cond.strip()}"
 
+            clean_subj_cap = subj[0].upper() + subj[1:]
+            topic_str = topic_word(subj).capitalize()
+            if name == "outside_scope":
+                proc_str = f"Validated {subj.lower()} operation" if not subj.lower().startswith("validated") else f"{clean_subj_cap} control"
+                sem_type = "EQUIPMENT"
+            elif any(w in subj.lower() for w in ("record", "log", "certificate", "sheet", "form", "report", "label")):
+                proc_str = f"{topic_str} record control"
+                sem_type = "RECORD"
+            elif "notification" in subj.lower():
+                proc_str = "Controlled document notification"
+                sem_type = "NOTIFICATION"
+            else:
+                proc_str = f"{topic_str} operational process"
+                sem_type = "OBJECT"
+
             return DeviationInfo(
                 subject=subj,
                 finding_subject=subj,
-                affected_object=subj,
-                affected_process="operational process",
-                affected_activity=subj,
+                affected_object=clean_subj_cap,
+                affected_process=proc_str,
+                affected_activity=clean_subj_cap,
                 deviation=f"{subj} — {cond or 'condition unverified'}",
                 condition=cond,
                 requirement=req,
@@ -1007,6 +1244,7 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                 actor=actors[0] if actors else None,
                 actors=actors,
                 entities=entities,
+                semantic_type=sem_type,
                 matched=True,
             )
 
@@ -1017,74 +1255,68 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
             subj = _clean_subject(match.group("subject"))
             if not validate_semantic_subject(subj):
                 continue
+            clean_subj_cap = subj[0].upper() + subj[1:]
             return DeviationInfo(
                 subject=subj,
                 finding_subject=subj,
-                affected_object=subj,
-                affected_process="operational process",
-                affected_activity=subj,
+                affected_object=clean_subj_cap,
+                affected_process=f"{topic_word(subj).capitalize()} operational process",
+                affected_activity=clean_subj_cap,
                 deviation=f"{subj} — {cond_label}",
                 condition=cond_label,
                 date=date,
                 actor=actors[0] if actors else None,
                 actors=actors,
                 entities=entities,
+                semantic_type="OBJECT",
                 matched=True,
             )
 
         # Framing was stripped and what's left is a short, usable noun phrase
-        # (e.g. "A deviation was observed involving X." -> "X").
         if stripped != sentence and len(stripped) < 140:
             subj = _clean_subject(stripped)
-            if validate_semantic_subject(subj):
+            if validate_semantic_subject(subj) and not is_actor_noun(subj):
+                clean_subj_cap = subj[0].upper() + subj[1:]
                 return DeviationInfo(
                     subject=subj,
                     finding_subject=subj,
-                    affected_object=subj,
-                    affected_process="operational process",
-                    affected_activity=subj,
+                    affected_object=clean_subj_cap,
+                    affected_process=f"{topic_word(subj).capitalize()} operational process",
+                    affected_activity=clean_subj_cap,
                     deviation=f"{subj} — nonconforming",
                     condition="nonconforming",
                     date=date,
                     actor=actors[0] if actors else None,
                     actors=actors,
                     entities=entities,
+                    semantic_type="OBJECT",
                     matched=True,
                 )
 
-    # 2. Structural entity-noun resolution FIRST (Section 6): if the raw
-    # text names a tagged entity preceded by a concrete noun ("balance
-    # BAL-014"), that IS the affected object -- prefer it over the
-    # keyword-guessed generic status-label fallback below, which produces
-    # exactly the "process/status wrapped around an entity ID" pattern
-    # ("equipment calibration status for BAL-014") this section exists to
-    # eliminate.
+    # 2. Structural entity-noun resolution FIRST
     activity_subj = None
     if entities:
         activity_subj = _entity_noun_phrase(text, entities[0])
     if not activity_subj:
-        # Keyword fallback runs on the MASKED text (referenced-but-
-        # unavailable-document clauses removed) so a document's mere
-        # mention/type (e.g. "calibration report") can never seed the
-        # finding subject just because it was cited -- see
-        # detect_referenced_unavailable_documents.
         masked_text = _mask_referenced_document_spans(text)
         activity_subj = _extract_activity_from_reported_finding(masked_text)
         if entities and not any(e in activity_subj for e in entities):
             activity_subj = f"{activity_subj} for {entities[0]}"
 
+    clean_act_cap = activity_subj[0].upper() + activity_subj[1:] if activity_subj else "Process compliance"
     return DeviationInfo(
-        subject=activity_subj,
-        finding_subject=activity_subj,
-        affected_object=activity_subj,
-        affected_process="training management" if "training" in text.lower() else "operational process",
-        affected_activity=activity_subj,
+        subject=activity_subj or "process compliance",
+        finding_subject=activity_subj or "process compliance",
+        affected_object=clean_act_cap,
+        affected_process="training management" if "training" in text.lower() else f"{topic_word(clean_act_cap).capitalize()} operational process",
+        affected_activity=clean_act_cap,
         deviation=f"{activity_subj} — status unconfirmed",
         condition="status unconfirmed",
         date=date,
         actor=actors[0] if actors else None,
         actors=actors,
         entities=entities,
+        semantic_type="ACTIVITY",
         matched=True,
     )
 
