@@ -82,8 +82,6 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     plan = InvestigationPlan()
 
     try:
-        from app.services.ollama_client import set_current_node
-        set_current_node("investigation_planner")
         raw = await client.chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -92,6 +90,7 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
             temperature=0.1,
             response_format_json=True,
             max_tokens=1024,
+            node="investigation_planner",
         )
         parsed = parse_llm_json(raw)
 

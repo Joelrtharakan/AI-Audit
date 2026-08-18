@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.auth import require_internal_api_key
 from app.models.analysis import AnalyzeFindingResponse
@@ -20,11 +20,29 @@ def get_finding_analysis_service() -> FindingAnalysisService:
 @router.post("/analyze-finding", response_model=AnalyzeFindingResponse)
 async def analyze_finding(
     payload: AnalyzeFindingRequest,
+    request: Request,
     service: FindingAnalysisService = Depends(get_finding_analysis_service),
-):
+) -> AnalyzeFindingResponse:
     """Sprint 1 LLM-first entry point: reasons about a brand-new finding with no
     RAG dependency. Never writes to the LQMS; always returns a clean error on
     LLM failure rather than partial/guessed data."""
+    from app.config import get_settings
+    settings = get_settings()
+    if payload.llm_provider:
+        settings.llm_provider = payload.llm_provider.strip().lower()
+
+    # Check user session for Copilot token
+    from app.routers.auth import get_current_user_session
+    user_session = get_current_user_session(
+        lqms_session=request.cookies.get(settings.session_cookie_name),
+        authorization=request.headers.get("authorization"),
+    )
+    if user_session:
+        user_token = user_session.get_decrypted_token()
+        if user_token:
+            from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
+            settings.copilot_github_token = user_token
+            reset_copilot_clients()
     try:
         return await service.analyze(payload)
     except LLMError as exc:

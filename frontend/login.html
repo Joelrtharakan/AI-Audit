@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign In &mdash; Audit Management System</title>
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #090d16;
+            --bg-card: #ffffff;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --brand-blue: #0284c7;
+            --brand-emerald: #10b981;
+            --border-color: #e2e8f0;
+            --github-dark: #181c24;
+            --github-hover: #0d1117;
+            --shadow-subtle: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            --shadow-card: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-page);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: stretch;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        .auth-container {
+            display: flex;
+            width: 100vw;
+            min-height: 100vh;
+        }
+
+        /* ---------------- Left Branding / Value Prop Hero ---------------- */
+        .hero-pane {
+            flex: 1.1;
+            background: radial-gradient(circle at 10% 20%, rgba(2, 132, 199, 0.12) 0%, transparent 40%),
+                        radial-gradient(circle at 80% 80%, rgba(16, 185, 129, 0.08) 0%, transparent 40%),
+                        #0b1120;
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 60px 80px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero-pane::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image: linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+                              linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+            background-size: 48px 48px;
+            pointer-events: none;
+        }
+
+        .hero-brand {
+            position: relative;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .brand-logo-badge {
+            width: 44px;
+            height: 44px;
+            background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 14px rgba(2, 132, 199, 0.4);
+            color: #ffffff;
+            font-weight: 800;
+            font-size: 20px;
+            letter-spacing: -0.5px;
+        }
+
+        .brand-text-wrap h2 {
+            color: #ffffff;
+            font-size: 20px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            line-height: 1.2;
+        }
+
+        .brand-text-wrap span {
+            color: #94a3b8;
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .hero-content {
+            position: relative;
+            z-index: 2;
+            max-width: 540px;
+            margin: 40px 0;
+        }
+
+        .hero-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(16, 185, 129, 0.12);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            border-radius: 9999px;
+            padding: 6px 14px;
+            color: #34d399;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 24px;
+        }
+
+        .hero-tag-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #10b981;
+            box-shadow: 0 0 8px #10b981;
+        }
+
+        .hero-title {
+            color: #ffffff;
+            font-size: 38px;
+            font-weight: 800;
+            line-height: 1.18;
+            letter-spacing: -1px;
+            margin-bottom: 20px;
+        }
+
+        .hero-title span {
+            background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-subtitle {
+            color: #94a3b8;
+            font-size: 15px;
+            line-height: 1.6;
+            margin-bottom: 36px;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .feature-item {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-radius: 10px;
+            padding: 16px;
+            backdrop-filter: blur(8px);
+        }
+
+        .feature-item-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #f1f5f9;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .feature-item-desc {
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        .hero-footer {
+            position: relative;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: #64748b;
+            font-size: 12px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            padding-top: 24px;
+        }
+
+        /* ---------------- Right Auth Pane ---------------- */
+        .auth-pane {
+            flex: 0.9;
+            background: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            position: relative;
+        }
+
+        .auth-card {
+            width: 100%;
+            max-width: 420px;
+        }
+
+        .auth-header {
+            margin-bottom: 32px;
+        }
+
+        .auth-header h1 {
+            font-size: 26px;
+            font-weight: 800;
+            color: #0f172a;
+            letter-spacing: -0.6px;
+            margin-bottom: 8px;
+        }
+
+        .auth-header p {
+            color: #64748b;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        /* Notice / Error Box */
+        .alert-card {
+            display: none;
+            padding: 14px 16px;
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.45;
+            margin-bottom: 24px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .alert-card.alert-error {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
+        }
+
+        .alert-card.alert-warning {
+            background: #fffbeb;
+            border: 1px solid #fde68a;
+            color: #92400e;
+        }
+
+        .alert-title {
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 4px;
+        }
+
+        /* Social Auth Button */
+        .btn-github-sso {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            width: 100%;
+            background: var(--github-dark);
+            color: #ffffff !important;
+            padding: 14px 20px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            text-decoration: none !important;
+            border: 1px solid #000000;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
+        }
+
+        .btn-github-sso:hover {
+            background: var(--github-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.25);
+        }
+
+        .btn-github-sso:active {
+            transform: translateY(0);
+        }
+
+        .btn-github-sso svg {
+            width: 20px;
+            height: 20px;
+            fill: #ffffff;
+        }
+
+        /* Divider */
+        .divider {
+            display: flex;
+            align-items: center;
+            text-align: center;
+            margin: 28px 0;
+            color: #94a3b8;
+            font-size: 12px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .divider::before, .divider::after {
+            content: '';
+            flex: 1;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .divider:not(:empty)::before {
+            margin-right: 14px;
+        }
+
+        .divider:not(:empty)::after {
+            margin-left: 14px;
+        }
+
+        /* Secondary Dev Option */
+        .dev-option-card {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 16px;
+            transition: all 0.2s ease;
+        }
+
+        .dev-option-card:hover {
+            border-color: #cbd5e1;
+            background: #f1f5f9;
+        }
+
+        .dev-option-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+
+        .dev-badge {
+            background: #e0f2fe;
+            color: #0369a1;
+            font-size: 10px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-dev-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: #0284c7;
+            font-size: 13px;
+            font-weight: 600;
+            text-decoration: none !important;
+            margin-top: 6px;
+        }
+
+        .btn-dev-link:hover {
+            color: #0369a1;
+        }
+
+        /* Footer Compliance Security */
+        .security-badges {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            margin-top: 36px;
+            color: #94a3b8;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        .security-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        /* Responsive Breakpoint */
+        @media (max-width: 960px) {
+            .auth-container {
+                flex-direction: column;
+            }
+            .hero-pane {
+                display: none;
+            }
+            .auth-pane {
+                flex: 1;
+                padding: 30px 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div class="auth-container">
+    <!-- Left Hero Pane -->
+    <div class="hero-pane">
+        <div class="hero-brand">
+            <div style="background:#ffffff; padding:8px 14px; border-radius:12px; display:inline-flex; align-items:center; justify-content:center; box-shadow:0 4px 14px rgba(0,0,0,0.25);">
+                <img src="assets/img/lqms_logo.jpg" alt="LQMS Logo" style="height:34px; width:auto; object-fit:contain;" />
+            </div>
+            <div class="brand-text-wrap">
+                <h2>Audit Management System</h2>
+                <span>INTEGRATED MANAGEMENT SYSTEM</span>
+            </div>
+        </div>
+
+        <div class="hero-content">
+            <div class="hero-tag">
+                <div class="hero-tag-dot"></div>
+                <span>ISO 9001 &bull; ISO 17025 Compliant</span>
+            </div>
+
+            <h1 class="hero-title">
+                AI Root Cause &amp; CAPA Intelligence with <span>Copilot Enterprise</span>
+            </h1>
+
+            <p class="hero-subtitle">
+                System of Intelligence for audit findings, 5-Why root cause isolation, and deterministic evidence-backed corrective action plans.
+            </p>
+
+            <div class="hero-features">
+                <div class="feature-item">
+                    <div class="feature-item-title">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        Zero Hallucination Firewall
+                    </div>
+                    <div class="feature-item-desc">
+                        Strict deterministic fact anchoring ensures verified evidence is never confused with reported claims.
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <div class="feature-item-title">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                        Multi-Tenant Isolation
+                    </div>
+                    <div class="feature-item-desc">
+                        Individual per-user Copilot sessions with zero token exposure.
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="hero-footer">
+            <span>&copy; 2026 Audit Management System</span>
+            <span>Zero Data Ingestion Guarantee</span>
+        </div>
+    </div>
+
+    <!-- Right Authentication Pane -->
+    <div class="auth-pane">
+        <div class="auth-card">
+            <div class="auth-header">
+                <div style="margin-bottom: 22px;">
+                    <img src="assets/img/lqms_logo.jpg" alt="LQMS Logo" style="height: 48px; width: auto; object-fit: contain;" />
+                </div>
+                <h1>Sign in to Audit Management System</h1>
+                <p>Authenticate with your company GitHub credentials to access Copilot Enterprise AI intelligence.</p>
+            </div>
+
+            <!-- Dynamic Error Alert Box -->
+            <div id="alertBox" class="alert-card alert-error">
+                <div class="alert-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <span id="alertTitleText">Authentication Notice</span>
+                </div>
+                <div id="alertDescText">An error occurred during authentication.</div>
+            </div>
+
+            <!-- GitHub OAuth Button -->
+            <a id="btnSignInGithub" href="http://localhost:8010/api/auth/github/login" class="btn-github-sso">
+                <svg viewBox="0 0 24 24">
+                    <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
+                </svg>
+                <span>Continue with GitHub</span>
+            </a>
+
+            <div class="divider">or development mode</div>
+
+            <!-- Offline / Local Development Access -->
+            <div class="dev-option-card">
+                <div class="dev-option-header">
+                    <span style="font-size: 13px; font-weight: 700; color: #1e293b;">Local Development</span>
+                    <span class="dev-badge">Offline / Ollama</span>
+                </div>
+                <p style="font-size: 12px; color: #64748b; margin-bottom: 6px;">
+                    Test finding investigations locally with Qwen3:8b without GitHub login.
+                </p>
+                <a href="index.html" class="btn-dev-link">
+                    <span>Enter Dashboard &rarr;</span>
+                </a>
+            </div>
+
+            <!-- Security Footnote -->
+            <div class="security-badges">
+                <div class="security-item">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    <span>OAuth 2.0 Encrypted</span>
+                </div>
+                <span>&bull;</span>
+                <div class="security-item">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    <span>Zero Token Leakage</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="assets/js/jQuery-2.1.4.min.js"></script>
+<script src="config.js"></script>
+<script>
+    $(function() {
+        var apiBase = (typeof LQMS_AI_CONFIG !== "undefined" && LQMS_AI_CONFIG.API_BASE_URL) || "http://localhost:8010";
+        $("#btnSignInGithub").attr("href", apiBase + "/api/auth/github/login");
+
+        var urlParams = new URLSearchParams(window.location.search);
+        var authError = urlParams.get("error");
+        var authMsg = urlParams.get("message");
+
+        if (authError || authMsg) {
+            var $box = $("#alertBox");
+            var $title = $("#alertTitleText");
+            var $desc = $("#alertDescText");
+
+            if (authError === "unauthorized_org") {
+                $box.removeClass("alert-warning").addClass("alert-error");
+                $title.text("Unauthorized Organization");
+                $desc.text(authMsg || "Your GitHub account is not a member of the authorized enterprise organization.");
+            } else if (authError === "missing_config") {
+                $box.removeClass("alert-error").addClass("alert-warning");
+                $title.text("Configuration Required");
+                $desc.text(authMsg || "GitHub OAuth App is not configured. Please set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in backend/.env.");
+            } else {
+                $box.removeClass("alert-warning").addClass("alert-error");
+                $title.text("Authentication Failed");
+                $desc.text(authMsg || "Unable to complete GitHub authentication. Please try again.");
+            }
+            $box.show();
+        }
+    });
+</script>
+</body>
+</html>

@@ -811,6 +811,8 @@ class InvestigateRequest(BaseModel):
     severity: str = ""
     likelihood: str = ""
     risk_result: str = ""
+    llm_provider: str = ""
+    copilot_github_token: str = ""
 
     @field_validator("finding_text")
     @classmethod

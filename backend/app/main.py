@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import analyze, health, investigate
+from app.routers import analyze, auth, health, investigate
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +51,16 @@ def create_app() -> FastAPI:
     )
 
     origins = settings.allowed_origins_list
-    if "*" not in origins:
-        origins.append("*")
-
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=False,
+        allow_origins=origins if origins else ["http://localhost:5500", "http://localhost:5510"],
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
+    app.include_router(auth.router)
     app.include_router(health.router)
     app.include_router(analyze.router)
     app.include_router(investigate.router)

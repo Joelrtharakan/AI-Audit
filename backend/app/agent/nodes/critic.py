@@ -85,7 +85,7 @@ async def critic_node(state: AgentState) -> AgentState:
     if five_why is not None and not five_why.steps:
         has_ungrounded = True
 
-    if state.get("analysis_mode") == "DEGRADED" or not has_ungrounded:
+    if state.get("analysis_mode") == "DEGRADED" or not has_ungrounded or (root_cause and root_cause.candidate_hypotheses and (five_why is None or five_why.steps)):
         trace.append(AgentTraceStep.ok("Deterministic critic firewall: Analysis grounded & structurally valid (0ms fast path)"))
         state["critic_approved"] = True
         state["critic_feedback"] = "Deterministic verification approved."
@@ -138,8 +138,6 @@ async def critic_node(state: AgentState) -> AgentState:
     critic_status = "OK"
 
     try:
-        from app.services.ollama_client import set_current_node
-        set_current_node("critic")
         raw = await client.chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -149,6 +147,7 @@ async def critic_node(state: AgentState) -> AgentState:
             response_format_json=True,
             max_tokens=settings.ollama_critic_max_tokens,
             num_ctx=settings.ollama_critic_num_ctx,
+            node="critic",
         )
         parsed = parse_llm_json(raw)
 

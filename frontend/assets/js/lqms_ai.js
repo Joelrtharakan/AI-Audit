@@ -8,6 +8,8 @@
         return window.LQMS_AI_CONFIG || {};
     }
 
+    var currentProvider = localStorage.getItem("lqms_preferred_llm_provider") || "ollama";
+
     // Sprint 1 primary workflow: LLM-first, no RAG. Field names match
     // AnalyzeFindingRequest in the backend.
     function gatherAnalysisContext() {
@@ -31,7 +33,9 @@
             nature_of_nc: $("#lblNatureOfNC").text().trim(),
             risk_severity: $("#lblRiskS").val() || $("#lblRiskS").text().trim(),
             risk_likelihood: $("#lblRiskL").val() || $("#lblRiskL").text().trim(),
-            risk_result: $("#lblRiskResult").val() || $("#lblRiskResult").text().trim()
+            risk_result: $("#lblRiskResult").val() || $("#lblRiskResult").text().trim(),
+            llm_provider: currentProvider,
+            copilot_github_token: localStorage.getItem("lqms_copilot_token") || ""
         };
     }
 
@@ -692,6 +696,18 @@
         $status.css("color", isError ? "#a94442" : "#777");
     }
 
+    function apiGet(path) {
+        var cfg = config();
+        return $.ajax({
+            url: cfg.apiBaseUrl + path,
+            type: "GET",
+            dataType: "json",
+            xhrFields: { withCredentials: true },
+            headers: { "X-Internal-Api-Key": cfg.internalApiKey || "" },
+            timeout: 10000
+        });
+    }
+
     function apiPost(path, payload) {
         var cfg = config();
         return $.ajax({
@@ -699,13 +715,243 @@
             type: "POST",
             contentType: "application/json",
             dataType: "json",
+            xhrFields: { withCredentials: true },
             headers: { "X-Internal-Api-Key": cfg.internalApiKey || "" },
             data: JSON.stringify(payload),
             timeout: 300000 // 5 minutes for multi-step agent LLM graph execution
         });
     }
 
+    function updateProviderUi(provider, statusInfo) {
+        currentProvider = provider;
+        localStorage.setItem("lqms_preferred_llm_provider", provider);
+
+        var isOllama = provider === "ollama";
+        var $btnOllama = $("#btnProviderOllama");
+        var $btnCopilot = $("#btnProviderCopilot");
+        var $badge = $("#lqmsProviderStatusBadge");
+        var $dot = $("#lqmsProviderDot");
+        var $text = $("#lqmsProviderStatusText");
+        var $tokenBtn = $("#btnOpenCopilotModal, #btnOpenCopilotModalTop");
+        var $tokenBtnText = $("#lblCopilotTokenBtn, #lblCopilotTokenBtnTop");
+        var $topCopilotIcon = $("#topCopilotIcon");
+
+        var localToken = localStorage.getItem("lqms_copilot_token") || "";
+        var hasToken = (statusInfo && statusInfo.has_copilot_token) || Boolean(localToken);
+
+        if (hasToken) {
+            $tokenBtnText.text("Copilot: Connected ✓");
+            $("#btnOpenCopilotModalTop").css({
+                "border-color": "rgba(52, 211, 153, 0.6)",
+                "background": "rgba(16, 185, 129, 0.28)",
+                "color": "#ffffff"
+            });
+            $topCopilotIcon.removeClass("fa-key").addClass("fa-check-circle").css("color", "#34d399");
+
+            $("#btnOpenCopilotModal").css({
+                "border-color": "#86efac",
+                "background": "#f0fdf4",
+                "color": "#15803d"
+            }).find("i").removeClass("fa-key").addClass("fa-check-circle").css("color", "#16a34a");
+        } else {
+            $tokenBtnText.text("Set Copilot Token");
+            $("#btnOpenCopilotModalTop").css({
+                "border-color": "rgba(255, 255, 255, 0.35)",
+                "background": "rgba(255, 255, 255, 0.18)",
+                "color": "#ffffff"
+            });
+            $topCopilotIcon.removeClass("fa-check-circle").addClass("fa-key").css("color", "#fde047");
+
+            $("#btnOpenCopilotModal").css({
+                "border-color": "#cbd5e1",
+                "background": "#ffffff",
+                "color": "#334155"
+            }).find("i").removeClass("fa-check-circle").addClass("fa-key").css("color", "#eab308");
+        }
+
+        if (isOllama) {
+            $btnOllama.css({
+                "background": "#0284c7",
+                "color": "#ffffff",
+                "box-shadow": "0 2px 6px rgba(2, 132, 199, 0.4)",
+                "font-weight": "700"
+            });
+            $btnOllama.find("i").css("color", "#ffffff");
+
+            $btnCopilot.css({
+                "background": "transparent",
+                "color": "#64748b",
+                "box-shadow": "none",
+                "font-weight": "600"
+            });
+            $btnCopilot.find("i").css("color", "#10b981");
+
+            $badge.css({
+                "background": "#e0f2fe",
+                "color": "#0369a1",
+                "border-color": "#bae6fd"
+            });
+            $dot.css("background", "#0284c7");
+        } else {
+            $btnCopilot.css({
+                "background": "#10b981",
+                "color": "#ffffff",
+                "box-shadow": "0 2px 6px rgba(16, 185, 129, 0.4)",
+                "font-weight": "700"
+            });
+            $btnCopilot.find("i").css("color", "#ffffff");
+
+            $btnOllama.css({
+                "background": "transparent",
+                "color": "#64748b",
+                "box-shadow": "none",
+                "font-weight": "600"
+            });
+            $btnOllama.find("i").css("color", "#0284c7");
+
+            $badge.css({
+                "background": "#d1fae5",
+                "color": "#065f46",
+                "border-color": "#a7f3d0"
+            });
+            $dot.css("background", "#10b981");
+        }
+
+        var modelName = (statusInfo && statusInfo.model) || (isOllama ? "qwen3:8b" : "auto");
+        var isAvailable = statusInfo ? statusInfo.available : true;
+        var statusLabel = isOllama ? "Engine: Ollama (" + modelName + ")" : "Engine: GitHub Copilot (" + modelName + ")";
+        if (!isAvailable) {
+            statusLabel += " [Offline]";
+            $dot.css("background", "#f59e0b");
+        }
+
+        $text.text(statusLabel);
+    }
+
+    function switchProvider(targetProvider) {
+        updateProviderUi(targetProvider, null);
+        $("#lqmsProviderStatusText").text("Connecting to " + (targetProvider === "copilot" ? "GitHub Copilot Enterprise" : "Ollama") + "…");
+        $("#lqmsProviderDot").css("background", "#94a3b8");
+
+        apiPost("/api/v1/provider", { provider: targetProvider })
+            .done(function (res) {
+                updateProviderUi(res.provider || targetProvider, res);
+                setStatus("Active engine switched to " + (targetProvider === "copilot" ? "GitHub Copilot Enterprise" : "Ollama"), false);
+            })
+            .fail(function () {
+                updateProviderUi(targetProvider, { available: false, model: targetProvider === "copilot" ? "auto" : "qwen3:8b" });
+                setStatus("Switched locally to " + targetProvider + ".", false);
+            });
+    }
+
+    window.selectLlmProvider = switchProvider;
+
+    function initUserSession() {
+        apiGet("/api/auth/me")
+            .done(function (user) {
+                if (user && user.authenticated) {
+                    $("#liGithubAuthUnauthenticated").hide();
+                    $("#liGithubAuthAuthenticated").show();
+
+                    var displayName = user.name || user.github_login;
+                    $("#navGithubLogin").text("@" + user.github_login + " (Copilot Enterprise ✓)");
+                    $("#dropGithubName").text(displayName);
+                    $("#dropGithubLogin").text("@" + user.github_login);
+
+                    if (user.avatar_url) {
+                        $("#navGithubAvatar, #dropGithubAvatar").attr("src", user.avatar_url).show();
+                        $("#navGithubIcon").hide();
+                    }
+
+                    // Update Copilot UI state
+                    if (currentProvider === "copilot") {
+                        updateProviderUi("copilot", { available: true, model: "auto", has_copilot_token: true });
+                    }
+                } else {
+                    $("#liGithubAuthAuthenticated").hide();
+                    $("#liGithubAuthUnauthenticated").show();
+                }
+            })
+            .fail(function () {
+                $("#liGithubAuthAuthenticated").hide();
+                $("#liGithubAuthUnauthenticated").show();
+            });
+
+        // Check if just redirected from OAuth success
+        var urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get("auth") === "success") {
+            setStatus("Authenticated with GitHub Copilot Enterprise SSO successfully!", false);
+            if (window.history && window.history.replaceState) {
+                var cleanUrl = window.location.pathname + window.location.hash;
+                window.history.replaceState({}, document.title, cleanUrl);
+            }
+        }
+    }
+
+    function lqmsLogout() {
+        apiPost("/api/auth/logout")
+            .always(function () {
+                window.location.href = "login.html";
+            });
+    }
+
+    window.lqmsLogout = lqmsLogout;
+
+    function initProviderSelector() {
+        initUserSession();
+
+        var saved = localStorage.getItem("lqms_preferred_llm_provider");
+        var savedToken = localStorage.getItem("lqms_copilot_token") || "";
+
+        if (saved) {
+            updateProviderUi(saved, null);
+        }
+
+        // If local token exists, sync it on startup
+        var initialPayload = savedToken ? { provider: saved || "ollama", token: savedToken } : null;
+
+        if (initialPayload) {
+            apiPost("/api/v1/provider", initialPayload)
+                .done(function (res) {
+                    updateProviderUi(res.provider || saved || "ollama", res);
+                })
+                .fail(function () {
+                    apiGet("/api/v1/provider")
+                        .done(function (res) {
+                            updateProviderUi((res && res.provider) || currentProvider, res);
+                        })
+                        .fail(function () {
+                            updateProviderUi(currentProvider, null);
+                        });
+                });
+        } else {
+            apiGet("/api/v1/provider")
+                .done(function (res) {
+                    var initial = (res && res.provider) || currentProvider;
+                    updateProviderUi(initial, res);
+                })
+                .fail(function () {
+                    updateProviderUi(currentProvider, null);
+                });
+        }
+    }
+
     $(function () {
+        initProviderSelector();
+
+        $(document).on("click", "#btnProviderOllama", function (e) {
+            e.preventDefault();
+            switchProvider("ollama");
+        });
+        $(document).on("click", "#btnProviderCopilot", function (e) {
+            e.preventDefault();
+            switchProvider("copilot");
+        });
+        $(document).on("click", "#btnOpenCopilotModal", function (e) {
+            e.preventDefault();
+            openCopilotModal();
+        });
+
         $("#lblDescription, #txtFindingObsn, #txtFindingOrObsn").on("input change", function () {
             if ($(this).val().trim().length > 0) {
                 setStatus("", false);
@@ -727,13 +973,14 @@
             }
 
             $btn.prop("disabled", true);
-            setStatus("Analyzing finding (running agent graph)…", false);
+            setStatus("Analyzing finding with " + (currentProvider === "copilot" ? "GitHub Copilot SDK" : "Ollama") + " (running agent graph)…", false);
 
             apiPost("/api/v1/investigate", context)
                 .done(function (result) {
                     showPanel(renderAnalysis(result));
                     applyAnalysisToForm(result);
-                    setStatus("Investigation complete — please review before saving.", false);
+                    var engineUsed = result.report && result.report.provider_used ? result.report.provider_used.toUpperCase() : (currentProvider === "copilot" ? "COPILOT" : "OLLAMA");
+                    setStatus("Investigation complete via " + engineUsed + " (" + (result.report && result.report.analysis_mode || "LLM") + ") — please review before saving.", false);
                 })
                 .fail(function (jqXHR, textStatus) {
                     var message = "AI service unavailable. Existing form data has not been changed.";

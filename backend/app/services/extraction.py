@@ -80,14 +80,13 @@ async def extract_finding(finding_text: str, client: LLMClient | None = None) ->
 
     async def _attempt(msgs: list[dict[str, str]], temperature: float) -> dict | None:
         try:
-            from app.services.ollama_client import set_current_node
-            set_current_node("extraction")
             raw = await client.chat_completion(
                 msgs,
                 temperature=temperature,
                 response_format_json=True,
                 max_tokens=settings.ollama_extraction_max_tokens,
                 num_ctx=settings.ollama_extraction_num_ctx,
+                node="extraction",
             )
             parsed = parse_llm_json(raw)
         except Exception as exc:

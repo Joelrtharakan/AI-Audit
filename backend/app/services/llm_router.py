@@ -38,6 +38,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
+from app.services.llm.base import LLMProvider, LLMResponse
 from app.services.llm_client import (
     AllLLMProvidersUnavailableError,
     LLMAuthenticationError,
@@ -195,10 +196,49 @@ def _get_semaphore(name: str) -> asyncio.Semaphore:
     return sem
 
 
-class LLMRouter:
-    """Implements the LLMClient protocol. Internally tries each configured
+class LLMRouter(LLMProvider):
+    """Implements the LLMProvider interface. Internally tries each configured
     provider in PROVIDER_ORDER (Groq -> OpenRouter -> Gemini), opening that provider's circuit
     on failure and moving to the next, until one succeeds or all configured providers fail."""
+
+    async def generate(
+        self,
+        *,
+        node: str,
+        prompt: str,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_output_tokens: int | None = None,
+        response_format: str | None = None,
+        num_ctx: int | None = None,
+        timeout_seconds: float | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        t_start = time.monotonic()
+        content = await self.chat_completion(
+            messages=messages,
+            temperature=temperature,
+            response_format_json=response_format == "json",
+            max_tokens=max_output_tokens,
+            num_ctx=num_ctx,
+            node=node,
+            **kwargs,
+        )
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        meta = _last_call_metadata.get()
+        return LLMResponse(
+            content=content,
+            provider=meta.get("provider_used") or "router",
+            model="router",
+            latency_ms=elapsed_ms,
+            finish_reason="stop",
+            raw_metadata=meta,
+        )
 
     async def chat_completion(
         self,
@@ -207,6 +247,8 @@ class LLMRouter:
         response_format_json: bool = False,
         max_tokens: int | None = None,
         num_ctx: int | None = None,
+        node: str = "unknown",
+        **kwargs,
     ) -> str:
         from app.config import get_settings
 

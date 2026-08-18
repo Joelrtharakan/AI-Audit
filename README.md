@@ -556,29 +556,91 @@ hypothesis H2 — contradicts the established mechanism..."*).
 
 ---
 
-## 6. LLM routing & resilience
+## 6. Pluggable LLM Provider Architecture & Resilience
 
-[`app/services/llm_router.py`](../services/llm_router.py) is the single
-authoritative provider router — no node knows a provider's identity or
-decides retry-vs-failover itself.
+The LLM layer is fully decoupled from the LangGraph orchestration and deterministic causal engine:
 
 ```
-Agent Node → get_llm_client() → LLMRouter (singleton)
-    Groq (circuit HEALTHY/HALF_OPEN?)
-      --429/failure--> OpenRouter
-        --429/failure--> Gemini
-          --failure--> raise LLMError
+┌─────────────────────────────────────────────────────────┐
+│                       LangGraph                         │
+│                 SAME FOR ALL PROVIDERS                  │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+                 ┌───────────────────────┐
+                 │ LLMProvider Interface │
+                 │ (app/services/llm)    │
+                 └───────────┬───────────┘
+                             │
+                ┌────────────┴────────────┐
+                ▼                         ▼
+      ┌───────────────────┐     ┌───────────────────┐
+      │  Ollama Provider  │     │ Copilot Provider  │
+      │ (Local Inference) │     │(github-copilot-sdk│
+      └─────────┬─────────┘     └─────────┬─────────┘
+                │                         │
+                └────────────┬────────────┘
+                             ▼
+                    Normalized LLMResponse
+                             │
+                             ▼
+                    SAME ANALYSIS STATE
+                             │
+                             ▼
+                     SAME CAUSAL ENGINE
+                             │
+                             ▼
+                    SAME FINAL VALIDATOR
+                             │
+                             ▼
+                      SAME LQMS REPORT
 ```
 
+### 6.1 Switching Providers (Zero Code Changes)
+
+Provider selection is purely configuration-driven via the `LLM_PROVIDER` environment variable:
+
+#### Development / Testing (Ollama + Qwen3:8b)
+```bash
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3:8b
+```
+
+#### Production (Official GitHub Copilot Python SDK)
+```bash
+LLM_PROVIDER=copilot
+COPILOT_MODEL=auto
+COPILOT_GITHUB_TOKEN=<securely-injected-token>
+COPILOT_TIMEOUT_SECONDS=30.0
+```
+
+### 6.2 Provider Setup & Authentication
+
+1. **Ollama Setup (Development):**
+   - Install and start Ollama locally (`ollama serve`).
+   - Pull the required model: `ollama pull qwen3:8b` (or `qwen2.5:7b-instruct-q4_K_M`).
+   - Verify health check at `GET /api/v1/health/llm`.
+
+2. **GitHub Copilot SDK Setup (Production):**
+   - The official Python SDK `github-copilot-sdk` is installed via `requirements.txt`.
+   - Provide a valid token in `COPILOT_GITHUB_TOKEN` (or `GITHUB_TOKEN` / `GH_TOKEN`).
+   - The provider initializes `CopilotClient`, creates dedicated isolated sessions per investigation to eliminate cross-finding context contamination, normalizes responses to `LLMResponse`, and safely cleans up session handles.
+   - For live Copilot CI/CD testing, run: `pytest -m live_copilot`.
+
+### 6.3 Deterministic Safety Principle
+
+Regardless of whether Ollama or GitHub Copilot is active:
+- **LLM proposes** → **Deterministic engine evaluates** → **Evidence & causal rules decide** → **Final validator approves/rejects**.
+- If any provider fails, times out, or returns malformed JSON, the engine enters the deterministic fallback path (`analysis_mode = DETERMINISTIC`).
+- `analysis_mode = LLM` is reported only when the LLM successfully completes valid causal analysis.
+
+### 6.4 Multi-Provider Failover Router (Optional Cloud Fallback)
+
+[`app/services/llm_router.py`](../services/llm_router.py) provides optional multi-provider cloud failover when `LLM_PROVIDER` is set to `groq`, `openrouter`, or `gemini`:
 - Fixed failover order: **Groq → OpenRouter → Gemini**.
-- Per-provider circuit breaker (`ProviderCircuit`, `CircuitState`) with
-  classified cooldowns based on the failure type.
-- `get_last_call_metadata()` exposes which provider actually answered, and
-  how many fallbacks were needed, for the current call — surfaced on the
-  report as `provider_used`/`fallback_used`/`provider_attempts` (§5.6).
-- This module has **no opinion about causal reasoning** — it returns a
-  string or raises `LLMError`, exactly like a single-provider client would,
-  so every `except LLMError` in the node layer works unmodified.
+- Per-provider circuit breaker (`ProviderCircuit`, `CircuitState`) with classified cooldowns.
+- Surfaced on the report as `provider_used`/`fallback_used`/`provider_attempts` (§5.6).
 
 `app/services/llm_metrics.py` tracks structured validation events (bounded
 ring buffers), running averages, and execution telemetry — every guard

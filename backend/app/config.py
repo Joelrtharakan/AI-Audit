@@ -55,6 +55,24 @@ class Settings(BaseSettings):
     openrouter_timeout_seconds: float = 20.0
     gemini_timeout_seconds: float = 25.0
 
+    # GitHub Copilot SDK (Production)
+    copilot_model: str = "auto"
+    copilot_github_token: str = ""
+    copilot_timeout_seconds: float = 30.0
+    copilot_log_level: str = "info"
+
+    # GitHub OAuth & Enterprise Configuration
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    github_redirect_uri: str = "http://localhost:8010/api/auth/github/callback"
+    github_allowed_org: str = ""  # Configurable: e.g. "my-company"
+    github_enterprise: str = ""   # Optional GitHub Enterprise slug/domain
+    session_secret: str = "dev-secret-key-change-in-production-min-32-chars"
+    session_cookie_name: str = "lqms_session"
+    session_expiry_hours: int = 24
+    frontend_dashboard_url: str = "http://localhost:5510/index.html"
+    frontend_login_url: str = "http://localhost:5510/login.html"
+
     # -------------------------------------------------------------------------
     # LLM provider router (app/services/llm_router.py): circuit-breaker
     # cooldowns and bounded per-provider concurrency.

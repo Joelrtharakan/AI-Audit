@@ -195,8 +195,11 @@
       </div>
     </div>
 
-    <label for="risk_result">Risk Result</label>
-    <input type="text" id="risk_result" placeholder="e.g. Medium">
+    <label for="llm_provider_select">LLM Intelligence Engine</label>
+    <select id="llm_provider_select" style="margin-bottom: 8px;">
+      <option value="ollama">Ollama (Development / Local - Qwen3:8b)</option>
+      <option value="copilot">GitHub Copilot SDK (Production)</option>
+    </select>
 
     <p class="config-note" id="configNote"></p>
 
@@ -226,6 +229,35 @@
   configNote.textContent = c.apiBaseUrl
     ? "Calling " + c.apiBaseUrl + "/api/v1/analyze-finding (from config.js)"
     : "No apiBaseUrl configured — edit frontend/config.js";
+  if (providerSelect && c.apiBaseUrl) {
+    fetch(c.apiBaseUrl + "/api/v1/provider", {
+      headers: { "X-Internal-Api-Key": c.internalApiKey || "" }
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && data.provider) {
+          providerSelect.value = data.provider;
+        }
+      })
+      .catch(function () {});
+
+    providerSelect.addEventListener("change", function () {
+      var chosen = providerSelect.value;
+      fetch(c.apiBaseUrl + "/api/v1/provider", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Api-Key": c.internalApiKey || ""
+        },
+        body: JSON.stringify({ provider: chosen })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          setStatus("Switched active provider to " + (res.provider || chosen), "ok");
+        })
+        .catch(function () {});
+    });
+  }
 
   function val(id) {
     return document.getElementById(id).value.trim();
@@ -394,7 +426,8 @@
       nature_of_nc: val("nature_of_nc"),
       risk_severity: val("risk_severity"),
       risk_likelihood: val("risk_likelihood"),
-      risk_result: val("risk_result")
+      risk_result: val("risk_result"),
+      llm_provider: providerSelect ? providerSelect.value : "ollama"
     };
 
     btn.disabled = true;

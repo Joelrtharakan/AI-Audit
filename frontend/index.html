@@ -4933,8 +4933,41 @@
                 <span class="sr-only">Toggle navigation</span> <span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></a>
             <div class="navbar-right">
                 <ul class="nav navbar-nav">
-
-                  
+                    <!-- GitHub OAuth User & Copilot Enterprise Status Indicator -->
+                    <li id="liGithubAuthUnauthenticated" style="display:flex; align-items:center; padding:9px 10px 9px 0;">
+                        <a id="btnSignInGithubTop" href="login.html" class="btn btn-sm" style="border-radius:20px; font-size:12px; font-weight:700; padding:5px 14px; border:1px solid rgba(255,255,255,0.35); background:#24292e; color:#ffffff; box-shadow:0 2px 5px rgba(0,0,0,0.2); transition:all 0.2s; display:inline-flex; align-items:center; gap:6px; text-decoration:none;" title="Sign in with Company GitHub Account">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="#ffffff" style="flex-shrink:0;"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+                            <span>Sign in with GitHub</span>
+                        </a>
+                    </li>
+                    <li id="liGithubAuthAuthenticated" class="dropdown" style="display:none; padding:8px 10px 8px 0;">
+                        <a href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false" style="display:inline-flex; align-items:center; gap:8px; background:rgba(16,185,129,0.22); border:1px solid rgba(52,211,153,0.6); padding:5px 14px; border-radius:20px; color:#ffffff !important; font-size:12px; font-weight:700; text-decoration:none; cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,0.15);">
+                            <img id="navGithubAvatar" src="" style="width:22px; height:22px; border-radius:50%; display:none; object-fit:cover;" alt="User" />
+                            <svg id="navGithubIcon" width="15" height="15" viewBox="0 0 24 24" fill="#34d399" style="flex-shrink:0;"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+                            <span id="navGithubLogin">@User (Copilot Enterprise ✓)</span>
+                            <span class="caret" style="margin-left:4px;"></span>
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-right" style="border-radius:12px; box-shadow:0 10px 25px rgba(0,0,0,0.15); border:1px solid #e2e8f0; padding:8px 0; min-width:240px; margin-top:8px; background:#ffffff;">
+                            <li style="padding:10px 16px; border-bottom:1px solid #f1f5f9; display:flex; align-items:center; gap:10px;">
+                                <img id="dropGithubAvatar" src="" style="width:36px; height:36px; border-radius:50%; border:1px solid #e2e8f0; object-fit:cover;" alt="Avatar" />
+                                <div style="overflow:hidden;">
+                                    <div id="dropGithubName" style="font-weight:700; font-size:13px; color:#0f172a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">User Name</div>
+                                    <div id="dropGithubLogin" style="font-size:11px; color:#64748b;">@user</div>
+                                </div>
+                            </li>
+                            <li style="padding:10px 16px; font-size:12px; color:#10b981; font-weight:600; display:flex; align-items:center; gap:8px;">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                <span>GitHub Copilot Enterprise Active</span>
+                            </li>
+                            <li class="divider" style="margin:4px 0;"></li>
+                            <li style="padding:4px 8px;">
+                                <a href="javascript:void(0);" onclick="window.lqmsLogout && window.lqmsLogout();" style="display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:6px; color:#dc2626; font-weight:600; font-size:12px; text-decoration:none; transition:background 0.15s;" onmouseover="this.style.background='#fef2f2';" onmouseout="this.style.background='transparent';">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                                    <span>Sign out of GitHub</span>
+                                </a>
+                            </li>
+                        </ul>
+                    </li>
                     <li class="dropdown tasks-menu"><a href="http://192.168.20.94/LQMS-ISO-EQMS/Auditing/CAPAMain.aspx#" class="dropdown-toggle" data-toggle="dropdown" onclick="return LoadMessageCentre();">
                         <i class="fa fa-wechat"></i><span class="label label-success">
                             <label id="LblMsgCentreCountTop">957</label>
@@ -5013,27 +5046,17 @@
                     </li>
                     <!-- User Account: style can be found in dropdown.less -->
                     <li class="dropdown user user-menu"><a href="http://192.168.20.94/LQMS-ISO-EQMS/Auditing/CAPAMain.aspx#" class="dropdown-toggle" data-toggle="dropdown">
-                        <i class="glyphicon glyphicon-user"></i><span>
-                            <span id="lblUsername">Administrator User</span>
-                            <i class="caret"></i></span>
+                        <i class="glyphicon glyphicon-user"></i><span>Administrator User <i class="caret"></i></span>
                     </a>
                         <ul class="dropdown-menu">
                             <!-- User image -->
                             <li class="user-header">
-                                <img src="data:image/png;base64,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" id="userimage_right" class="img-circle" alt="User Image">
+                                <img src="assets/img/admin_avatar.png" id="userimage_right" class="img-circle" alt="User Image" style="width:90px; height:90px; border-radius:50%; border:3px solid rgba(255,255,255,0.2); object-fit:cover; margin:0 auto 10px; display:block;">
                                 <p>
-                                    <span id="lblUsernames">Administrator User</span>
-                                   
-                                    
-                                    <small>Member since &nbsp;
-                                        <span id="lblMember">25/08/2018</span>
-                                    </small>
+                                    <span>Administrator User</span>
+                                    <small>Member since 25/08/2018</small>
                                 </p>
                             </li>
-                            <!-- Menu Body -->
-                         
-                                
-                          
                             <!-- Menu Footer-->
                             <li class="user-footer">
                                 <div class="pull-left">
@@ -6436,10 +6459,28 @@ system. </label>
                                     <div class="row" style="margin-top: 1%; margin-bottom: 1.5%;">
                                         <div class="col-sm-4"></div>
                                         <div class="col-sm-8">
-                                             <button id="btnAnalyzeFinding" type="button" class="btn" style="background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%); color:#ffffff; font-weight:700; padding: 9px 20px; border-radius: 8px; border:none; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.35);">
-                                                 <span class="glyphicon glyphicon-flash" style="margin-right:6px;"></span> Analyze Finding
-                                             </button>
-                                             <span id="capaAiStatus" class="text-muted" style="margin-left:12px; font-weight:500;"></span>
+                                            <div style="display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+                                                <div class="btn-group" role="group" id="lqmsLlmProviderGroup" style="background:#f1f5f9; padding:3px; border-radius:8px; border:1px solid #cbd5e1; display:inline-flex;">
+                                                    <button type="button" class="btn btn-sm lqms-provider-btn" data-provider="ollama" id="btnProviderOllama" onclick="window.selectLlmProvider && window.selectLlmProvider('ollama')" style="border-radius:6px; font-weight:700; font-size:12px; padding:6px 14px; border:none; transition:all 0.2s; background:#0284c7; color:#ffffff; box-shadow:0 2px 6px rgba(2,132,199,0.4); cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
+                                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                                                        <span>Ollama (Dev: Qwen3)</span>
+                                                    </button>
+                                                    <button type="button" class="btn btn-sm lqms-provider-btn" data-provider="copilot" id="btnProviderCopilot" onclick="window.selectLlmProvider && window.selectLlmProvider('copilot')" style="border-radius:6px; font-weight:600; font-size:12px; padding:6px 14px; border:none; transition:all 0.2s; background:transparent; color:#64748b; cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
+                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+                                                        <span>GitHub Copilot (Prod)</span>
+                                                    </button>
+                                                </div>
+                                                <span id="lqmsProviderStatusBadge" style="font-size:11px; font-weight:600; color:#0369a1; background:#e0f2fe; border:1px solid #bae6fd; padding:4px 10px; border-radius:12px; display:inline-flex; align-items:center; gap:5px;">
+                                                    <span id="lqmsProviderDot" style="width:7px; height:7px; border-radius:50%; background:#0284c7; display:inline-block;"></span>
+                                                    <span id="lqmsProviderStatusText">Engine: Ollama</span>
+                                                </span>
+                                            </div>
+                                            <div>
+                                                 <button id="btnAnalyzeFinding" type="button" class="btn" style="background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%); color:#ffffff; font-weight:700; padding: 9px 20px; border-radius: 8px; border:none; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.35);">
+                                                     <span class="glyphicon glyphicon-flash" style="margin-right:6px;"></span> Analyze Finding
+                                                 </button>
+                                                 <span id="capaAiStatus" class="text-muted" style="margin-left:12px; font-weight:500;"></span>
+                                            </div>
                                         </div>
                                     </div>
                                     <div class="row" id="lqmsAiResultsRow" style="margin-top: 15px; margin-bottom: 20px; display:none;">
@@ -7586,7 +7627,7 @@ tvCAPA_Data.name = 'tvCAPA_Data';
     <script src="assets/js/app.js" type="text/javascript"></script>
     <!-- LQMS AI integration -->
     <script src="config.js" type="text/javascript"></script>
-    <script src="assets/js/lqms_ai.js" type="text/javascript"></script>
+    <script src="assets/js/lqms_ai.js?v=14" type="text/javascript"></script>
     <!-- AdminLTE dashboard demo (This is only for demo purposes) -->
     <script src="assets/js/dashboard.js" type="text/javascript"></script>
     <!-- AdminLTE for demo purposes -->

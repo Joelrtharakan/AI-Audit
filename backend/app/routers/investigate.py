@@ -22,7 +22,7 @@ import logging
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.agent.cache import compute_cache_key, get_cached_analysis, set_cached_analysis
 from app.agent.graph import get_agent_graph
@@ -102,7 +102,10 @@ def _log_performance_summary(trace: list, pipeline_ms: int, analysis_mode: str |
 
 
 @router.post("/investigate", response_model=InvestigateResponse)
-async def investigate_finding(payload: InvestigateRequest) -> InvestigateResponse:
+async def investigate_finding(
+    payload: InvestigateRequest,
+    request: Request,
+) -> InvestigateResponse:
     """Run the agentic investigation pipeline on a finding.
 
     The agent:
@@ -116,12 +119,36 @@ async def investigate_finding(payload: InvestigateRequest) -> InvestigateRespons
     The agent NEVER modifies the LQMS. Final authority rests with the auditor.
     """
     settings = get_settings()
+    if payload.llm_provider:
+        settings.llm_provider = payload.llm_provider.strip().lower()
+
+    # Resolve token from authenticated session first, fallback to payload token
+    from app.routers.auth import get_current_user_session
+    user_session = get_current_user_session(
+        lqms_session=request.cookies.get(settings.session_cookie_name),
+        authorization=request.headers.get("authorization"),
+    )
+    if user_session:
+        user_token = user_session.get_decrypted_token()
+        if user_token:
+            from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
+            settings.copilot_github_token = user_token
+            reset_copilot_clients()
+    elif payload.copilot_github_token:
+        from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
+        settings.copilot_github_token = payload.copilot_github_token.strip()
+        reset_copilot_clients()
 
     # Check cache first for duplicate request instant response. Keyed on
     # model + prompt_version too, so a model swap or prompt edit can't
     # silently serve a result generated under different configuration.
     depts_str = ",".join(payload.departments) if payload.departments else ""
-    cache_model = settings.ollama_model if settings.llm_provider == "ollama" else settings.openrouter_model
+    if settings.llm_provider == "ollama":
+        cache_model = settings.ollama_model
+    elif settings.llm_provider == "copilot":
+        cache_model = settings.copilot_model
+    else:
+        cache_model = settings.openrouter_model
     cache_key = compute_cache_key(
         payload.finding_text,
         depts_str,

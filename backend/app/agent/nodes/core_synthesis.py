@@ -1177,8 +1177,6 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
     provider_attempts: list[str] = []
 
     async def _call(prompt_text: str, max_tokens: int, timeout_seconds: float, node: str, ctx_tokens: int | None = None) -> str:
-        from app.services.ollama_client import set_current_node
-        set_current_node(node)
         call_client = get_llm_client(timeout_seconds=timeout_seconds)
         return await call_client.chat_completion(
             messages=[
@@ -1189,6 +1187,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             response_format_json=True,
             max_tokens=max_tokens,
             num_ctx=ctx_tokens,
+            node=node,
         )
 
     from app.services import llm_metrics

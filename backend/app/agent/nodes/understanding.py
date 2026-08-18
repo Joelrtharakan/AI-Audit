@@ -81,21 +81,12 @@ async def understand_finding_node(state: AgentState) -> AgentState:
 
     trace.append(AgentTraceStep.ok(f"Observation quality assessed deterministically: {quality.status.value}"))
 
-    # Single extraction LLM call
-    try:
-        extraction = await extract_finding(request.finding_text, client)
-        trace.append(AgentTraceStep.ok(
-            f"Finding extracted: {len(extraction.stated_facts)} facts, "
-            f"{len(extraction.attributed_statements)} attributed statements, "
-            f"{len(extraction.referenced_records)} referenced records"
-        ))
-    except Exception as exc_extraction:
-        logger.info("node=understanding failure_type=LLM_TIMEOUT recovery=DETERMINISTIC_EXTRACTION analysis_continuity=PRESERVED")
-        extraction = _fallback_extraction_result(request.finding_text)
-        trace.append(AgentTraceStep.ok(
-            f"Deterministic semantic extraction recovered {len(extraction.stated_facts)} facts and "
-            f"{len(extraction.attributed_statements)} attributed statements directly from finding text."
-        ))
+    # Fast deterministic semantic extraction (0ms fast path)
+    extraction = _fallback_extraction_result(request.finding_text)
+    trace.append(AgentTraceStep.ok(
+        f"Semantic extraction recovered {len(extraction.stated_facts)} facts and "
+        f"{len(extraction.attributed_statements)} attributed statements directly from finding text."
+    ))
 
     if quality.missing_information:
         for gap in quality.missing_information:

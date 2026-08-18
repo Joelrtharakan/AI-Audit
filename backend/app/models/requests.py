@@ -12,6 +12,7 @@ class AnalyzeFindingRequest(BaseModel):
     risk_severity: str = ""
     risk_likelihood: str = ""
     risk_result: str = ""
+    llm_provider: str = ""
 
     @field_validator("finding_text")
     @classmethod
