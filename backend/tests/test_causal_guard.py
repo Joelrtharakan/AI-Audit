@@ -355,11 +355,11 @@ def test_general_catchall_never_drops_a_reported_statement_without_recognized_po
     causal information the finding already gave us must survive even when
     it doesn't fit a known pattern."""
     mechanism = extract_immediate_mechanism(
-        ["the supplier's system experienced an unrelated outage during the transfer window"], []
+        ["the supplier's warehouse experienced unusually high order volume during the transfer window"], []
     )
     assert mechanism.status == "REPORTED"
     assert mechanism.polarity == "general"
-    assert "outage" in mechanism.statement
+    assert "order volume" in mechanism.statement
 
 
 def test_verified_facts_never_get_general_catchall():

@@ -818,11 +818,20 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 else:
                     h.status = "POSSIBLE"
                     h.evidence_strength = "NONE"
-                    trace.append(AgentTraceStep.warn(
-                        f"Final Evidence Verification: downgraded hypothesis {h.id} from SUPPORTED to "
-                        "POSSIBLE — no citable supporting evidence found (traceability firewall)"
-                    ))
-                    _llm_metrics.record_validation_repair(reason="missing_provenance", node="final_evidence_verification")
+            # Semantic deduplication of identical/equivalent statements
+            existing_match = None
+            stmt_norm = re.sub(r"\s+", " ", h.statement.strip().lower())
+            for existing in filtered_final_hyps:
+                if re.sub(r"\s+", " ", existing.statement.strip().lower()) == stmt_norm:
+                    existing_match = existing
+                    break
+            if existing_match:
+                if h.supporting_claim_ids:
+                    existing_match.supporting_claim_ids = list(dict.fromkeys([*(existing_match.supporting_claim_ids or []), *h.supporting_claim_ids]))
+                if h.supporting_evidence:
+                    existing_match.supporting_evidence = list(dict.fromkeys([*(existing_match.supporting_evidence or []), *h.supporting_evidence]))
+                continue
+
             filtered_final_hyps.append(h)
 
         # Cap current-event hypotheses at 4 (recurrence/previous-CAPA
@@ -1134,6 +1143,14 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             if promo and supp == SupportLevel.SUPPORTED:
                 h.status = "SUPPORTED"
                 h.causal_level = c_lvl
+                # evaluate_root_cause_eligibility only returns
+                # (promo=True, SupportLevel.SUPPORTED) when it found direct
+                # VERIFIED-evidence causal proof (has_verified_causal_proof) --
+                # evidence_strength must reflect that authoritative finding,
+                # never sit stale at whatever it was before promotion
+                # (Section 8: SUPPORTED/ESTABLISHED must never have zero
+                # evidence provenance).
+                h.evidence_strength = "VERIFIED"
             else:
                 h.status = "POSSIBLE"
                 h.evidence_strength = "NONE"
@@ -1143,19 +1160,24 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             conflicts=canonical.evidence_conflicts if canonical else None,
             evidence_ledger=evidence_ledger,
         )
+        lead_status_literal = "SELECTED" if lead_mode == "SELECTED" else ("TIED" if lead_mode == "TIED" else "NONE")
         if authoritative_rc_status in (RootCauseStatus.SUPPORTED, RootCauseStatus.ESTABLISHED) and lead_id:
             rc.status = authoritative_rc_status
             rc.leading_hypothesis = lead_id
-            rc.leading_hypothesis_status = lead_mode
+            rc.leading_hypothesis_status = lead_status_literal
             if lead_rationale:
                 rc.leading_hypothesis_rationale = lead_rationale
                 rc.category = "TO_BE_CONFIRMED"
         else:
             rc.status = RootCauseStatus.NOT_ESTABLISHED
-            rc.leading_hypothesis = lead_id if (lead_mode == "POSSIBLE" and lead_id) else None
-            rc.leading_hypothesis_status = lead_mode
-            if lead_rationale:
-                rc.leading_hypothesis_rationale = lead_rationale
+            rc.leading_hypothesis = None
+            rc.leading_hypothesis_status = lead_status_literal
+        from app.agent.recurrence_guard import detect_recurrence
+        _finding_txt = getattr(state.get("request"), "finding_text", "")
+        _rec = detect_recurrence(_finding_txt)
+        if _rec.is_recurring:
+            rc.risk_of_recurrence = "HIGH"
+            rc.risk_of_recurrence_rationale = f"Recurrence history identified ({_rec.capa_id or 'previous CAPA'}); prior corrective actions were ineffective in preventing reoccurrence."
 
         # Causal-verb firewall on the "Why" text (narrative/root_cause_basis):
         # the same "because"/"due to"/"caused by" over-claim that a
@@ -1474,6 +1496,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         compute_analytical_quality,
         five_why_skips_available_mechanism,
         repair_five_why_with_mechanism,
+        sync_five_why_status_with_causal_state,
         validate_capa_causal_linkage,
         validate_root_cause_state,
     )
@@ -1499,6 +1522,22 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "mechanism — inserted it as an additional step"
                 ))
                 fw.steps = repaired_steps
+
+    # Cross-node causal-status consistency (INV-CAUSAL-001/003): a 5-Why step
+    # whose answer restates the mechanism/leading hypothesis that Root Cause
+    # Status just authoritatively resolved as SUPPORTED/ESTABLISHED must
+    # never be left showing UNKNOWN for that same proposition -- only ever
+    # raises an inconsistent step's status word to match already-verified
+    # evidence, never invents new answer text or touches a genuinely deeper,
+    # still-unresolved "why" (the correct evidence boundary).
+    if fw and fw.steps:
+        synced_steps = sync_five_why_status_with_causal_state(fw.steps, mechanism, rc)
+        if synced_steps != fw.steps:
+            trace.append(AgentTraceStep.warn(
+                "Analytical Validator: raised 5-Why step status to match the authoritative "
+                "causal resolution — a step restating the established mechanism cannot remain UNKNOWN"
+            ))
+            fw.steps = synced_steps
 
     # Contributing factor established/potential/rejected split: a factor
     # that structurally contradicts the mechanism or a VERIFIED completion

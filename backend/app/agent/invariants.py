@@ -65,7 +65,7 @@ def _check_financial_visibility(state: dict[str, Any]) -> tuple[bool, str | None
     cost_impact = state.get("cost_impact") or getattr(state.get("report"), "cost_impact", None)
     
     financial_pattern = re.compile(
-        r"₹|\$|€|£|INR|USD|EUR|\b(?:duplicate\s+payment|overpayment|financial\s+loss|monetary|cost\s+of\s+rework|scrap\s+cost|downtime\s+cost|penalty|fine|refund)\b",
+        r"₹|\$|€|£|INR|USD|EUR|\b(?:duplicate\s+payment|overpayment|financial\s+loss|monetary|cost\s+of\s+rework|rework\s+hours|rework\s+cost|rework|scrap\s+cost|scrap|downtime\s+cost|downtime|penalty|fine|refund)\b",
         re.IGNORECASE,
     )
     has_financial_signal = bool(financial_pattern.search(str(finding_text)))
@@ -220,6 +220,124 @@ def _check_rendering_and_malformed_amounts(state: dict[str, Any]) -> tuple[bool,
     return True, None
 
 
+def _leading_hypothesis_id(rc: Any) -> str | None:
+    """rc.leading_hypothesis is a DISPLAY string ("H1 — <statement>"), not a
+    bare id -- set by leading_hypothesis_display() in analytical_validator.py.
+    Extract the leading "H<n>" token it's always prefixed with."""
+    raw = getattr(rc, "leading_hypothesis", None)
+    if not raw:
+        return None
+    m = re.match(r"^(H\d+)\b", raw)
+    return m.group(1) if m else raw
+
+
+def _leading_hypothesis(rc: Any) -> Any | None:
+    lead_id = _leading_hypothesis_id(rc)
+    if not lead_id:
+        return None
+    for h in getattr(rc, "candidate_hypotheses", None) or []:
+        if h.id == lead_id:
+            return h
+    return None
+
+
+def _five_why_step_matches_statement(step: Any, statement: str) -> bool:
+    from app.services.text_grounding import significant_words
+    stmt_words = significant_words(statement or "")
+    answer_words = significant_words(getattr(step, "answer", None) or "")
+    if not stmt_words or not answer_words:
+        return False
+    overlap = stmt_words & answer_words
+    return len(overlap) >= max(2, len(stmt_words) // 2)
+
+
+def _check_causal_status_not_unknown_downstream(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-001: the authoritative leading hypothesis cannot be
+    SUPPORTED/ESTABLISHED while the 5-Why step reflecting the SAME
+    proposition still shows UNKNOWN -- the exact production inconsistency
+    ('Root Cause Status: ESTABLISHED' next to a 5-Why step for the same
+    mechanism reading UNKNOWN)."""
+    rc = state.get("root_cause")
+    fw = state.get("five_why")
+    if not rc or not fw or not getattr(fw, "steps", None):
+        return True, None
+    if getattr(rc.status, "value", rc.status) not in ("SUPPORTED", "ESTABLISHED", "VERIFIED"):
+        return True, None
+    leading = _leading_hypothesis(rc)
+    if not leading or not leading.statement:
+        return True, None
+    for step in fw.steps:
+        if step.status == "UNKNOWN" and _five_why_step_matches_statement(step, leading.statement):
+            return False, (
+                f"Root cause is {getattr(rc.status, 'value', rc.status)} via hypothesis {leading.id}, "
+                f"but 5-Why step {step.question!r} restates the same mechanism and is marked UNKNOWN"
+            )
+    return True, None
+
+
+def _check_causal_five_why_consistency(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-003: 5-Why status must be consistent with the authoritative
+    causal state for EVERY SUPPORTED/ESTABLISHED hypothesis, not only the
+    selected leading one -- a broader sweep than INV-CAUSAL-001."""
+    rc = state.get("root_cause")
+    fw = state.get("five_why")
+    if not rc or not fw or not getattr(fw, "steps", None):
+        return True, None
+    for h in getattr(rc, "candidate_hypotheses", None) or []:
+        if getattr(h, "status", "") not in ("SUPPORTED", "ESTABLISHED") or not h.statement:
+            continue
+        for step in fw.steps:
+            if step.status == "UNKNOWN" and _five_why_step_matches_statement(step, h.statement):
+                return False, (
+                    f"Hypothesis {h.id} is {h.status} but 5-Why step {step.question!r} "
+                    "restates the same mechanism and is marked UNKNOWN"
+                )
+    return True, None
+
+
+def _check_causal_provenance_for_promoted_hypothesis(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-002: every SUPPORTED/ESTABLISHED proposition must have at
+    least one valid supporting claim -- never SUPPORTED/ESTABLISHED with
+    zero evidence provenance."""
+    rc = state.get("root_cause")
+    if not rc:
+        return True, None
+    for h in getattr(rc, "candidate_hypotheses", None) or []:
+        if getattr(h, "status", "") in ("SUPPORTED", "ESTABLISHED"):
+            if not getattr(h, "supporting_evidence", None) and not getattr(h, "supporting_claim_ids", None):
+                return False, f"Hypothesis {h.id} is {h.status} with zero supporting evidence provenance"
+    return True, None
+
+
+def _check_investigation_targets_unresolved(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-004: an investigation question must not re-verify a
+    proposition the authoritative causal layer already resolved as
+    SUPPORTED/ESTABLISHED (a plain yes/no confirmation question testing the
+    already-leading hypothesis) -- questions must target the NEXT unresolved
+    causal layer, not re-prove what's already established."""
+    rc = state.get("root_cause")
+    inv = state.get("investigation_plan")
+    if not rc or not inv or not getattr(inv, "questions", None):
+        return True, None
+    leading = _leading_hypothesis(rc)
+    if not leading or getattr(leading, "status", "") not in ("SUPPORTED", "ESTABLISHED"):
+        return True, None
+    from app.services.text_grounding import significant_words
+    confirm_re = re.compile(r"^\s*(?:did|was|were|has|have|is|are)\b", re.IGNORECASE)
+    stmt_words = significant_words(leading.statement or "")
+    for q in inv.questions:
+        if getattr(q, "hypothesis_tested", None) != leading.id or not stmt_words:
+            continue
+        question_words = significant_words(q.question or "")
+        overlap = stmt_words & question_words
+        if confirm_re.match(q.question or "") and len(overlap) >= max(2, len(stmt_words) // 2):
+            return False, (
+                f"Investigation question {q.question!r} re-verifies already-{leading.status} "
+                f"hypothesis {leading.id} instead of targeting the next unresolved causal layer"
+            )
+    return True, None
+
+
 def _check_semantic_field_separation(state: dict[str, Any]) -> tuple[bool, str | None]:
     impact = state.get("impact_assessment")
     if not impact:
@@ -333,6 +451,34 @@ INVARIANT_REGISTRY: list[InvariantRule] = [
         severity=InvariantSeverity.BLOCKER,
         description="Unavailable referenced documents cannot have their contents asserted as evidence.",
         validate=_check_security_isolation,
+    ),
+    InvariantRule(
+        inv_id="INV-CAUSAL-001",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="A causal proposition cannot simultaneously be SUPPORTED/ESTABLISHED (root cause) and UNKNOWN (5-Why) for the same mechanism.",
+        validate=_check_causal_status_not_unknown_downstream,
+    ),
+    InvariantRule(
+        inv_id="INV-CAUSAL-002",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Every SUPPORTED/ESTABLISHED proposition must have valid evidence provenance.",
+        validate=_check_causal_provenance_for_promoted_hypothesis,
+    ),
+    InvariantRule(
+        inv_id="INV-CAUSAL-003",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="5-Why status must be consistent with the authoritative causal state for every SUPPORTED/ESTABLISHED hypothesis, not only the leading one.",
+        validate=_check_causal_five_why_consistency,
+    ),
+    InvariantRule(
+        inv_id="INV-CAUSAL-004",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.WARNING,
+        description="Investigation questions must target the next unresolved causal layer, not re-verify an already-established proposition.",
+        validate=_check_investigation_targets_unresolved,
     ),
 ]
 

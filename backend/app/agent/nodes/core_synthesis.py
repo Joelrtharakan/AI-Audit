@@ -1489,31 +1489,56 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             contributing_factors = []
             llm_metrics.increment("deterministic_hypotheses_generated", len(fallback_hyps))
 
+            from app.agent.causal_graph import evaluate_root_cause_eligibility, select_authoritative_leading_hypothesis
             for h in fallback_hyps:
-                h.confidence = hypothesis_confidence(h)
-            leading_hypothesis = leading_hypothesis_display(fallback_hyps)
+                el, supp, _, _, c_lvl, promo = evaluate_root_cause_eligibility(
+                    h,
+                    evidence_items=evidence_ledger,
+                    conflicts=canonical.evidence_conflicts if canonical else None,
+                    referenced_docs=canonical.referenced_documents if canonical else None,
+                )
+                if promo and supp == SupportLevel.SUPPORTED:
+                    h.status = "SUPPORTED"
+                    h.causal_level = c_lvl
+
+            lead_id, lead_mode, authoritative_rc_status, lead_rationale = select_authoritative_leading_hypothesis(
+                fallback_hyps,
+                conflicts=canonical.evidence_conflicts if canonical else None,
+                evidence_ledger=evidence_ledger,
+            )
 
             rc_basis = (
                 "Available evidence contains conflicting reported statements regarding completion. Objective records are required to determine the actual state."
                 if has_unresolved_conflict
-                else "Root cause is not established from the available evidence alone; objective records are required to confirm the causal mechanism."
+                else ("Objective records establish the verified causal factor for this finding."
+                      if authoritative_rc_status in (RootCauseStatus.ESTABLISHED, RootCauseStatus.SUPPORTED)
+                      else "Root cause is not established from the available evidence alone; objective records are required to confirm the causal mechanism.")
             )
 
+            lead_status_literal = "SELECTED" if lead_mode == "SELECTED" else ("TIED" if lead_mode == "TIED" else "NONE")
             root_cause = RootCauseAnalysis(
-                status=RootCauseStatus.NOT_ESTABLISHED,
+                status=authoritative_rc_status,
                 category="TO_BE_CONFIRMED",
                 candidate_hypotheses=fallback_hyps,
-                leading_hypothesis=leading_hypothesis,
-                leading_hypothesis_status=leading_hypothesis_status(fallback_hyps),
+                leading_hypothesis=lead_id if authoritative_rc_status != RootCauseStatus.NOT_ESTABLISHED else None,
+                leading_hypothesis_status=lead_status_literal,
+                leading_hypothesis_rationale=lead_rationale,
                 root_cause_basis=rc_basis,
                 evidence_required=["Auditor investigation and objective records required to confirm root cause."],
                 narrative=(
-                    "The available evidence establishes the observed condition but does not establish why it occurred. "
-                    "Auditor investigation is required to verify the candidate causal hypotheses."
+                    "The available evidence establishes the observed condition and verified records confirm the underlying causal mechanism."
+                    if authoritative_rc_status in (RootCauseStatus.ESTABLISHED, RootCauseStatus.SUPPORTED)
+                    else "The available evidence establishes the observed condition but does not establish why it occurred. Auditor investigation is required to verify the candidate causal hypotheses."
                 ),
             )
             from app.agent.analytical_validator import apply_conflict_tie_override
             apply_conflict_tie_override(root_cause, has_unresolved_conflict)
+
+            from app.agent.recurrence_guard import detect_recurrence
+            recurrence_info = detect_recurrence(request.finding_text)
+            if recurrence_info.is_recurring:
+                root_cause.risk_of_recurrence = "HIGH"
+                root_cause.risk_of_recurrence_rationale = f"Recurrence history identified ({recurrence_info.capa_id or 'previous CAPA'}); prior corrective actions were ineffective in preventing reoccurrence."
 
             # CAPA areas reuse the same dynamically-derived, finding-grounded
             # investigation plan used for hypotheses above rather than a fixed

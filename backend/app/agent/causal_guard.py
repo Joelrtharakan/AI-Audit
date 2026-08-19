@@ -65,6 +65,22 @@ _KNOWLEDGE_GAP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A technical/infrastructure component itself failed -- distinct from the
+# three human-action polarities above (a system doesn't "perform", "record",
+# or "know" anything). Reuses the same server/service/queue vocabulary
+# causal_graph.py's has_system_outage check already treats as verified
+# causal proof for hypothesis eligibility -- extract_immediate_mechanism was
+# previously blind to this shape entirely (it only recognized human-action
+# mechanisms), so a verified "the notification service crashed" claim never
+# became a 5-Why mechanism step even though it was already accepted
+# elsewhere in the pipeline as VERIFIED causal proof for the hypothesis.
+_SYSTEM_FAILURE_RE = re.compile(
+    r"\b(?:server|system|service|channel|network|queue|message\s+queue)\b"
+    r"(?:(?!\.).){0,40}?"
+    r"\b(?:outage|failure|down|crashed|unresponsive|failed)\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class MechanismInfo:
@@ -86,6 +102,8 @@ def classify_mechanism_polarity(text: str) -> str | None:
         return "non_recording"
     if _KNOWLEDGE_GAP_RE.search(text):
         return "knowledge_gap"
+    if _SYSTEM_FAILURE_RE.search(text):
+        return "system_failure"
     return None
 
 
@@ -851,7 +869,7 @@ _SCHEDULING_CONCEPT_PATTERN = (
 # treated symmetrically against whatever form of that same concept the
 # finding itself may (or may not) independently use.
 _NOTIFICATION_CONCEPT_PATTERN = (
-    r"\bnotif\w*\b|\bnotice\b|\bcommunicat\w*\b|\bdistribut\w*\b|\backnowledg\w*\b|\bannounc\w*\b"
+    r"\bnotif\w*\b|\bnotice\b|\bcommunicat\w*\b|\bdistribut\w*\b|\backnowledg\w*\b|\bannounc\w*\b|\bdeliver\w*\b|\bdispatch\w*\b"
 )
 
 _UNSUPPORTED_SPECIFICITY_CHECKS = [

@@ -1085,11 +1085,11 @@ def leading_hypothesis_confidence(candidate_hypotheses: list, leading_hypothesis
 # ---------------------------------------------------------------------------
 
 # Statuses that assert a causal relationship has actually been established
-# (mapped onto the existing RootCauseStatus vocabulary: VERIFIED and
-# SUPPORTED are the "don't claim this without evidence" tier; STATED_UNVERIFIED
-# and INFERRED are already self-labeled as unconfirmed; NOT_ESTABLISHED and
-# CONTRADICTED never need downgrading).
-_ESTABLISHED_LIKE_STATUSES = {"VERIFIED", "SUPPORTED"}
+# (mapped onto the existing RootCauseStatus vocabulary: VERIFIED, SUPPORTED,
+# and ESTABLISHED are the "don't claim this without evidence" tier;
+# STATED_UNVERIFIED and INFERRED are already self-labeled as unconfirmed;
+# NOT_ESTABLISHED and CONTRADICTED never need downgrading).
+_ESTABLISHED_LIKE_STATUSES = {"VERIFIED", "SUPPORTED", "ESTABLISHED"}
 
 
 def validate_root_cause_state(root_cause, mechanism: MechanismInfo | None) -> list[str]:
@@ -1105,6 +1105,15 @@ def validate_root_cause_state(root_cause, mechanism: MechanismInfo | None) -> li
     claim, e.g. "the audit trail confirms the user was never assigned the
     task") justifies root_cause claiming this level of certainty. A REPORTED
     mechanism (someone's account of what happened) never does.
+
+    `mechanism` (extract_immediate_mechanism's own pattern-matched read of
+    the evidence ledger) is one signal but not the only authoritative one --
+    the leading hypothesis's own evidence_strength was independently,
+    deterministically computed by the same causal-eligibility layer that
+    promoted root_cause.status in the first place (Section 1: "one
+    authoritative causal truth"), and disagreeing with it here would just
+    re-introduce a second, competing verification check. Either signal
+    being VERIFIED is sufficient grounding.
     """
     warnings: list[str] = []
     if root_cause is None:
@@ -1113,7 +1122,16 @@ def validate_root_cause_state(root_cause, mechanism: MechanismInfo | None) -> li
     status_value = getattr(root_cause.status, "value", root_cause.status)
     if status_value in _ESTABLISHED_LIKE_STATUSES:
         mechanism_is_verified = bool(mechanism and mechanism.status == "VERIFIED")
-        if not mechanism_is_verified:
+        # root_cause.leading_hypothesis is a DISPLAY string ("H1 — <statement>"),
+        # not a bare id -- see leading_hypothesis_display() below.
+        _raw_leading = getattr(root_cause, "leading_hypothesis", None) or ""
+        _leading_id_match = re.match(r"^(H\d+)\b", _raw_leading)
+        leading_id = _leading_id_match.group(1) if _leading_id_match else _raw_leading
+        leading_hyp_verified = any(
+            h.id == leading_id and getattr(h, "evidence_strength", "") == "VERIFIED"
+            for h in (getattr(root_cause, "candidate_hypotheses", None) or [])
+        )
+        if not (mechanism_is_verified or leading_hyp_verified):
             warnings.append(
                 f"Analytical Validator: root_cause.status={status_value} downgraded to STATED_UNVERIFIED "
                 "— no VERIFIED causal mechanism (as opposed to a VERIFIED observation or a REPORTED "
@@ -1198,6 +1216,86 @@ def repair_five_why_with_mechanism(five_why_steps: list, mechanism: MechanismInf
     if repeats_previous_why_answer(first.answer, mechanism.statement):
         return five_why_steps
     return [five_why_steps[0], mechanism_step, *five_why_steps[1:]]
+
+
+# Root-cause status values whose 5-Why status word this repair may assign --
+# never a status the mechanism/root-cause layer itself didn't earn (e.g. this
+# never writes "ESTABLISHED" onto a step; FiveWhyStep's own vocabulary caps
+# out at "VERIFIED"/"SUPPORTED" for a causally-grounded step).
+_STATUS_INCONSISTENT_WITH_ESTABLISHED_MECHANISM = {"UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED"}
+
+
+def sync_five_why_status_with_causal_state(
+    five_why_steps: list,
+    mechanism: MechanismInfo | None,
+    root_cause=None,
+) -> list:
+    """Cross-node consistency repair (Section 3/12, INV-CAUSAL-001/003): a
+    5-Why step whose answer IS the already-VERIFIED/REPORTED immediate
+    mechanism (or the authoritative leading hypothesis's own statement) must
+    never be left at status="UNKNOWN"/"REQUIRES_EVIDENCE"/"NOT_ESTABLISHED" --
+    that is precisely the inconsistency where Root Cause Status reads
+    SUPPORTED/ESTABLISHED while the 5-Why chain shows the same mechanism as
+    unresolved. This only ever RAISES a step's status word to match evidence
+    the mechanism/root-cause layer already independently verified; it never
+    invents new answer text and never touches a step whose answer doesn't
+    substantially overlap the established mechanism (a genuinely deeper,
+    still-unknown "why" beneath it is correctly left at UNKNOWN -- that is
+    the evidence boundary, not a defect).
+
+    Returns a NEW list; caller updates FiveWhyAnalysis.steps."""
+    if not five_why_steps:
+        return five_why_steps
+
+    from app.models.agent import FiveWhyStep
+
+    leading_stmt = None
+    # root_cause.leading_hypothesis is a DISPLAY string ("H1 — <statement>"),
+    # not a bare id, by the time this runs (leading_hypothesis_display() has
+    # already overwritten it earlier in the pipeline) -- extract the id.
+    _raw_leading = getattr(root_cause, "leading_hypothesis", None) or ""
+    _leading_id_match = re.match(r"^(H\d+)\b", _raw_leading)
+    leading_id = _leading_id_match.group(1) if _leading_id_match else (_raw_leading or None)
+    if leading_id and getattr(root_cause, "candidate_hypotheses", None):
+        for h in root_cause.candidate_hypotheses:
+            if h.id == leading_id:
+                leading_stmt = h.statement
+                break
+
+    targets: list[tuple[str, str]] = []  # (statement, resolved_status)
+    if mechanism and mechanism.statement and mechanism.status in ("VERIFIED", "REPORTED"):
+        targets.append((mechanism.statement, "VERIFIED" if mechanism.status == "VERIFIED" else "SUPPORTED"))
+    rc_status = getattr(getattr(root_cause, "status", None), "value", getattr(root_cause, "status", None))
+    if leading_stmt and rc_status in ("ESTABLISHED", "SUPPORTED", "VERIFIED"):
+        targets.append((leading_stmt, "VERIFIED" if rc_status in ("ESTABLISHED", "VERIFIED") else "SUPPORTED"))
+
+    if not targets:
+        return five_why_steps
+
+    changed = False
+    new_steps = []
+    for step in five_why_steps:
+        if step.status not in _STATUS_INCONSISTENT_WITH_ESTABLISHED_MECHANISM:
+            new_steps.append(step)
+            continue
+        answer_words = significant_words(step.answer or "")
+        resolved_status = None
+        if answer_words:
+            for target_stmt, target_status in targets:
+                target_words = significant_words(target_stmt)
+                if not target_words:
+                    continue
+                overlap = answer_words & target_words
+                if len(overlap) >= max(2, len(target_words) // 2):
+                    resolved_status = target_status
+                    break
+        if resolved_status:
+            new_steps.append(step.model_copy(update={"status": resolved_status}))
+            changed = True
+        else:
+            new_steps.append(step)
+
+    return new_steps if changed else five_why_steps
 
 
 # ---------------------------------------------------------------------------

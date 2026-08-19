@@ -83,7 +83,7 @@ _SUPERVISOR_RE = re.compile(
 # Polarity detection: positive ("was completed") vs negative ("was not completed")
 _NEGATIVE_POLARITY_RE = re.compile(
     r"\b(not\s+(?:received|completed|performed|conducted|done|provided|given|attended|"
-    r"assigned|delivered|available|accessible|found|present|documented|recorded|"
+    r"assigned|delivered|distributed|available|accessible|found|present|documented|recorded|"
     r"maintained|updated|followed|applied|verified|confirmed|communicated|informed|"
     r"notified|acknowledged|opened|accessed|viewed|retrieved|approved|granted|authorized)|"
     r"had\s+not\s+(?:received|completed|been)|"
@@ -92,7 +92,7 @@ _NEGATIVE_POLARITY_RE = re.compile(
     r"was\s+never\s+(?:available|accessible|found|present|opened|given|granted)|"
     r"missing|absent|unavailable|incomplete|unaware|not\s+aware|"
     r"\bno\s+[\w\s-]{1,60}?\s*(?:was|were|has\s+been|have\s+been|could\s+be)?\s*(?:completed|performed|conducted|"
-    r"done|provided|given|received|attended|delivered|assigned|available|accessible|found|present|"
+    r"done|provided|given|received|attended|delivered|distributed|assigned|available|accessible|found|present|"
     r"documented|recorded|maintained|updated|followed|applied|verified|confirmed|informed|notified|located))\b",
     re.IGNORECASE,
 )
@@ -105,14 +105,14 @@ _POSITIVE_POLARITY_RE = re.compile(
     # every active-voice claim entirely.
     r"\b(?:(?:was|were|has\s+been|have\s+been|had\s+been)\s+)?"
     r"(?:completed|performed|conducted|provided|given|received|attended|"
-    r"delivered|assigned|documented|recorded|opened|accessed|viewed|retrieved|approved|"
+    r"delivered|distributed|assigned|documented|recorded|opened|accessed|viewed|retrieved|approved|"
     r"granted|authorized|"
     r"maintained|updated|followed|applied|verified|confirmed|informed|notified|acknowledged|"
-    r"dispatched|dispatch|delivered|delivery|sent|transmitted|transmission)\b|"
+    r"dispatched|dispatch|delivered|delivery|distributed|distribution|sent|transmitted|transmission)\b|"
     r"\b(?:was|were|has\s+been|have\s+been|had\s+been)\s+(?:done|available|accessible|found|present)\b|"
     # "<Record/system/log> shows/show/records/indicates/confirms <completion/
-    # approval/delivery/receipt/dispatch>"
-    r"\b(?:shows?|records?|indicates?|confirms?|establishes?)\s+(?:[\w\s]{0,20}?\s+)?(?:completion|approval|delivery|receipt|dispatch|transmission)\b",
+    # approval/delivery/receipt/dispatch/distribution>"
+    r"\b(?:shows?|records?|indicates?|confirms?|establishes?)\s+(?:[\w\s]{0,20}?\s+)?(?:completion|approval|delivery|receipt|dispatch|distribution|transmission)\b",
     re.IGNORECASE,
 )
 
@@ -122,7 +122,8 @@ _AUDITOR_SPEAKER_RE = re.compile(
     re.IGNORECASE,
 )
 _SYSTEM_RECORD_SPEAKER_RE = re.compile(
-    r"\b(?:system\s+logs?|system\s+records?|audit\s+logs?|audit\s+trail|server\s+logs?|dispatch\s+logs?|lms\s+records?|training\s+records?|distribution\s+logs?|calibration\s+records?|maintenance\s+logs?|temperature\s+logs?|inspection\s+records?)\b",
+    r"\b(?:system|audit|server|dispatch|lms|training|distribution|calibration|maintenance|temperature|inspection|access|database|equipment|bank|accounting|scada|error)\s+(?:system\s+|training\s+|error\s+)?(?:logs?|records?|trail|history|memo|certificate|subledger|statement)\b|"
+    r"\b(?:dispatch\s+system|scada\s+system|server\s+error\s+logs?|bank\s+credit\s+memo)\b",
     re.IGNORECASE,
 )
 _EVIDENCE_AVAILABILITY_RE = re.compile(

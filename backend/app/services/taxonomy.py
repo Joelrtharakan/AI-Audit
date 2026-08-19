@@ -14,6 +14,10 @@ class RootCauseCategory(str, Enum):
     MATERIAL = "MATERIAL"
     MEASUREMENT = "MEASUREMENT"
     ENVIRONMENT_MGMT = "ENVIRONMENT_MGMT"
+    MANAGEMENT_SYSTEM = "MANAGEMENT_SYSTEM"
+    TECHNOLOGY = "TECHNOLOGY"
+    GOVERNANCE = "GOVERNANCE"
+    CHANGE_MANAGEMENT = "CHANGE_MANAGEMENT"
     OTHER = "OTHER"
 
 
@@ -41,6 +45,22 @@ TAXONOMY: dict[str, dict[str, str]] = {
     RootCauseCategory.ENVIRONMENT_MGMT: {
         "label": "Environment / Management",
         "description": "Resourcing decision / communication breakdown / management system gap",
+    },
+    RootCauseCategory.MANAGEMENT_SYSTEM: {
+        "label": "Management System",
+        "description": "Systemic management oversight, audit governance, or policy structure gap",
+    },
+    RootCauseCategory.TECHNOLOGY: {
+        "label": "Technology",
+        "description": "Software configuration, automated control system, or IT infrastructure error",
+    },
+    RootCauseCategory.GOVERNANCE: {
+        "label": "Governance",
+        "description": "Compliance governance, delegation of authority, or authorization structure failure",
+    },
+    RootCauseCategory.CHANGE_MANAGEMENT: {
+        "label": "Change Management",
+        "description": "Uncontrolled procedure, system, or configuration modification without validation",
     },
     RootCauseCategory.OTHER: {
         "label": "Other",

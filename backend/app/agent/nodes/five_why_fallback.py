@@ -119,7 +119,7 @@ def build_deterministic_five_why(
         why1_q = format_deviation_why_question(
             resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
         )
-        why1_ans = f"The evidence establishes that {deviation_clause}."
+        why1_ans = f"Audit observation confirms that {deviation_clause} was identified during inspection."
         steps.append(FiveWhyStep(
             question=why1_q,
             answer=why1_ans,
@@ -284,10 +284,15 @@ def build_deterministic_five_why(
 
     # 2. Single Reported Mechanism (e.g. Case 1, Case 2, Case 3, Case 4)
     if mechanism.status == "REPORTED" and mechanism.statement:
+        from app.services.semantic_subject import _strip_framing
+        deviation_fact = fact_claims[0] if fact_claims else deviation_desc
+        deviation_clause = _strip_framing(deviation_fact).strip().rstrip(".")
+        if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
+            deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
         why1_question = format_deviation_why_question(
             resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
         )
-        why1_answer = fact_claims[0] if fact_claims else deviation_desc
+        why1_answer = f"Audit observation confirms that {deviation_clause} occurred during inspection."
         steps.append(FiveWhyStep(
             question=why1_question,
             answer=why1_answer,

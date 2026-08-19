@@ -19,7 +19,7 @@ from enum import Enum
 import re
 from dataclasses import dataclass, field
 
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|,\s*while\s+|,\s*whereas\s+", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Pronouns and clause stop-words
@@ -61,6 +61,11 @@ _FRAMING_PREFIXES = [
     re.compile(
         r"^\s*(?:the\s+)?(?:responsible\s+)?(?:technician|operator|staff|employee|supervisor|analyst|manager|trainer)\s+"
         r"(?:stated|confirmed|reported|said|noted|claimed|indicated)\s+(?:that\s+)?",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*(?:however\s*,\s*|nevertheless\s*,\s*|but\s*,\s*|in\s+contrast\s*,\s*)", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:(?:scada|server|system|audit|dispatch|distribution|security\s+badge|error)\s+(?:system\s+|error\s+)?logs?\s+(?:establish|proves?|shows?|confirms?|indicates?)\s+(?:that\s+)?)",
         re.IGNORECASE,
     ),
 ]
@@ -268,8 +273,18 @@ def strip_quantity_prefix(text: str | None) -> str | None:
 
 def _clean_subject(raw: str) -> str:
     s = raw.strip().strip("\"'").strip()
-    s = re.sub(r"^(?:that|which|who)\s+", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^(?:that|which|who|from|of|in|to)\s+", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(
+        r"^(?:audit\s+trail\s+(?:proves|shows|confirms|establishes)|"
+        r"scada\s+system\s+logs?\s+(?:establish|proves|shows|confirms)|"
+        r"server\s+(?:error\s+)?logs?\s+(?:establish|proves|shows|confirms)|"
+        r"dispatch\s+system\s+logs?\s+(?:confirms|shows|establishes))\s+(?:that\s+)?",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    ).strip()
     s = re.sub(r"^(?:a|an|the)\s+", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^(?:from|of|in|to)\s+", "", s, flags=re.IGNORECASE).strip()
     s = _QUANTITY_PREFIX_RE.sub("", s).strip()
     s = re.sub(r"\s+", " ", s).strip(" ,.;:")
     return s
@@ -401,8 +416,9 @@ def classify_finding_specificity(
     has_mechanism = bool(mechanism_status) and mechanism_status not in ("UNKNOWN", "NONE")
     has_condition = bool(deviation_condition) and deviation_condition.strip() not in _DEGRADED_CONDITIONS
     has_financial_signal = bool(re.search(r"₹|\$|€|£|INR|USD|EUR|duplicate\s+payment|overpayment|batch\s+worth", text, re.IGNORECASE))
+    has_system_record = bool(re.search(r"\b(?:server|system|audit|database|lms|calibration)\s+(?:logs?|records?|trail)\b|\b\d{1,2}:\d{2}\b", text, re.IGNORECASE))
 
-    concrete_signals = sum([has_entity, has_date_or_period, has_reported, has_mechanism, has_condition, has_financial_signal])
+    concrete_signals = sum([has_entity, has_date_or_period, has_reported, has_mechanism, has_condition, has_financial_signal, has_system_record])
     if concrete_signals == 0:
         return "LOW"
     if concrete_signals >= 2:
@@ -785,10 +801,24 @@ _CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         ),
     ),
     (
+        "preventing",
+        re.compile(
+            r"^(?P<cause>.+?)\s+(?:preventing|precluding|delaying)\s+(?:the\s+|an?\s+)?(?P<subject>.+?)\s*\.?$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "not_state",
         re.compile(
-            r"^(?P<subject>.+?)\s+(?:was|were|did)\s+not\s+(?P<cond>[a-z]+(?:\s+[a-z]+){0,4}?)"
+            r"^(?P<subject>.+?)\s+(?:was|were|did)\s+not\s+(?P<cond>[a-z]+(?:\s+[a-z0-9-]+)*?)"
             r"\s*(?:\bfor\b.*|\bfrom\b.*|\bon\b.*)?\.?$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "actor_action",
+        re.compile(
+            r"^(?P<subject>.+?)\s+(?P<cond>(?:misread|misrecorded|miscalculated|misapplied|mishandled|incorrectly\s+[a-z]+)\s+(?:the\s+|an?\s+)?(?P<obj>[a-z0-9\s-]+?))\s*\.?$",
             re.IGNORECASE,
         ),
     ),
@@ -797,7 +827,7 @@ _CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         re.compile(
             r"^(?P<subject>.+?)\s+(?:was|were)\s+"
             r"(?P<cond>incomplete|missing|unavailable|overdue|expired|nonconforming|inaccurate|"
-            r"inadequate|out of date|outdated|unverified|missed)\b.*$",
+            r"inadequate|out of date|outdated|unverified|missed|disabled|deactivated|bypassed|overridden)\b.*$",
             re.IGNORECASE,
         ),
     ),
@@ -815,6 +845,14 @@ _CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         re.compile(r"^(?P<subject>.+?)\s+failed\s+to\s+(?P<cond>[a-z][a-z\s]*?)\s*\.?$", re.IGNORECASE),
     ),
     (
+        "forgot_to",
+        re.compile(r"^(?P<subject>.+?)\s+(?:forgot\s+to|neglected\s+to)\s+(?P<cond>[a-z][a-z\s]*?)\s*\.?$", re.IGNORECASE),
+    ),
+    (
+        "causative_verb",
+        re.compile(r"^(?P<subject>.+?)\s+(?:created|caused|resulted\s+in|led\s+to|generated)\s+(?P<cond>.*)$", re.IGNORECASE),
+    ),
+    (
         "outside_scope",
         re.compile(
             r"^(?P<subject>.+?)\s+(?:was|were)\s+(?P<verb>operated|used|performed|conducted|run|stored|handled)"
@@ -822,6 +860,29 @@ _CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
             r"tolerance|threshold))\b.*$",
             re.IGNORECASE,
         ),
+    ),
+    (
+        "missed",
+        re.compile(r"^(?P<subject>.+?)\s+(?:was|were)?\s*(?:missed|skipped|omitted)\s+(?:from\s+|by\s+|in\s+)?(?:the\s+|an?\s+)?(?P<obj>[a-z0-9\s-]+?)\s*\.?$", re.IGNORECASE),
+    ),
+    (
+        "bypassed",
+        re.compile(r"^(?P<subject>.+?)\s+(?:deliberately\s+|intentionally\s+|accidentally\s+)?(?:bypassed|disabled|deactivated|overrode|overridden|defeated)\s+(?:the\s+|an?\s+)?(?P<obj>[a-z0-9\s-]+?)\s*\.?$", re.IGNORECASE),
+    ),
+    (
+        "system_operated",
+        re.compile(
+            r"^(?P<subject>.+?)\s+(?:was|were)\s+(?P<verb>operated|accessed|entered|modified|executed)\s+(?P<cond>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "metric_drift",
+        re.compile(r"^(?P<subject>.+?)\s+(?P<cond>(?:increased|decreased|rose|drifted|exceeded)\b.*?)\s*\.?$", re.IGNORECASE),
+    ),
+    (
+        "out_of_spec",
+        re.compile(r"^(?P<subject>.+?)\s+(?:was|were)\s+(?P<cond>out\s+of\s+specification|out\s+of\s+spec|out\s+of\s+limits?|out\s+of\s+tolerance)\b.*$", re.IGNORECASE),
     ),
     (
         "bare_failed",
@@ -982,7 +1043,7 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
 
     t_low = text.lower()
     # 0. Specialized Domain-Level Semantic Classification (Section 1 & 11)
-    if "duplicate payment" in t_low or "paid twice" in t_low or "double payment" in t_low:
+    if re.search(r"\b(?:duplicate\s+(?:supplier\s+|vendor\s+|invoice\s+)?payments?|paid\s+twice|double\s+payments?)\b", t_low):
         affected_obj = "Duplicate payment to supplier"
         finding_subj = "Duplicate payment to supplier"
         process_name = "Accounts Payable — Payment Processing"
@@ -1144,13 +1205,33 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                         cond_str = "not trained"
                         sem_type = "ACTIVITY"
                     else:
-                        clean_cond = _clean_subject(cond)
-                        affected_obj = f"{clean_cond[0].upper() + clean_cond[1:]} compliance"
-                        process_name = f"{topic_word(clean_cond).capitalize()} operational control"
-                        activity_name = f"{clean_cond[0].upper() + clean_cond[1:]} activity"
-                        dev_str = f"{actor_name} — not {cond}"
-                        cond_str = f"not {cond}"
-                        sem_type = "ACTIVITY"
+                        m_did = re.search(r"did\s+not\s+(?P<verb>[a-z]+(?:\s+out)?)\s+(?:the\s+|an?\s+)?(?P<obj>[a-z0-9\s-]+?)(?:\s+(?:before|during|after|on|in|at)\b|\.|$)", sentence, re.IGNORECASE)
+                        if m_did:
+                            v = m_did.group("verb").lower()
+                            target_obj = _clean_subject(m_did.group("obj"))
+                            clean_cap = target_obj[0].upper() + target_obj[1:]
+                            if v in ("initial", "sign", "complete", "fill", "fill out", "perform", "conduct", "execute", "log", "record"):
+                                affected_obj = f"{clean_cap} completion" if not target_obj.lower().endswith("completion") else clean_cap
+                                process_name = f"{topic_word(target_obj).capitalize()} monitoring and record control"
+                                activity_name = f"{v.capitalize()} {target_obj}"
+                                dev_str = f"Required {target_obj} not completed"
+                                cond_str = f"not {v}ed"
+                                sem_type = "RECORD"
+                            else:
+                                affected_obj = f"{clean_cap} execution"
+                                process_name = f"{topic_word(target_obj).capitalize()} operational control"
+                                activity_name = f"{clean_cap} activity"
+                                dev_str = f"{actor_name} did not {v} {target_obj}"
+                                cond_str = f"not {v}ed"
+                                sem_type = "ACTIVITY"
+                        else:
+                            clean_cond = _clean_subject(cond)
+                            affected_obj = f"{clean_cond[0].upper() + clean_cond[1:]} compliance"
+                            process_name = f"{topic_word(clean_cond).capitalize()} operational control"
+                            activity_name = f"{clean_cond[0].upper() + clean_cond[1:]} activity"
+                            dev_str = f"{actor_name} — not {cond}"
+                            cond_str = f"not {cond}"
+                            sem_type = "ACTIVITY"
 
                     relevant_change = "Revision of the procedure" if "revised" in sentence.lower() or "revision" in sentence.lower() else None
                     return DeviationInfo(
@@ -1167,6 +1248,167 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                         entities=entities,
                         semantic_type=sem_type,
                         relevant_change=relevant_change,
+                        matched=True,
+                    )
+
+                if name == "preventing" and groups.get("subject"):
+                    target_subj = _clean_subject(groups["subject"])
+                    cause_desc = groups.get("cause", "technical failure").strip()
+                    clean_cap = target_subj[0].upper() + target_subj[1:]
+                    affected_obj = clean_cap
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=f"{topic_word(target_subj).capitalize()} operational control",
+                        affected_activity=f"{clean_cap} execution",
+                        deviation=f"{clean_cap} prevented by {cause_desc}",
+                        condition="prevented",
+                        date=date,
+                        actors=actors,
+                        entities=entities,
+                        semantic_type="CONTROL",
+                        matched=True,
+                    )
+
+                if name == "actor_action" and cond:
+                    m_obj = groups.get("obj")
+                    target_obj = _clean_subject(m_obj) if m_obj else "equipment"
+                    clean_cap = target_obj[0].upper() + target_obj[1:]
+                    affected_obj = f"{clean_cap} operation and measurement" if any(w in target_obj.lower() for w in ("scale", "balance", "meter", "gauge", "instrument")) else f"{clean_cap} operational control"
+                    process_name = f"{topic_word(target_obj).capitalize()} operation and measurement control"
+                    activity_name = f"{clean_cap} measurement and adherence"
+                    dev_str = f"{actor_name} — {cond}"
+                    cond_str = cond
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=process_name,
+                        affected_activity=activity_name,
+                        deviation=dev_str,
+                        condition=cond_str,
+                        date=date,
+                        actor=actor_name,
+                        actors=[actor_name] + [a for a in actors if a != actor_name],
+                        entities=entities,
+                        semantic_type="ACTIVITY",
+                        matched=True,
+                    )
+
+                if name == "forgot_to" and cond:
+                    m_item = re.search(r"(?:initial|sign|complete|fill|record|log|perform)\s+(?:the\s+|an?\s+)?(?P<item>[a-z0-9\s-]+?)(?:\s*\.?$)", cond, re.IGNORECASE)
+                    item_name = _clean_subject(m_item.group("item")) if m_item else "log sheet"
+                    clean_cap = item_name[0].upper() + item_name[1:]
+                    affected_obj = f"{clean_cap} verification" if not item_name.lower().endswith("verification") else clean_cap
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=f"{topic_word(item_name).capitalize()} completion and verification control",
+                        affected_activity=f"{clean_cap} documentation",
+                        deviation=f"{clean_cap} — {cond}",
+                        condition=cond,
+                        date=date,
+                        actor=actor_name if is_actor_noun(raw_subj) else None,
+                        actors=actors,
+                        entities=entities,
+                        semantic_type="RECORD",
+                        matched=True,
+                    )
+
+                if name == "system_operated":
+                    clean_cap = subj[0].upper() + subj[1:] if subj else "System"
+                    v = groups.get("verb", "operation")
+                    affected_obj = f"{clean_cap} {v}"
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=f"{clean_cap} access and operational control",
+                        affected_activity=f"{clean_cap} {v}",
+                        deviation=f"{clean_cap} — {v} {cond}",
+                        condition=f"{v} {cond}",
+                        date=date,
+                        actors=actors,
+                        entities=entities,
+                        semantic_type="ACTIVITY",
+                        matched=True,
+                    )
+
+                if name == "causative_verb":
+                    clean_subj_cap = subj[0].upper() + subj[1:]
+                    affected_obj = f"{clean_subj_cap} control"
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=f"{topic_word(subj).capitalize()} operational control",
+                        affected_activity=f"{clean_subj_cap} review",
+                        deviation=f"{clean_subj_cap} — {cond}",
+                        condition=cond or "deviation",
+                        date=date,
+                        actors=actors,
+                        entities=entities,
+                        semantic_type="FINANCIAL" if any(w in subj.lower() for w in ("invoice", "payment", "fee", "cost")) else "ACTIVITY",
+                        matched=True,
+                    )
+
+                if name == "missed" and groups.get("obj"):
+                    target_obj = _clean_subject(groups["obj"])
+                    clean_cap = target_obj[0].upper() + target_obj[1:]
+                    affected_obj = f"{clean_cap} execution" if not target_obj.lower().endswith("execution") else clean_cap
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=f"{topic_word(target_obj).capitalize()} process and compliance control",
+                        affected_activity=f"{clean_cap} activity",
+                        deviation=f"{clean_cap} missed",
+                        condition="missed",
+                        date=date,
+                        actor=actor_name if is_actor_noun(raw_subj) else None,
+                        actors=actors,
+                        entities=entities,
+                        semantic_type="RECORD" if any(w in target_obj.lower() for w in ("log", "sheet", "record", "checklist", "check")) else "ACTIVITY",
+                        matched=True,
+                    )
+
+                if name == "bypassed" and groups.get("obj"):
+                    target_obj = _clean_subject(groups["obj"])
+                    clean_cap = target_obj[0].upper() + target_obj[1:]
+                    affected_obj = f"{clean_cap} compliance" if not target_obj.lower().endswith("compliance") else clean_cap
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=f"{topic_word(target_obj).capitalize()} operational control",
+                        affected_activity=f"{clean_cap} enforcement",
+                        deviation=f"{clean_cap} bypassed",
+                        condition="bypassed",
+                        date=date,
+                        actor=actor_name if is_actor_noun(raw_subj) else None,
+                        actors=actors,
+                        entities=entities,
+                        semantic_type="CONTROL",
+                        matched=True,
+                    )
+
+                if name == "metric_drift":
+                    clean_subj_cap = subj[0].upper() + subj[1:]
+                    affected_obj = f"{clean_subj_cap} control"
+                    return DeviationInfo(
+                        subject=affected_obj,
+                        finding_subject=affected_obj,
+                        affected_object=affected_obj,
+                        affected_process=f"{topic_word(subj).capitalize()} monitoring and process control",
+                        affected_activity=f"{clean_subj_cap} monitoring",
+                        deviation=f"{clean_subj_cap} — {cond}",
+                        condition=cond or "out of range",
+                        date=date,
+                        actors=actors,
+                        entities=entities,
+                        semantic_type="PARAMETER",
                         matched=True,
                     )
 

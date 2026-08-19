@@ -96,7 +96,7 @@ _IRRECOVERABLE_RE = re.compile(
 )
 
 _REFUND_RE = re.compile(
-    r"\b(?:refund(?:ed|s)?|recover(?:ed|y)?|credit(?:ed)?|revers(?:ed|al)?)\b",
+    r"\b(?:refund(?:ed|s)?|recover(?:ed|y)?|credit(?:ed)?|revers(?:ed|al)?|returned)\b",
     re.IGNORECASE,
 )
 
@@ -426,12 +426,13 @@ def analyze_cost_and_financial_impact(
         # -------------------------------------------------------------------
         # 3a. Specialized Duplicate Payment / Transaction Logic (Hardening)
         # -------------------------------------------------------------------
-        if factor_type in (CostFactorType.DUPLICATE_PAYMENT.value, CostFactorType.OVERPAYMENT.value):
+        if factor_type in (CostFactorType.DUPLICATE_PAYMENT.value, CostFactorType.OVERPAYMENT.value) or re.search(r"\b(?:duplicate\s+(?:supplier\s+|vendor\s+|invoice\s+)?payments?|paid\s+twice|double\s+payments?)\b", combined_text, re.IGNORECASE):
+            factor_type = CostFactorType.DUPLICATE_PAYMENT.value
             missing_inputs, evidence_req = get_default_missing_evidence(factor_type, combined_text)
             
             # Check for refund / recovery in text
             refund_matches = []
-            for m in re.finditer(r"(?:refund(?:ed|s)?|recover(?:ed|y)?|credit(?:ed)?|revers(?:ed|al)?)\s*(?:of\s*)?(?P<prefix>₹|\$|€|£|Rs\.?|INR|USD|EUR)?\s*(?P<amt>\d+(?:,\d+)*(?:\.\d+)?)", combined_text, re.IGNORECASE):
+            for m in re.finditer(r"(?:refund(?:ed|s)?|recover(?:ed|y)?|credit(?:ed)?|revers(?:ed|al)?|returned)\s*(?:of\s*)?(?P<prefix>₹|\$|€|£|Rs\.?|INR|USD|EUR)?\s*(?P<amt>\d+(?:,\d+)*(?:\.\d+)?)", combined_text, re.IGNORECASE):
                 try:
                     refund_matches.append(float(m.group("amt").replace(",", "")))
                 except ValueError:
@@ -458,6 +459,9 @@ def analyze_cost_and_financial_impact(
                     currency=curr,
                     financial_amount=fin_amt,
                     transaction_amount=amount,
+                    gross_exposure=amount,
+                    outstanding_amount=amount,
+                    net_exposure=amount,
                     potential_exposure=amount,
                     potential_cost_exposure=formatted_amount_str,
                     actual_loss=amount,
@@ -467,6 +471,10 @@ def analyze_cost_and_financial_impact(
                     unrecovered_amount=amount,
                     recoverability="IRRECOVERABLE",
                     recoverability_status="IRRECOVERABLE",
+                    amount_confidence="HIGH",
+                    classification_confidence="HIGH",
+                    recovery_confidence="HIGH",
+                    actual_loss_confidence="HIGH",
                     cost_components=[],
                     cost_drivers=[],
                     calculation_basis=f"Confirmed irrecoverable loss: {formatted_amount_str}",
@@ -490,6 +498,9 @@ def analyze_cost_and_financial_impact(
                         currency=curr,
                         financial_amount=fin_amt,
                         transaction_amount=amount,
+                        gross_exposure=amount,
+                        outstanding_amount=0.0,
+                        net_exposure=0.0,
                         potential_exposure=amount,
                         potential_cost_exposure=formatted_amount_str,
                         actual_loss=0.0,
@@ -499,6 +510,10 @@ def analyze_cost_and_financial_impact(
                         unrecovered_amount=0.0,
                         recoverability="RECOVERED",
                         recoverability_status="RECOVERED",
+                        amount_confidence="HIGH",
+                        classification_confidence="HIGH",
+                        recovery_confidence="HIGH",
+                        actual_loss_confidence="HIGH",
                         cost_components=[],
                         cost_drivers=[],
                         calculation_basis=f"Duplicate payment: {formatted_amount_str} - Confirmed refund: {rec_formatted} = Actual loss: {format_currency_amount(0.0, curr)}",
@@ -521,6 +536,9 @@ def analyze_cost_and_financial_impact(
                         currency=curr,
                         financial_amount=fin_amt,
                         transaction_amount=amount,
+                        gross_exposure=amount,
+                        outstanding_amount=unrecovered,
+                        net_exposure=unrecovered,
                         potential_exposure=amount,
                         potential_cost_exposure=formatted_amount_str,
                         actual_loss=unrecovered,
@@ -530,6 +548,10 @@ def analyze_cost_and_financial_impact(
                         unrecovered_amount=unrecovered,
                         recoverability="PARTIALLY_RECOVERED",
                         recoverability_status="PARTIALLY_RECOVERED",
+                        amount_confidence="HIGH",
+                        classification_confidence="HIGH",
+                        recovery_confidence="HIGH",
+                        actual_loss_confidence="MEDIUM",
                         cost_components=[],
                         cost_drivers=[],
                         calculation_basis=f"Duplicate payment: {formatted_amount_str} - Confirmed refund: {rec_formatted} = Unrecovered exposure: {unrec_formatted}",
@@ -550,12 +572,19 @@ def analyze_cost_and_financial_impact(
                     currency=curr,
                     financial_amount=fin_amt,
                     transaction_amount=amount,
+                    gross_exposure=amount,
+                    outstanding_amount=amount,
+                    net_exposure=amount,
                     potential_exposure=amount,
                     potential_cost_exposure=formatted_amount_str,
                     actual_loss=None,
                     actual_loss_status="NOT_ESTABLISHED",
                     recoverability="UNKNOWN",
                     recoverability_status="REQUIRES_VERIFICATION",
+                    amount_confidence="HIGH",
+                    classification_confidence="HIGH",
+                    recovery_confidence="UNKNOWN",
+                    actual_loss_confidence="UNKNOWN",
                     cost_components=[],
                     cost_drivers=[],
                     calculation_basis=f"Verified duplicate payment transaction: {formatted_amount_str}",
@@ -598,10 +627,17 @@ def analyze_cost_and_financial_impact(
                 verified_cost=amount,
                 reported_cost=amount,
                 estimated_cost=None,
+                gross_exposure=amount,
+                outstanding_amount=amount,
+                net_exposure=amount,
                 potential_exposure=amount,
                 potential_cost_exposure=formatted_amount_str,
                 actual_loss=amount,
                 actual_loss_status="VERIFIED",
+                amount_confidence="HIGH",
+                classification_confidence="HIGH",
+                recovery_confidence="UNKNOWN",
+                actual_loss_confidence="HIGH",
                 cost_components=[
                     CostComponent(
                         name=f"Incurred {factor_type.lower()}",
@@ -634,10 +670,17 @@ def analyze_cost_and_financial_impact(
                 verified_cost=None,
                 reported_cost=amount if not is_estimated else None,
                 estimated_cost=amount if is_estimated else None,
+                gross_exposure=amount,
+                outstanding_amount=amount,
+                net_exposure=amount,
                 potential_exposure=amount,
                 potential_cost_exposure=formatted_amount_str,
                 actual_loss=None,
                 actual_loss_status="NOT_ESTABLISHED",
+                amount_confidence="MEDIUM",
+                classification_confidence="HIGH",
+                recovery_confidence="UNKNOWN",
+                actual_loss_confidence="UNKNOWN",
                 cost_components=[
                     CostComponent(
                         name=f"Reported/Estimated {factor_type.lower()}",

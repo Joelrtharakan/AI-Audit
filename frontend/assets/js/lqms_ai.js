@@ -622,6 +622,43 @@
                 html += "<p style='font-size:13px; color:#334155; margin-bottom:16px; line-height:1.6; background:#f8fafc; padding:12px 16px; border-radius:10px; border:1px solid #f1f5f9; font-weight:500;'>" + safeEsc(costImpact.narrative) + "</p>";
             }
 
+            // --- Gross / Recovered / Net Outstanding exposure breakdown ---
+            // Only rendered when gross_exposure is present -- it anchors the
+            // gross - recovered = net_exposure invariant enforced server-side,
+            // so the other two are only meaningful alongside it.
+            var curr = costImpact.currency || "INR";
+            var fmtAmt = function(v) { return curr + " " + v.toLocaleString(); };
+            if (costImpact.gross_exposure !== null && costImpact.gross_exposure !== undefined) {
+                var netVal = (costImpact.net_exposure !== null && costImpact.net_exposure !== undefined)
+                    ? costImpact.net_exposure
+                    : (costImpact.unrecovered_amount !== null && costImpact.unrecovered_amount !== undefined)
+                        ? costImpact.unrecovered_amount
+                        : (costImpact.outstanding_amount !== null && costImpact.outstanding_amount !== undefined)
+                            ? costImpact.outstanding_amount
+                            : null;
+                var exposureFields = [
+                    { label: "Gross Exposure", val: fmtAmt(costImpact.gross_exposure), accent: "#0f172a" },
+                    {
+                        label: "Recovered",
+                        val: (costImpact.recovered_amount !== null && costImpact.recovered_amount !== undefined) ? fmtAmt(costImpact.recovered_amount) : "None Confirmed",
+                        accent: "#059669"
+                    },
+                    {
+                        label: "Net Outstanding",
+                        val: netVal !== null ? fmtAmt(netVal) : "NOT ESTABLISHED",
+                        accent: netVal ? "#dc2626" : "#059669"
+                    }
+                ];
+                html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:16px;'>";
+                exposureFields.forEach(function(f) {
+                    html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:3px solid " + f.accent + "; border-radius:10px; padding:12px 14px;'>";
+                    html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;'>" + escapeHtml(f.label) + "</div>";
+                    html += "<div style='font-size:14px; color:" + f.accent + "; font-weight:800;'>" + safeEsc(f.val) + "</div>";
+                    html += "</div>";
+                });
+                html += "</div>";
+            }
+
             var costSummaryFields = [
                 { label: "Financial Factor", val: costImpact.financial_factor || costImpact.cost_factor_type },
                 { label: "Potential Exposure", val: costImpact.potential_cost_exposure },

@@ -138,28 +138,72 @@ def evaluate_root_cause_eligibility(
     # (e.g. "audit log shows block was disabled", "server log shows service outage", "authorization record shows unvalidated approval")
     stmt_low = statement.lower()
     has_verified_causal_proof = False
+    # A verified TECHNICAL/INFRASTRUCTURE event (service crashed, queue
+    # outage) is an immediate mechanism, not a systemic cause -- it
+    # answers "what happened", not "why", and always invites a further
+    # "why did the service crash" question the evidence here does NOT
+    # answer. A verified CONTROL/GOVERNANCE failure (a control was
+    # disabled/bypassed, training/assignment was never completed) IS the
+    # systemic-level finding in QMS terms: the control-design or
+    # process-compliance gap itself is the audit-terminal cause, with
+    # nothing evidence-backed deeper to ask. Conflating the two (treating
+    # every verified mechanism as L5_SYSTEMIC_CAUSE) is exactly what
+    # produced ESTABLISHED root-cause claims next to an UNKNOWN 5-Why step
+    # for the same immediate-mechanism proposition.
+    proven_causal_level = CausalLevel.L5_SYSTEMIC_CAUSE
 
     for fact in verified_facts:
         f_low = fact.lower()
         # Direct objective confirmation of control bypass, disablement, system outage, or unvalidated action
+        is_post_event = bool(re.search(r"\b(?:released|executed|occurred|paid)\b.*?\b(?:disabled|bypassed|deactivated)\s+(?:on|after)\b", f_low))
+        if is_post_event:
+            continue
         has_disabled_control = bool(re.search(
-            r"\b(?:interlock|block|check|control|guard|safety|verification|validation)\b.*?\b(?:disabled|bypassed|defeated|deactivated|switched off|overridden)\b|"
-            r"\b(?:disabled|bypassed|defeated|deactivated|switched off|overridden)\b.*?\b(?:interlock|block|check|control|guard|safety|verification|validation)\b",
+            r"\b(?:interlock|block|check|control|guard|safety|verification|validation|rule|token|approval|workflow|override)\b.*?\b(?:disabled|bypassed|defeated|deactivated|switched off|overridden|bypass|override)\b|"
+            r"\b(?:disabled|bypassed|defeated|deactivated|switched off|overridden|bypass|override)\b.*?\b(?:interlock|block|check|control|guard|safety|verification|validation|rule|token|approval|workflow|override)\b",
             f_low,
         ))
-        has_system_outage = bool(re.search(r"\b(?:server|system|service|channel|network|queue)\b.*?\b(?:outage|failure|down|crashed|unresponsive|failed)\b", f_low))
+        has_system_outage = bool(re.search(r"\b(?:server|system|service|channel|network|queue|message queue)\b.*?\b(?:outage|failure|down|crashed|unresponsive|failed)\b", f_low))
         has_unauthorized_action = bool(re.search(r"\b(?:authorized|approved|executed|operated)\b.*?\b(?:without|unvalidated|unqualified|untrained|no\s+completed)\b", f_low))
-        has_explicit_audit_proof = ("audit log" in f_low or "audit trail" in f_low or "system log" in f_low or "server log" in f_low) and any(
-            w in f_low for w in ("disabled", "bypassed", "failure", "outage", "defeated", "overridden", "never assigned", "not assigned", "unassigned")
+        has_training_proof = bool(re.search(r"\b(?:lms|training log|training records?)\b.*?\b(?:no\s+operators|not\s+completed|never\s+completed|uncompleted|failed\s+to\s+complete)\b", f_low))
+        has_change_mgmt_bypass = bool(re.search(r"\b(?:change[- ]management|sop-eng-\w+)\b.*?\b(?:bypassed|skipped|unvalidated|unconfigured)\b", f_low))
+        has_task_assignment_proof = bool(re.search(r"\b(?:never\s+assigned|not\s+assigned|unassigned|assignment\s+(?:failed|not\s+configured))\b", f_low))
+        has_explicit_audit_proof = ("audit log" in f_low or "audit trail" in f_low or "system log" in f_low or "server log" in f_low or "security_audit_log" in f_low or "security audit" in f_low) and any(
+            w in f_low for w in ("disabled", "bypassed", "failure", "outage", "defeated", "overridden", "override", "never assigned", "not assigned", "unassigned", "crashed", "unconfigured")
         )
 
-        if has_disabled_control or has_system_outage or has_unauthorized_action or has_explicit_audit_proof:
-            if any(w in stmt_low for w in ("disable", "bypass", "outage", "service failure", "workflow", "authorization", "control", "interlock", "block", "assignment", "assign")):
+        is_bypass_hyp = any(w in stmt_low for w in ("bypass", "bypassed", "disabled", "defeated", "overridden", "override", "skipped", "without training validation", "without dual authorization"))
+        is_training_hyp = any(w in stmt_low for w in ("training", "lms", "competenc")) and not is_bypass_hyp
+        is_system_hyp = any(w in stmt_low for w in ("server", "service", "queue", "outage", "crashed"))
+        is_assignment_hyp = any(w in stmt_low for w in ("assignment", "assigned"))
+
+        if is_bypass_hyp and (has_disabled_control or has_change_mgmt_bypass or has_explicit_audit_proof or has_unauthorized_action):
+            has_verified_causal_proof = True
+            proven_causal_level = CausalLevel.L5_SYSTEMIC_CAUSE
+            break
+        elif is_training_hyp and has_training_proof:
+            has_verified_causal_proof = True
+            proven_causal_level = CausalLevel.L4_ROOT_CAUSE
+            break
+        elif is_system_hyp and (has_system_outage or has_explicit_audit_proof):
+            has_verified_causal_proof = True
+            proven_causal_level = CausalLevel.L2_IMMEDIATE_MECHANISM
+            break
+        elif is_assignment_hyp and (has_task_assignment_proof or has_explicit_audit_proof):
+            has_verified_causal_proof = True
+            proven_causal_level = CausalLevel.L4_ROOT_CAUSE
+            break
+        elif has_disabled_control or has_system_outage or has_change_mgmt_bypass or has_explicit_audit_proof:
+            if any(w in stmt_low for w in ("disable", "bypass", "outage", "service failure", "workflow", "authorization", "control", "interlock", "block", "rule")):
                 has_verified_causal_proof = True
+                proven_causal_level = (
+                    CausalLevel.L2_IMMEDIATE_MECHANISM if has_system_outage and not has_disabled_control
+                    else CausalLevel.L5_SYSTEMIC_CAUSE
+                )
                 break
 
     if has_verified_causal_proof:
-        return True, SupportLevel.SUPPORTED, None, [], CausalLevel.L5_SYSTEMIC_CAUSE, True
+        return True, SupportLevel.SUPPORTED, None, [], proven_causal_level, True
 
     # 7. Standard plausible hypothesis (POSSIBLE)
     missing_evidence.append("Objective records confirming the causal mechanism")
@@ -177,11 +221,25 @@ def select_authoritative_leading_hypothesis(
       - 0 eligible candidates -> (None, "NONE", NOT_ESTABLISHED, "No eligible causal hypotheses identified")
       - If unresolved conflicts exist -> (None, "NONE", NOT_ESTABLISHED, "Available evidence contains unresolved conflicts requiring investigation")
       - 1 or more candidates:
-        - If exactly 1 candidate is SUPPORTED with promotion allowed -> (H.id, "SELECTED", SUPPORTED, H.rationale)
+        - If exactly 1 candidate is SUPPORTED with promotion allowed -> (H.id, "SELECTED", ESTABLISHED/SUPPORTED, H.rationale)
         - If multiple candidates are SUPPORTED -> (None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses are supported by available evidence")
         - If exactly 1 candidate is POSSIBLE -> (H.id, "POSSIBLE", RootCauseStatus.NOT_ESTABLISHED, "Single leading hypothesis pending objective verification")
         - If multiple candidates are POSSIBLE:
           - If tied for rank/score -> (None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses remain equally plausible pending investigation")
+
+    ESTABLISHED vs SUPPORTED (causal-proof threshold, Section 1/7 of the
+    causal-consistency spec): VERIFIED evidence alone proves the LEADING
+    hypothesis's own mechanism -- it says nothing about whether that
+    mechanism is itself the systemic/root cause or merely an immediate
+    trigger with its own unresolved "why" beneath it (e.g. "the notification
+    service failed" is VERIFIED but doesn't explain WHY the service failed).
+    Conflating "well-evidenced" with "root cause" is exactly what produced
+    ESTABLISHED root-cause claims next to an UNKNOWN 5-Why step for the same
+    proposition. ESTABLISHED therefore requires BOTH: the causal chain has
+    reached a root/systemic causal_level (L4_ROOT_CAUSE or
+    L5_SYSTEMIC_CAUSE) AND that level is backed by VERIFIED evidence. An
+    immediate-mechanism-level hypothesis (L0-L3), however well verified,
+    caps out at SUPPORTED.
     """
     if not hypotheses:
         return None, "NONE", RootCauseStatus.NOT_ESTABLISHED, "No eligible causal hypotheses identified"
@@ -196,7 +254,15 @@ def select_authoritative_leading_hypothesis(
     supported_hyps = [h for h in candidates_to_evaluate if getattr(h, "status", "") == "SUPPORTED"]
     if len(supported_hyps) == 1:
         leading = supported_hyps[0]
-        return leading.id, "SELECTED", RootCauseStatus.SUPPORTED, getattr(leading, "rationale", "Supported by verified evidence")
+        is_root_level_cause = getattr(leading, "causal_level", None) in (
+            CausalLevel.L4_ROOT_CAUSE, CausalLevel.L5_SYSTEMIC_CAUSE,
+        )
+        has_verified_evidence = getattr(leading, "evidence_strength", "") == "VERIFIED"
+        status_to_return = (
+            RootCauseStatus.ESTABLISHED if (is_root_level_cause and has_verified_evidence)
+            else RootCauseStatus.SUPPORTED
+        )
+        return leading.id, "SELECTED", status_to_return, getattr(leading, "rationale", "Supported by verified evidence")
 
     if len(supported_hyps) > 1:
         return None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses are supported by available evidence"

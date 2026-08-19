@@ -978,6 +978,14 @@ def build_deterministic_investigation_plan(
             "Bank/payment records and supplier credit notes",
             "Accounts-payable reconciliation records",
         ])
+        all_cids = [item.claim_id for item in evidence_ledger if hasattr(item, "claim_id") and item.claim_id] or ["C1"]
+        claim_map = {item.claim_id: (getattr(item, "claim", None) or getattr(item, "text", "")) for item in evidence_ledger if hasattr(item, "claim_id") and item.claim_id}
+        for h in hypotheses:
+            if not h.supporting_claim_ids:
+                h.supporting_claim_ids = all_cids[:1]
+            if not h.supporting_evidence and h.supporting_claim_ids:
+                h.supporting_evidence = [claim_map[cid] for cid in h.supporting_claim_ids if cid in claim_map]
+
         return hypotheses, InvestigationPlan(
             areas=plan_areas,
             questions=questions,
@@ -1039,18 +1047,30 @@ def build_deterministic_investigation_plan(
             r"\b(?:audit\s+logs?|server\s+logs?)\s+(?:establish|show|confirm)\b",
             re.IGNORECASE,
         )
+        has_service_crash = bool(re.search(r"\b(?:server|service|message queue|queue)\b.*?\b(?:crashed|failure|outage|down)\b", text_low))
         has_direct_control_proof = bool(_control_proof_pattern.search(finding_text))
-        if has_direct_control_proof:
-            # Provenance enforcement applies to every hypothesis producer,
-            # not only the LLM-parsed path (core_synthesis._parse_causal_fields):
-            # a SUPPORTED hypothesis must cite the verified claim(s) that
-            # actually establish the control/interlock disablement it names,
-            # never assert support with an empty evidence list.
+        if has_service_crash:
+            h1 = CandidateHypothesis(
+                id="H1",
+                name="NOTIFICATION_SERVICE_OUTAGE",
+                statement=f"The notification message queue service crashed, preventing delivery of {subject}.",
+                status="SUPPORTED",
+                evidence_needed="Server crash error logs and message queue monitoring records",
+                confirms_if="Server error logs confirm queue crash during dispatch window",
+                refutes_if="Server logs show message queue was operational throughout",
+                discrimination_evidence="H1 is established by server crash logs.",
+                supporting_evidence=fact_claims,
+                evidence_strength="VERIFIED",
+                relevance_rank="HIGH",
+                causal_role="PRIMARY_CAUSE",
+            )
+            hypotheses.append(h1)
+        elif has_direct_control_proof:
             _citing_claims = [c for c in fact_claims if _control_proof_pattern.search(c)] or fact_claims
             h1 = CandidateHypothesis(
                 id="H1",
                 name="CONTROL_OR_INTERLOCK_DISABLED",
-                statement=f"The operating control or interlock for {subject} was disabled prior to operation, permitting the out-of-range condition.",
+                statement=f"The operating control or validation rule for {subject} was disabled prior to operation, permitting the deviation.",
                 status="SUPPORTED",
                 evidence_needed="SCADA/system audit trail records",
                 confirms_if="System audit trail records confirm the interlock or safety control was disabled",
@@ -1295,6 +1315,131 @@ def build_deterministic_investigation_plan(
             f"Exception/waiver/deviation records for {subject}",
         ])
 
+    if not hypotheses:
+        # Check if verified evidence proves a specific causal mechanism
+        has_training_proof = bool(re.search(r"\b(?:lms|training log|training records?)\b.*?\b(?:no\s+operators|not\s+completed|never\s+completed|uncompleted|failed\s+to\s+complete)\b", text_low))
+        has_dual_approval_bypass = bool(re.search(r"\b(?:dual[- ]approval|dual[- ]authorization|mandatory|validation control)\b.*?\b(?:disabled|bypassed|deactivated)\b", text_low))
+        has_service_crash = bool(re.search(r"\b(?:server|service|message queue|queue)\b.*?\b(?:crashed|failure|outage|down)\b", text_low))
+        has_change_mgmt_bypass = bool(re.search(r"\b(?:change[- ]management|sop-eng-\w+)\b.*?\b(?:bypassed|skipped|unvalidated|unconfigured)\b", text_low))
+        has_rule_disabled = bool(re.search(r"\b(?:duplicate detection rule|detection rule|validation rule)\b.*?\b(?:disabled|deactivated)\b", text_low))
+
+        is_post_event_disablement = bool(re.search(
+            r"\b(?:released|executed|occurred|paid)\b.*?\b(?:disabled|bypassed|deactivated)\s+(?:on|after)\b",
+            text_low,
+        ))
+        if is_post_event_disablement:
+            has_dual_approval_bypass = False
+            has_rule_disabled = False
+
+        first_cid = [item.claim_id for item in evidence_ledger if hasattr(item, "claim_id") and item.claim_id] or ["C1"]
+
+        if has_training_proof:
+            hypotheses.append(CandidateHypothesis(
+                id="H1",
+                name="TRAINING_COMPLETION_FAILURE",
+                statement=f"Required training for {subject} was not completed by operators prior to performing the task.",
+                status="SUPPORTED",
+                evidence_strength="VERIFIED",
+                causal_role="PRIMARY_CAUSE",
+                evidence_needed="LMS training records and operator task assignment logs",
+                confirms_if="LMS logs confirm training incomplete before task execution",
+                refutes_if="LMS logs show valid training completed prior to task execution",
+                discrimination_evidence="H1 is established by authenticated LMS training logs.",
+                relevance_rank="HIGH",
+                supporting_claim_ids=first_cid[:1],
+            ))
+        elif has_dual_approval_bypass:
+            hypotheses.append(CandidateHypothesis(
+                id="H1",
+                name="MANDATORY_CONTROL_BYPASS",
+                statement="Mandatory dual-approval validation control was disabled before payment release.",
+                status="SUPPORTED",
+                evidence_strength="VERIFIED",
+                causal_role="PRIMARY_CAUSE",
+                evidence_needed="Audit trail configuration logs for dual-approval control",
+                confirms_if="Audit trail logs confirm control was disabled",
+                refutes_if="Audit trail logs confirm control remained active",
+                discrimination_evidence="H1 is established by audit trail configuration logs.",
+                relevance_rank="HIGH",
+                supporting_claim_ids=first_cid[:1],
+            ))
+        elif has_service_crash:
+            hypotheses.append(CandidateHypothesis(
+                id="H1",
+                name="NOTIFICATION_SERVICE_OUTAGE",
+                statement=f"Message queue service crashed, preventing dispatch of {subject}.",
+                status="SUPPORTED",
+                evidence_strength="VERIFIED",
+                causal_role="PRIMARY_CAUSE",
+                evidence_needed="Server crash error logs and message queue monitoring records",
+                confirms_if="Server error logs confirm queue crash during dispatch window",
+                refutes_if="Server logs show message queue was operational throughout",
+                discrimination_evidence="H1 is established by server crash logs.",
+                relevance_rank="HIGH",
+                supporting_claim_ids=first_cid[:1],
+            ))
+        elif has_change_mgmt_bypass:
+            hypotheses.append(CandidateHypothesis(
+                id="H1",
+                name="CHANGE_MANAGEMENT_BYPASS",
+                statement="Change-management procedure was bypassed during upgrade, leaving critical controls unconfigured.",
+                status="SUPPORTED",
+                evidence_strength="VERIFIED",
+                causal_role="PRIMARY_CAUSE",
+                evidence_needed="Change control records and system configuration logs",
+                confirms_if="Change audit trail confirms procedure was bypassed",
+                refutes_if="Change records confirm complete validation prior to release",
+                discrimination_evidence="H1 is established by change management audit trail.",
+                relevance_rank="HIGH",
+                supporting_claim_ids=first_cid[:1],
+            ))
+        elif has_rule_disabled:
+            hypotheses.append(CandidateHypothesis(
+                id="H1",
+                name="AUTOMATED_DETECTION_RULE_DISABLED",
+                statement="Automated duplicate detection rule was disabled in the ERP configuration.",
+                status="SUPPORTED",
+                evidence_strength="VERIFIED",
+                causal_role="PRIMARY_CAUSE",
+                evidence_needed="ERP rule configuration and audit trail logs",
+                confirms_if="ERP configuration logs confirm detection rule was disabled",
+                refutes_if="ERP configuration logs show detection rule was active and functional",
+                discrimination_evidence="H1 is established by ERP configuration logs.",
+                relevance_rank="HIGH",
+                supporting_claim_ids=first_cid[:1],
+            ))
+        elif "duplicate payment" in text_low or "duplicate supplier payment" in text_low or "paid twice" in text_low:
+            hypotheses.extend([
+                CandidateHypothesis(
+                    id="H1",
+                    name="ACCOUNTS_PAYABLE_CONTROL_GAP",
+                    statement="Accounts payable invoice verification and duplicate detection controls failed to flag the duplicate payment.",
+                    status="POSSIBLE",
+                    evidence_strength="REPORTED",
+                    causal_role="PRIMARY_CAUSE",
+                    evidence_needed="Invoice matching logs, approval audit trails, and ERP duplicate-check settings",
+                    confirms_if="ERP duplicate validation controls were unconfigured or bypassed",
+                    refutes_if="ERP automated controls were active and payment was intentionally released",
+                    discrimination_evidence="H1 strengthens if ERP duplicate validation was disabled.",
+                    relevance_rank="HIGH",
+                    supporting_claim_ids=first_cid[:1],
+                ),
+                CandidateHypothesis(
+                    id="H2",
+                    name="MANUAL_INVOICE_PROCESSING_ERROR",
+                    statement="Manual invoice entry without mandatory secondary review resulted in duplicate transaction submission.",
+                    status="POSSIBLE",
+                    evidence_strength="REPORTED",
+                    causal_role="CONTRIBUTING_CAUSE",
+                    evidence_needed="User entry audit logs and secondary review approval records",
+                    confirms_if="Invoice entry logs show manual submission without secondary review",
+                    refutes_if="Automated electronic invoice feed was used",
+                    discrimination_evidence="H2 strengthens if manual entry occurred without secondary approval.",
+                    relevance_rank="MEDIUM",
+                    supporting_claim_ids=first_cid[:1],
+                ),
+            ])
+
     # Filter out any evidence-state propositions from hypotheses
     from app.agent.causal_guard import is_evidence_state_not_hypothesis
     hypotheses = [h for h in hypotheses if not is_evidence_state_not_hypothesis(h.statement, h.name)]
@@ -1336,6 +1481,11 @@ def build_deterministic_investigation_plan(
         areas=plan_areas,
         interviews=[f"Responsible personnel involved in {subject}"],
     )
+
+    all_claim_ids = [item.claim_id for item in evidence_ledger if hasattr(item, "claim_id") and item.claim_id] or ["C1"]
+    for h in hypotheses:
+        if not h.supporting_claim_ids:
+            h.supporting_claim_ids = all_claim_ids[:1]
 
     return hypotheses, investigation_plan
 

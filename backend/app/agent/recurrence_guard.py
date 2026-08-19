@@ -27,7 +27,7 @@ _SIMILAR_FINDING_RE = re.compile(
     re.IGNORECASE,
 )
 _RECURRENCE_WORD_RE = re.compile(
-    r"\b(recurrence|recurring|repeated\s+finding|repeat\s+finding|reoccur(?:red|rence)?)\b",
+    r"\b(recurrence|recurring|recurred|repeated\s+finding|repeat\s+finding|reoccur(?:red|rence)?|the\s+same\s+[\w\s-]{1,30}?\s+occurred)\b",
     re.IGNORECASE,
 )
 _PREVIOUS_AUDIT_TIME_RE = re.compile(
@@ -36,7 +36,7 @@ _PREVIOUS_AUDIT_TIME_RE = re.compile(
     re.IGNORECASE,
 )
 _PREVIOUS_CAPA_RE = re.compile(
-    r"\b(?:previous|prior)\s+corrective\s+action\b|\b(?:previous|prior)\s+CAPA\b",
+    r"\b(?:previous|prior)\s+(?:[\w\s-]{0,30}?\s+)?(?:corrective\s+action|CAPA|preventive\s+maintenance)\b",
     re.IGNORECASE,
 )
 _CAPA_COMPLETED_RE = re.compile(
@@ -55,6 +55,7 @@ _EFFECTIVENESS_REVIEW_RE = re.compile(
 class RecurrenceInfo:
     is_recurring: bool = False
     has_previous_capa_reference: bool = False
+    capa_id: str | None = None
     # "COMPLETED" | None -- whether the finding states the previous
     # corrective action was recorded as completed.
     previous_capa_status: str | None = None
@@ -76,6 +77,8 @@ def detect_recurrence(finding_text: str) -> RecurrenceInfo:
         or _RECURRENCE_WORD_RE.search(finding_text)
     )
     has_previous_capa = bool(_PREVIOUS_CAPA_RE.search(finding_text))
+    m_capa = re.search(r"\b(CAPA-\d{4}-\d+|CAPA-[A-Z0-9-]+)\b", finding_text, re.IGNORECASE)
+    capa_id = m_capa.group(1).upper() if m_capa else None
 
     capa_status = "COMPLETED" if (has_previous_capa and _CAPA_COMPLETED_RE.search(finding_text)) else None
     effectiveness = (
@@ -104,6 +107,7 @@ def detect_recurrence(finding_text: str) -> RecurrenceInfo:
     return RecurrenceInfo(
         is_recurring=is_recurring,
         has_previous_capa_reference=has_previous_capa,
+        capa_id=capa_id,
         previous_capa_status=capa_status,
         previous_capa_effectiveness=effectiveness,
         rationale=rationale,

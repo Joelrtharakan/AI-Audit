@@ -349,11 +349,11 @@ def compute_support_level(
         if not overlap:
             continue
         if is_verified_type:
-            # Overlap with a VERIFIED claim is direct support only when the
-            # overlap is substantive (more than a single shared word, which
-            # is usually just the shared subject/object noun rather than
-            # the asserted mechanism itself).
-            if len(overlap) >= 2:
+            _CORE_VERIFIED_CONTROL_STEMS = _stemmed_words({
+                "disabled", "deactivated", "bypassed", "crashed", "outage", "unconfigured", "overridden", "override", "defeat", "omitted", "omiss", "uncompleted", "distribut", "delivery", "dispatch",
+            })
+            unfiltered_overlap = _stemmed_words(raw_claim_words) & _stemmed_words(stmt_words_unfiltered)
+            if len(overlap) >= 2 or bool(overlap & _CORE_VERIFIED_CONTROL_STEMS) or (len(overlap) >= 1 and bool(unfiltered_overlap & _CORE_VERIFIED_CONTROL_STEMS)):
                 return SupportLevel.VERIFIED_SUPPORT
             best_related = SupportLevel.INDIRECT
         elif claim.claim_type in (ClaimType.REPORTED_CAUSAL_MECHANISM, ClaimType.REPORTED_STATE):

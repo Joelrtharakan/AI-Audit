@@ -451,6 +451,15 @@ class CandidateHypothesis(BaseModel):
 
 
 
+class CausalSufficiencyAssessment(BaseModel):
+    observation_sufficiency: Literal["SUFFICIENT", "INSUFFICIENT", "CONFLICTING"] = "SUFFICIENT"
+    mechanism_sufficiency: Literal["ESTABLISHED", "SUPPORTED", "POSSIBLE", "NOT_ESTABLISHED", "UNKNOWN"] = "UNKNOWN"
+    root_cause_sufficiency: Literal["ESTABLISHED", "SUPPORTED", "POSSIBLE", "NOT_ESTABLISHED", "UNKNOWN"] = "NOT_ESTABLISHED"
+    systemic_sufficiency: Literal["ESTABLISHED", "SUPPORTED", "POSSIBLE", "NOT_ESTABLISHED", "UNKNOWN"] = "UNKNOWN"
+    impact_sufficiency: Literal["OBSERVED", "POTENTIAL", "CONFIRMED", "UNKNOWN"] = "POTENTIAL"
+    financial_sufficiency: Literal["CALCULATED", "ESTIMATED", "NOT_QUANTIFIED", "NOT_APPLICABLE"] = "NOT_APPLICABLE"
+
+
 class RootCauseAnalysis(BaseModel):
     status: RootCauseStatus
     category: str | None = None  # 6M taxonomy value
@@ -469,6 +478,9 @@ class RootCauseAnalysis(BaseModel):
     narrative: str = ""
     evidence_status: EvidenceStatus = EvidenceStatus.UNKNOWN
     verification_needed: str | None = None
+    causal_sufficiency: CausalSufficiencyAssessment | None = None
+    risk_of_recurrence: Literal["LOW", "MEDIUM", "HIGH", "NOT_ASSESSABLE"] = "NOT_ASSESSABLE"
+    risk_of_recurrence_rationale: str | None = None
     # WHY the root cause is/isn't established — the analytical reasoning
     # chain, distinct from the narrative (which describes the finding
     # situation) and from the leading hypothesis (which is the best guess).
@@ -598,6 +610,8 @@ class InvestigationQuestion(BaseModel):
     category: str | None = None
     decision_effect: str | None = None
     target_hypothesis_ids: list[str] = []
+    decision_branches: list[str] = []
+    discrimination_criterion: str | None = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.question_id and self.id:
@@ -760,6 +774,9 @@ class CostImpact(BaseModel):
     currency: str | None = None
     financial_amount: FinancialAmount | None = None
     transaction_amount: float | None = None
+    gross_exposure: float | None = None
+    outstanding_amount: float | None = None
+    net_exposure: float | None = None
     actual_loss: float | None = None
     actual_loss_status: str | None = None  # "NOT_ESTABLISHED", "VERIFIED", "UNKNOWN", "ESTABLISHED"
     potential_exposure: float | None = None
@@ -769,6 +786,10 @@ class CostImpact(BaseModel):
     unrecovered_amount: float | None = None
     recoverability: str | None = None  # "UNKNOWN", "RECOVERABLE", "RECOVERED", "IRRECOVERABLE"
     recoverability_status: str | None = None  # "UNKNOWN", "REQUIRES_VERIFICATION", "RECOVERED", "PARTIALLY_RECOVERED", "IRRECOVERABLE"
+    amount_confidence: Literal["LOW", "MEDIUM", "HIGH", "UNKNOWN"] = "HIGH"
+    classification_confidence: Literal["LOW", "MEDIUM", "HIGH"] = "HIGH"
+    recovery_confidence: Literal["LOW", "MEDIUM", "HIGH", "UNKNOWN"] = "HIGH"
+    actual_loss_confidence: Literal["LOW", "MEDIUM", "HIGH", "UNKNOWN"] = "HIGH"
     verified_cost: float | None = None
     reported_cost: float | None = None
     estimated_cost: float | None = None
