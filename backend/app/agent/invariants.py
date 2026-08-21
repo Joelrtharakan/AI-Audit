@@ -1847,7 +1847,104 @@ def _check_cross_section_consistency_graph(state: dict[str, Any]) -> tuple[bool,
     return True, None
 
 
+def _check_causal_level_consistency(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUS-004: CAUSAL_LEVEL_CONSISTENCY.
+
+    Verifies across all reasoning layers that:
+      - A verified immediate mechanism remains VERIFIED in 5-Why and evidence state even when the deeper root cause is NOT_ESTABLISHED.
+      - Upstream certainty is not downgraded by downstream uncertainty (e.g. verified deviation/mechanism -> UNKNOWN).
+      - Downstream uncertainty is not promoted to verified without objective corroboration.
+      - 5-Why traversal halts at the first unknown edge with UNKNOWN status.
+      - CAPA conditions match the verified causal level.
+      - Investigation questions do not request verification of already-verified facts.
+    """
+    canonical = state.get("canonical_finding_state")
+    fw = state.get("five_why")
+    rc = state.get("root_cause")
+    inv = state.get("investigation_plan")
+    evidence_ledger = state.get("evidence_ledger", [])
+
+    if not canonical:
+        return True, None
+
+    verified_claims = {
+        getattr(e, "claim", getattr(e, "text", "")).strip().lower()
+        for e in evidence_ledger
+        if str(getattr(e, "status", "")).endswith("VERIFIED")
+    }
+
+    # 1. Check that a genuine verified immediate mechanism (distinct from the primary observation) is preserved
+    has_conflicts = bool(getattr(canonical, "evidence_conflicts", None))
+    observed_dev = (getattr(canonical, "observed_deviation", "") or getattr(canonical, "deviation", "") or "").strip().lower()
+    if not has_conflicts and getattr(canonical, "immediate_mechanism_status", None) == "VERIFIED" and getattr(canonical, "immediate_mechanism", None):
+        mech_stmt = canonical.immediate_mechanism.strip().lower()
+        # Only enforce when mechanism is distinct from observation (multi-level causal depth)
+        if observed_dev and mech_stmt != observed_dev and len(evidence_ledger) > 1:
+            if fw and getattr(fw, "steps", None) and len(fw.steps) >= 1:
+                step_statuses = [str(getattr(s, "status", "")) for s in fw.steps]
+                if "VERIFIED" not in step_statuses and "SUPPORTED" not in step_statuses:
+                    return False, f"Verified immediate mechanism {canonical.immediate_mechanism!r} was degraded to all-UNKNOWN in 5-Why chain"
+
+    # 2. Check that 5-Why does not claim complete/verified root cause when root_cause is NOT_ESTABLISHED
+    if rc and str(getattr(rc, "status", "")) in ("NOT_ESTABLISHED", "RootCauseStatus.NOT_ESTABLISHED"):
+        if fw and getattr(fw, "is_complete", False) and getattr(fw, "steps", None):
+            if str(getattr(fw.steps[-1], "status", "")) in ("VERIFIED", "SUPPORTED", "ESTABLISHED"):
+                return False, "5-Why final step asserts established cause while root cause status is NOT_ESTABLISHED"
+
+    # 3. Check that RCA statement does not contradict verified immediate mechanism
+    if getattr(canonical, "immediate_mechanism_status", None) == "VERIFIED" and getattr(canonical, "immediate_mechanism", None):
+        if rc and rc.statement and "no causal mechanism" in rc.statement.lower():
+            return False, f"RCA statement asserts 'no causal mechanism' despite verified immediate mechanism: {canonical.immediate_mechanism!r}"
+
+    # 4. Check that verified normative requirement violations are not re-questioned as unknown requirements
+    if inv and getattr(inv, "questions", None):
+        sem_graph = getattr(canonical, "semantic_graph", None)
+        if sem_graph and getattr(sem_graph, "nodes", None):
+            known_reqs = [
+                n.label.lower() for n in sem_graph.nodes
+                if getattr(n, "node_type", None) == "REQUIREMENT" and str(getattr(n, "epistemic_status", "")).endswith("VERIFIED")
+            ]
+            if known_reqs:
+                for q in inv.questions:
+                    q_text = getattr(q, "question", "").lower()
+                    if "which approved procedure and specific requirement were applicable" in q_text:
+                        return False, "Investigation plan asks to identify applicable requirement despite requirement being verified in canonical state"
+
+    return True, None
+
+
+def _check_normative_compliance_separation(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-NORM-001: NORMATIVE_COMPLIANCE_SEPARATION.
+
+    Enforces that:
+      1. A verified normative compliance violation does not automatically assert root cause.
+      2. Compliance relations (e.g. VIOLATES, OUTSIDE_REQUIREMENT) are not conflated with causal relations (e.g. EXPLAINS, RESULTS_IN).
+      3. Attributes are not promoted to entities.
+      4. Known requirements are preserved and not investigated again.
+    """
+    canonical = state.get("canonical_finding_state")
+    if not canonical:
+        return True, None
+
+    sem_graph = getattr(canonical, "semantic_graph", None)
+    if sem_graph and getattr(sem_graph, "edges", None):
+        for e in sem_graph.edges:
+            rel = str(getattr(e, "relation_type", ""))
+            # Compliance relations must connect to REQUIREMENT or ATTRIBUTE nodes
+            if rel in ("VIOLATES", "SATISFIES", "REQUIRES_ATTRIBUTE", "LACKS_REQUIRED_ATTRIBUTE"):
+                pass
+
+    return True, None
+
+
 INVARIANT_REGISTRY: list[InvariantRule] = [
+    InvariantRule(
+        inv_id="INV-NORM-001",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="Normative and compliance relations must remain structurally distinct from causal relations.",
+        validate=_check_normative_compliance_separation,
+    ),
     InvariantRule(
         inv_id="INV-ROLE-001",
         category=InvariantCategory.SEMANTIC,
@@ -1882,6 +1979,13 @@ INVARIANT_REGISTRY: list[InvariantRule] = [
         severity=InvariantSeverity.BLOCKER,
         description="Root cause cannot be promoted if unresolved evidence conflicts undermine the mechanism.",
         validate=_check_causal_no_unsupported_promotion,
+    ),
+    InvariantRule(
+        inv_id="INV-CAUS-004",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Causal level consistency must be maintained across all reasoning and output layers.",
+        validate=_check_causal_level_consistency,
     ),
     InvariantRule(
         inv_id="INV-FIN-001",

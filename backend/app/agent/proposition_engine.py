@@ -249,6 +249,8 @@ def build_semantic_graph(
         key = clean_lbl.lower()
         if key in nodes_by_label:
             node = nodes_by_label[key]
+            if node.node_type == SemanticNodeType.ENTITY and node_type != SemanticNodeType.ENTITY:
+                node.node_type = node_type
             if claim_id and claim_id not in node.source_claim_ids:
                 node.source_claim_ids.append(claim_id)
             return node.id
@@ -267,7 +269,7 @@ def build_semantic_graph(
 
     # 1. Base entities and actors from finding
     for act in extract_actors(finding_text):
-        _get_or_create_node(act, SemanticNodeType.ENTITY, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
+        _get_or_create_node(act, SemanticNodeType.ACTOR, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
 
     for ent in extract_entities(finding_text):
         _get_or_create_node(ent, SemanticNodeType.ENTITY, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
@@ -281,7 +283,7 @@ def build_semantic_graph(
         if subj and len(subj.strip()) >= 3:
             _get_or_create_node(subj, SemanticNodeType.ENTITY, c_status, EpistemicSource.AUDIT_OBSERVATION, c_id)
         if spkr and len(spkr.strip()) >= 3:
-            _get_or_create_node(spkr, SemanticNodeType.ENTITY, c_status, EpistemicSource.AUDIT_OBSERVATION, c_id)
+            _get_or_create_node(spkr, SemanticNodeType.ACTOR, c_status, EpistemicSource.AUDIT_OBSERVATION, c_id)
 
     # 2. Add nodes and edges per claim / proposition
     for claim in evidence_claims:
@@ -301,29 +303,79 @@ def build_semantic_graph(
         elif attr == ClaimAttribution.DOCUMENTARY_EVIDENCE:
             source_type = EpistemicSource.OBJECTIVE_RECORD
 
-        # Structural relation & participant extraction
-        if "deliver" in c_low or "dispatch" in c_low or "sent" in c_low:
+        # Structural relation & participant extraction across arbitrary domains
+        # Normative / Requirement / Compliance relations
+        m_req = re.search(r"\b(?:as\s+required\s+by|per|under|in\s+accordance\s+with|prescribed\s+by|mandated\s+by)\s+(?:procedure\s+|sop\s+|standard\s+|specification\s+|policy\s+)?([A-Z0-9-]+|[a-z0-9\s-]+?(?=\.|$|,|\s+and\b))", c_text, re.IGNORECASE)
+        m_req_term = re.search(r"\b(?:procedure\s+|sop\s+|standard\s+|specification\s+|policy\s+)([A-Z0-9-]+)\b", c_text, re.IGNORECASE)
+        if m_req or m_req_term:
+            req_label = (m_req.group(1).strip() if m_req else m_req_term.group(1).strip())
+            req_id = _get_or_create_node(req_label, SemanticNodeType.REQUIREMENT, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION, c_id)
+            target_lbl = subj if subj and req_label != subj else (c_speaker or "Process / Activity")
+            target_id = _get_or_create_node(target_lbl, SemanticNodeType.PROCESS, c_status, source_type, c_id)
+            if any(w in c_low for w in ("not completed", "missed", "deviat", "violat", "failed", "omitted", "exceeded", "below", "incomplete", "without", "lacked", "not")):
+                edges.append(SemanticEdge(
+                    id=f"E{e_idx}",
+                    source_id=target_id,
+                    target_id=req_id,
+                    relation_type=SemanticRelationType.VIOLATES,
+                    epistemic_status=c_status,
+                    provenance=source_type,
+                    source_claim_ids=[c_id] if c_id else [],
+                    notes="Normative compliance deviation",
+                ))
+                e_idx += 1
+            else:
+                edges.append(SemanticEdge(
+                    id=f"E{e_idx}",
+                    source_id=req_id,
+                    target_id=target_id,
+                    relation_type=SemanticRelationType.GOVERNS,
+                    epistemic_status=c_status,
+                    provenance=source_type,
+                    source_claim_ids=[c_id] if c_id else [],
+                    notes="Normative governance",
+                ))
+                e_idx += 1
+
+        elif any(w in c_low for w in ("lacks", "missing", "omitted", "without", "absent", "no record")) and any(w in c_low for w in ("attribute", "parameter", "identifier", "code", "tag", "serial", "batch", "lot", "label", "date", "entry", "signature", "sign-off")):
+            ent_id = _get_or_create_node(subj or "Entity", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            attr_id = _get_or_create_node("Required Attribute", SemanticNodeType.ATTRIBUTE, c_status, source_type, c_id)
+            edges.append(SemanticEdge(
+                id=f"E{e_idx}",
+                source_id=ent_id,
+                target_id=attr_id,
+                relation_type=SemanticRelationType.LACKS_REQUIRED_ATTRIBUTE,
+                epistemic_status=c_status,
+                provenance=source_type,
+                source_claim_ids=[c_id] if c_id else [],
+                notes="Missing required attribute",
+            ))
+            e_idx += 1
+
+        elif "deliver" in c_low or "dispatch" in c_low or "sent" in c_low or "transmitt" in c_low:
             sys_id = _get_or_create_node(c_speaker or "System", SemanticNodeType.ENTITY, c_status, source_type, c_id)
-            notif_id = _get_or_create_node("Notification", SemanticNodeType.RECORD, c_status, source_type, c_id)
+            target_lbl = subj or "Item"
+            target_id = _get_or_create_node(target_lbl, SemanticNodeType.ENTITY, c_status, source_type, c_id)
             edges.append(SemanticEdge(
                 id=f"E{e_idx}",
                 source_id=sys_id,
-                target_id=notif_id,
+                target_id=target_id,
                 relation_type=SemanticRelationType.TRANSMITTED_TO,
                 epistemic_status=c_status,
                 provenance=source_type,
                 source_claim_ids=[c_id] if c_id else [],
-                notes="Delivery recorded by system",
+                notes="Transmission / dispatch recorded",
             ))
             e_idx += 1
 
         elif "receiv" in c_low:
-            recp_id = _get_or_create_node(c_speaker or "Recipient", SemanticNodeType.ENTITY, c_status, source_type, c_id)
-            notif_id = _get_or_create_node("Notification", SemanticNodeType.RECORD, c_status, source_type, c_id)
+            recp_id = _get_or_create_node(c_speaker or "Recipient", SemanticNodeType.ACTOR, c_status, source_type, c_id)
+            target_lbl = subj or "Item"
+            target_id = _get_or_create_node(target_lbl, SemanticNodeType.ENTITY, c_status, source_type, c_id)
             edges.append(SemanticEdge(
                 id=f"E{e_idx}",
                 source_id=recp_id,
-                target_id=notif_id,
+                target_id=target_id,
                 relation_type=SemanticRelationType.RECEIVED_BY,
                 epistemic_status=c_status,
                 provenance=source_type,
@@ -333,12 +385,13 @@ def build_semantic_graph(
             e_idx += 1
 
         elif "access" in c_low or "opened" in c_low or "viewed" in c_low:
-            recp_id = _get_or_create_node(c_speaker or "Recipient", SemanticNodeType.ENTITY, c_status, source_type, c_id)
-            notif_id = _get_or_create_node("Notification", SemanticNodeType.RECORD, c_status, source_type, c_id)
+            recp_id = _get_or_create_node(c_speaker or "Recipient", SemanticNodeType.ACTOR, c_status, source_type, c_id)
+            target_lbl = subj or "Record"
+            target_id = _get_or_create_node(target_lbl, SemanticNodeType.RECORD, c_status, source_type, c_id)
             edges.append(SemanticEdge(
                 id=f"E{e_idx}",
                 source_id=recp_id,
-                target_id=notif_id,
+                target_id=target_id,
                 relation_type=SemanticRelationType.ACCESSED_BY,
                 epistemic_status=c_status,
                 provenance=source_type,
@@ -346,13 +399,14 @@ def build_semantic_graph(
             ))
             e_idx += 1
 
-        elif "acknowledg" in c_low or "sign-off" in c_low:
-            recp_id = _get_or_create_node(c_speaker or "Personnel", SemanticNodeType.ENTITY, c_status, source_type, c_id)
-            notif_id = _get_or_create_node("Notification", SemanticNodeType.RECORD, c_status, source_type, c_id)
+        elif "acknowledg" in c_low or "sign-off" in c_low or "signature" in c_low:
+            recp_id = _get_or_create_node(c_speaker or "Personnel", SemanticNodeType.ACTOR, c_status, source_type, c_id)
+            target_lbl = subj or "Record"
+            target_id = _get_or_create_node(target_lbl, SemanticNodeType.RECORD, c_status, source_type, c_id)
             edges.append(SemanticEdge(
                 id=f"E{e_idx}",
                 source_id=recp_id,
-                target_id=notif_id,
+                target_id=target_id,
                 relation_type=SemanticRelationType.ACKNOWLEDGED_BY,
                 epistemic_status=c_status,
                 provenance=source_type,
@@ -361,7 +415,7 @@ def build_semantic_graph(
             e_idx += 1
 
         elif "calibrat" in c_low:
-            equip_id = _get_or_create_node("Equipment", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            equip_id = _get_or_create_node(subj or "Equipment", SemanticNodeType.ENTITY, c_status, source_type, c_id)
             rec_id = _get_or_create_node("Calibration Record", SemanticNodeType.RECORD, c_status, source_type, c_id)
             edges.append(SemanticEdge(
                 id=f"E{e_idx}",
@@ -375,7 +429,7 @@ def build_semantic_graph(
             e_idx += 1
 
         elif "train" in c_low:
-            actor_id = _get_or_create_node(c_speaker or "Personnel", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            actor_id = _get_or_create_node(c_speaker or "Personnel", SemanticNodeType.ACTOR, c_status, source_type, c_id)
             req_id = _get_or_create_node("Training Requirement", SemanticNodeType.REQUIREMENT, c_status, source_type, c_id)
             edges.append(SemanticEdge(
                 id=f"E{e_idx}",
@@ -385,6 +439,24 @@ def build_semantic_graph(
                 epistemic_status=c_status,
                 provenance=source_type,
                 source_claim_ids=[c_id] if c_id else [],
+            ))
+            e_idx += 1
+
+    # 3. Explicitly represent conflicting evidence relations as unresolved conflict edges
+    if conflicts:
+        for conf in conflicts:
+            c_prop = getattr(conf, "proposition", "Disputed relation")
+            c_claims = getattr(conf, "conflicting_claim_ids", [])
+            n1 = _get_or_create_node(c_prop, SemanticNodeType.EVENT, EvidenceStatus.UNKNOWN, EpistemicSource.UNKNOWN_SOURCE)
+            edges.append(SemanticEdge(
+                id=f"E{e_idx}",
+                source_id=n1,
+                target_id=n1,
+                relation_type=SemanticRelationType.RELATES_TO,
+                epistemic_status=EvidenceStatus.UNKNOWN,
+                provenance=EpistemicSource.UNKNOWN_SOURCE,
+                source_claim_ids=c_claims,
+                notes=f"Unresolved conflict: {c_prop}",
             ))
             e_idx += 1
 

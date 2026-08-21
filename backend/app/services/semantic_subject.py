@@ -99,7 +99,7 @@ _FRAMING_PREFIXES = [
         r"(?:stated|confirmed|reported|said|noted|claimed|indicated)\s+(?:that\s+)?",
         re.IGNORECASE,
     ),
-    re.compile(r"^\s*(?:however\s*,\s*|nevertheless\s*,\s*|but\s*,\s*|in\s+contrast\s*,\s*)", re.IGNORECASE),
+    re.compile(r"^\s*(?:under|per|as\s+per|in\s+accordance\s+with|pursuant\s+to)\s+(?:statutory\s+|regulatory\s+|applicable\s+)?(?:safety\s+|quality\s+|environmental\s+|compliance\s+|security\s+)?(?:standard|regulation|procedure|policy|rule|directive|guideline)\s+[A-Z0-9-]+\s*,\s*", re.IGNORECASE),
     re.compile(
         r"^\s*(?:(?:scada|server|system|audit|dispatch|distribution|security\s+badge|error)\s+(?:system\s+|error\s+)?logs?\s+(?:establish|proves?|shows?|confirms?|indicates?)\s+(?:that\s+)?)",
         re.IGNORECASE,
@@ -751,7 +751,7 @@ def classify_finding_specificity(
     has_mechanism = bool(mechanism_status) and mechanism_status not in ("UNKNOWN", "NONE")
     has_condition = bool(deviation_condition) and deviation_condition.strip() not in _DEGRADED_CONDITIONS
     has_financial_signal = bool(re.search(r"₹|\$|€|£|INR|USD|EUR|duplicate\s+payment|overpayment|batch\s+worth", text, re.IGNORECASE))
-    has_system_record = bool(re.search(r"\b(?:server|system|audit|database|lms|calibration)\s+(?:logs?|records?|trail)\b|\b\d{1,2}:\d{2}\b", text, re.IGNORECASE))
+    has_system_record = bool(re.search(r"\b(?:server|system|audit|database|lms|calibration|distribution|maintenance|inspection|telemetry)\s+(?:logs?|records?|trail|history)\b|\b\d{1,2}:\d{2}\b", text, re.IGNORECASE))
 
     concrete_signals = sum([has_entity, has_date_or_period, has_reported, has_mechanism, has_condition, has_financial_signal, has_system_record])
     if concrete_signals == 0:
@@ -1212,7 +1212,7 @@ _CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "missing_from",
         re.compile(
-            r"^(?P<subject>.+?)\s+(?:was|were)\s+missing\s+from\s+(?:equipment\s+|instrument\s+)?(?P<entity>[A-Z0-9-]+)\b.*$",
+            r"^(?P<subject>.+?)\s+(?:was|were)\s+missing\s+from\s+(?:the\s+)?(?:equipment\s+|instrument\s+)?(?P<entity>[A-Z0-9-]+|[a-z0-9\s-]+?)\s*\.?$",
             re.IGNORECASE,
         ),
     ),
@@ -2811,7 +2811,7 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
 
             # Non-actor path
             matched_ent = groups.get("entity")
-            if matched_ent and matched_ent not in subj:
+            if matched_ent and re.match(r"^[A-Z0-9-]+$", matched_ent.strip()) and matched_ent not in subj:
                 subj = f"{subj} for equipment {matched_ent}"
             elif entities and not any(e in subj for e in entities) and ("label" in subj.lower() or "log" in subj.lower()):
                 subj = f"{subj} for {entities[0]}"

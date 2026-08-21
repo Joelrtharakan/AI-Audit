@@ -41,10 +41,10 @@ from app.services.text_grounding import significant_words
 # immediately before the verb.
 _NON_PERFORMANCE_RE = re.compile(
     r"\b(missed|skipped|omitted|"
-    r"not\s+(?:have\s+been\s+|been\s+)?(?:performed|conducted|carried\s+out|done|completed|followed|occurred|assigned)|"
-    r"did\s+not\s+(?:occur|perform|conduct|complete|carry\s+out|follow|assign)|"
-    r"failed\s+to\s+(?:perform|conduct|complete|carry\s+out|follow|assign)|"
-    r"never\s+(?:performed|conducted|done|completed|occurred|assigned))\b",
+    r"not\s+(?:have\s+been\s+|been\s+)?(?:performed|conducted|carried\s+out|done|completed|followed|occurred|assigned|communicated|distributed|dispatched)|"
+    r"did\s+not\s+(?:occur|perform|conduct|complete|carry\s+out|follow|assign|communicate|distribute|dispatch)|"
+    r"failed\s+to\s+(?:perform|conduct|complete|carry\s+out|follow|assign|communicate|distribute|dispatch)|"
+    r"never\s+(?:performed|conducted|done|completed|occurred|assigned|communicated|distributed|dispatched))\b",
     re.IGNORECASE,
 )
 
@@ -75,9 +75,9 @@ _KNOWLEDGE_GAP_RE = re.compile(
 # became a 5-Why mechanism step even though it was already accepted
 # elsewhere in the pipeline as VERIFIED causal proof for the hypothesis.
 _SYSTEM_FAILURE_RE = re.compile(
-    r"\b(?:server|system|service|channel|network|queue|message\s+queue)\b"
-    r"(?:(?!\.).){0,40}?"
-    r"\b(?:outage|failure|down|crashed|unresponsive|failed)\b",
+    r"\b(?:server|system|service|channel|network|queue|message\s+queue|sensor|circuit|telemetry|motor|actuator|valve|hardware|instrument|controller|power\s+supply|heating\s+coil)\b"
+    r"(?:(?!\.).){0,50}?"
+    r"\b(?:outage|failure|down|crashed|unresponsive|failed|interruption|fault|short\s+circuit|open\s+circuit|malfunction|trip(?:ped)?)\b",
     re.IGNORECASE,
 )
 
@@ -125,6 +125,10 @@ _OBJECTIVE_PROOF_RE = re.compile(
     r"\b(?:as\s+proven\s+by|proven\s+by|audit\s+log\s+proves|log\s+proves|telemetry\s+proves|event\s+log\s+show(?:s|ing)|scada\s+(?:event\s+)?log\s+show(?:s|ing)|trace\s+proves|intermittent\s+open\s+circuit|failed\s+high|failed\s+low|broken\s+seal|calibration\s+record\s+proves)\b",
     re.IGNORECASE,
 )
+_CONTROL_DEFICIENCY_RE = re.compile(
+    r"\b(?:inadequate|insufficient|unjustified|not\s+validated|unvalidated|not\s+justified|unqualified|not\s+approved|not\s+calibrated|out\s+of\s+calibration|unauthorized|overdue|exceeded\s+limit|missing\s+control|control\s+gap|design\s+gap)\b",
+    re.IGNORECASE,
+)
 
 
 def classify_mechanism_polarity(text: str) -> str | None:
@@ -141,16 +145,18 @@ def classify_mechanism_polarity(text: str) -> str | None:
     """
     if not text or is_evidence_absence_claim(text):
         return None
+    if _KNOWLEDGE_GAP_RE.search(text):
+        return "knowledge_gap"
     if _OBJECTIVE_PROOF_RE.search(text):
         return "system_failure"
     if _NON_PERFORMANCE_RE.search(text):
         return "non_performance"
     if _NON_RECORDING_RE.search(text):
         return "non_recording"
-    if _KNOWLEDGE_GAP_RE.search(text):
-        return "knowledge_gap"
     if _SYSTEM_FAILURE_RE.search(text):
         return "system_failure"
+    if _CONTROL_DEFICIENCY_RE.search(text):
+        return "control_deficiency"
     return None
 
 
@@ -311,7 +317,20 @@ def mechanism_already_names_generic_hypothesis(hypothesis_statement: str, mechan
     hedge_re = re.compile(r"\b(may|might|possibly|could\s+have|it\s+is\s+possible)\b", re.IGNORECASE)
     if not hedge_re.search(hypothesis_statement):
         return False
-    return classify_mechanism_polarity(hypothesis_statement) == mechanism.polarity
+    if classify_mechanism_polarity(hypothesis_statement) != mechanism.polarity:
+        return False
+    # If the hypothesis names a specific concrete activity or mechanism
+    # that is different from what was extracted, require semantic overlap or generic wording
+    generic_hyp_re = re.compile(r"\b(?:activity|task|check|step|requirement|procedure|operation|process)\s+(?:may|might|could)\b", re.IGNORECASE)
+    if generic_hyp_re.search(hypothesis_statement):
+        return True
+    if mechanism.statement:
+        hyp_words = significant_words(hypothesis_statement)
+        mech_words = significant_words(mechanism.statement)
+        if hyp_words and mech_words:
+            overlap = len(hyp_words & mech_words) / min(len(hyp_words), len(mech_words))
+            return overlap >= 0.4
+    return True
 
 
 # ---------------------------------------------------------------------------

@@ -596,6 +596,21 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     hypothesis_tested=None,
                 ),
             ]
+            # Filter out redundant procedure question if requirement is already known in canonical state
+            has_known_req = False
+            if canonical and getattr(canonical, "semantic_graph", None):
+                sem_graph = canonical.semantic_graph
+                if getattr(sem_graph, "nodes", None):
+                    has_known_req = any(
+                        getattr(n, "node_type", None) == "REQUIREMENT" and str(getattr(n, "epistemic_status", "")).endswith("VERIFIED")
+                        for n in sem_graph.nodes
+                    )
+            if has_known_req:
+                _foundational_questions = [
+                    q for q in _foundational_questions
+                    if "Which approved procedure and specific requirement were applicable?" not in q.question
+                ]
+
             if inv is not None:
                 inv.questions = _foundational_questions
                 inv.areas = [
@@ -1367,20 +1382,6 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # Rule 1 & 12: 5-Why provenance and conflict boundary enforcement
     if fw and fw.steps:
         from app.agent.causal_guard import _ATTRIBUTION_LANGUAGE_RE
-        for step in fw.steps:
-            if step.answer and _ATTRIBUTION_LANGUAGE_RE.search(step.answer):
-                # SUPPORTED is just as capable of over-claiming an
-                # attributed statement as VERIFIED -- checked here too
-                # (defense-in-depth alongside core_synthesis's own guard)
-                # so no path (LLM, recovery, downstream edit) can leave a
-                # narrated report labeled as though it were an established
-                # causal finding.
-                if step.status in ("VERIFIED", "SUPPORTED"):
-                    _old_status = step.status
-                    step.status = "REPORTED"
-                    trace.append(AgentTraceStep.warn(
-                        f"Final Evidence Verification: downgraded 5-Why answer containing attribution from {_old_status} to REPORTED"
-                    ))
         if canonical and canonical.evidence_conflicts:
             # When evidence conflicts exist, rebuild deterministic 5-Why chain if LLM fabricated steps
             from app.agent.nodes.five_why_fallback import build_deterministic_five_why
@@ -1388,8 +1389,18 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 finding_text, evidence_ledger,
                 canonical_subject=getattr(canonical, "finding_subject", None),
             )
+            state["five_why"] = fw
             if report:
                 report.five_why = fw
+
+        for step in fw.steps:
+            if step.answer and _ATTRIBUTION_LANGUAGE_RE.search(step.answer):
+                if step.status in ("VERIFIED", "SUPPORTED"):
+                    _old_status = step.status
+                    step.status = "REPORTED"
+                    trace.append(AgentTraceStep.warn(
+                        f"Final Evidence Verification: downgraded 5-Why answer containing attribution from {_old_status} to REPORTED"
+                    ))
 
     # Rule 5: Affected Object vs Impact separation, AND semantic subject-
     # drift detection. A grammatically valid noun phrase can still have

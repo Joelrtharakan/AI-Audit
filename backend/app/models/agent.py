@@ -209,13 +209,41 @@ class SemanticNodeType(str, Enum):
     ENTITY = "ENTITY"
     EVENT = "EVENT"
     STATE = "STATE"
-    REQUIREMENT = "REQUIREMENT"
+    PROCESS = "PROCESS"
     CONTROL = "CONTROL"
+    REQUIREMENT = "REQUIREMENT"
     RECORD = "RECORD"
+    ACTOR = "ACTOR"
+    ROLE = "ROLE"           # Organizational/functional role (distinct from the actor who holds it)
+    ATTRIBUTE = "ATTRIBUTE"
+    EVIDENCE = "EVIDENCE"   # An evidence artifact cited in a claim (distinct from RECORD which is the finding's target)
+    OBSERVATION = "OBSERVATION"
     MEASUREMENT = "MEASUREMENT"
+
+    # Semantic node type priority ordering for type-upgrade decisions.
+    # Higher index = more specific; ENTITY is the least-specific fallback.
+    @classmethod
+    def specificity_rank(cls, node_type: "SemanticNodeType") -> int:
+        _RANK = {
+            cls.ENTITY: 0,
+            cls.OBSERVATION: 1,
+            cls.STATE: 2,
+            cls.EVENT: 3,
+            cls.MEASUREMENT: 4,
+            cls.EVIDENCE: 5,
+            cls.ATTRIBUTE: 6,
+            cls.RECORD: 7,
+            cls.ROLE: 8,
+            cls.ACTOR: 9,
+            cls.PROCESS: 10,
+            cls.CONTROL: 11,
+            cls.REQUIREMENT: 12,
+        }
+        return _RANK.get(node_type, 0)
 
 
 class SemanticRelationType(str, Enum):
+    # Semantic structural
     GOVERNS = "GOVERNS"
     TRANSMITTED_TO = "TRANSMITTED_TO"
     RECEIVED_BY = "RECEIVED_BY"
@@ -230,6 +258,32 @@ class SemanticRelationType(str, Enum):
     DEVIATES_FROM = "DEVIATES_FROM"
     PRECEDES = "PRECEDES"
     RELATES_TO = "RELATES_TO"
+    HAS_ATTRIBUTE = "HAS_ATTRIBUTE"
+
+    # Normative / Compliance semantics
+    SATISFIES = "SATISFIES"
+    VIOLATES = "VIOLATES"
+    REQUIRES = "REQUIRES"
+    REQUIRES_ATTRIBUTE = "REQUIRES_ATTRIBUTE"
+    LACKS_REQUIRED_ATTRIBUTE = "LACKS_REQUIRED_ATTRIBUTE"
+    NOT_PERFORMED_AS_REQUIRED = "NOT_PERFORMED_AS_REQUIRED"
+    NOT_DEMONSTRATED = "NOT_DEMONSTRATED"
+    INCONSISTENT_WITH = "INCONSISTENT_WITH"
+    WITHIN_REQUIREMENT = "WITHIN_REQUIREMENT"
+    OUTSIDE_REQUIREMENT = "OUTSIDE_REQUIREMENT"
+    SUBJECT_TO = "SUBJECT_TO"         # Entity is subject to a requirement/control
+    CONFORMS_TO = "CONFORMS_TO"       # Entity conforms to a requirement (verified positive)
+
+    # Set of relation types that are NORMATIVE — never causal.
+    # Used by INV-ROLE-004 to detect normative-to-causal conflation.
+    @classmethod
+    def normative_relation_types(cls) -> frozenset["SemanticRelationType"]:
+        return frozenset({
+            cls.SATISFIES, cls.VIOLATES, cls.REQUIRES, cls.REQUIRES_ATTRIBUTE,
+            cls.LACKS_REQUIRED_ATTRIBUTE, cls.NOT_PERFORMED_AS_REQUIRED,
+            cls.NOT_DEMONSTRATED, cls.INCONSISTENT_WITH, cls.WITHIN_REQUIREMENT,
+            cls.OUTSIDE_REQUIREMENT, cls.SUBJECT_TO, cls.CONFORMS_TO, cls.GOVERNS,
+        })
 
 
 class SemanticNode(BaseModel):
@@ -260,6 +314,36 @@ class SemanticGraph(BaseModel):
     """The explicit structural Semantic Graph answering: 'What entities, events, states, and relations are present?'"""
     nodes: list[SemanticNode] = []
     edges: list[SemanticEdge] = []
+
+
+class OutputQualityDimension(BaseModel):
+    """A single scored dimension in the structural quality assessment (Section 21)."""
+    name: str
+    score: int           # 0..max_score
+    max_score: int
+    passed: bool
+    reason: str | None = None
+
+
+class OutputQualityScore(BaseModel):
+    """Composite structural quality score for the agent output (Section 21).
+
+    Aggregates 10 independent structural dimensions. This is deliberately
+    separate from LLM output fluency — a fluent, well-worded output that
+    violates structural invariants will still receive a low score.
+
+    Thresholds:
+      score >= 80  → PASS
+      60 <= score < 80 → WARNING (investigation report may be emitted with warnings)
+      score < 60   → FAIL  (fail-closed gate fires; structured validation error returned)
+    """
+    dimensions: list[OutputQualityDimension] = []
+    total_score: int = 0
+    max_possible: int = 100
+    grade: str = "UNKNOWN"          # PASS | WARNING | FAIL
+    blocker_violations: list[str] = []
+    critical_violations: list[str] = []
+    computed_at: str | None = None
 
 
 class SemanticTraceabilityEntry(BaseModel):
