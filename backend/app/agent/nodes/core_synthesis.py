@@ -59,6 +59,7 @@ from app.agent.state import AgentState
 from app.config import get_settings
 from app.models.agent import (
     AgentTraceStep,
+    CADraft,
     CandidateHypothesis,
     CanonicalFindingState,
     CapaAnalysis,
@@ -70,6 +71,7 @@ from app.models.agent import (
     FiveWhyStep,
     ImpactAssessment,
     ImpactStatus,
+    InvestigationPlan,
     InvestigationQuestion,
     RootCauseAnalysis,
     RootCauseStatus,
@@ -409,6 +411,7 @@ def _parse_causal_fields(
             evidence_items=evidence_ledger,
             conflicts=canonical.evidence_conflicts if canonical else None,
             referenced_docs=canonical.referenced_documents if canonical else None,
+            canonical_state=canonical,
         )
         if promo and supp == SupportLevel.SUPPORTED:
             h.status = "SUPPORTED"
@@ -442,14 +445,37 @@ def _parse_causal_fields(
     fw_steps = []
     reported_facts = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
     from app.services.status_normalizer import normalize_five_why_status
-    for s in raw_fw.get("steps", []):
-        if isinstance(s, dict):
-            # Single authoritative status-normalization boundary (same
-            # module used for root_cause/hypothesis statuses above) --
-            # maps LLM synonyms ("CONFIRMED", "CONFLICTING", "STATED", etc.)
-            # onto their correct canonical status instead of a blunt
-            # substring-only fallback, while never raising on an invalid enum.
-            st = normalize_five_why_status(s.get("status"))
+
+    # F4b — The deferral gate fires when requirement status is truly uncertain
+    # (primary uncertainty is REQUIREMENT_UNCERTAIN, e.g. finding states the requirement
+    # itself could not be determined or located).
+    if canonical and (
+        getattr(canonical, "primary_uncertainty", None) == "REQUIREMENT_UNCERTAIN"
+        or getattr(canonical, "semantic_type", None) == "REQUIREMENT_UNCERTAIN"
+    ):
+        trace.append(AgentTraceStep.warn(
+            "Core Synthesis: 5-Why deferred pending requirement resolution (INV-5WHY-UNCERTAINTY-001)"
+        ))
+        fw_steps.append(FiveWhyStep(
+            level=1,
+            question="Why-chain deferred pending requirement resolution",
+            answer="Why-chain deferred because the applicable requirement/deviation status has not yet been established.",
+            status="UNKNOWN",
+        ))
+        five_why = FiveWhyAnalysis(
+            steps=fw_steps,
+            is_complete=False,
+            status_note="EVIDENCE BOUNDARY — Applicable requirement is unresolved; causal analysis deferred until compliance status is established.",
+        )
+    else:
+        for s in raw_fw.get("steps", []):
+            if isinstance(s, dict):
+                # Single authoritative status-normalization boundary (same
+                # module used for root_cause/hypothesis statuses above) --
+                # maps LLM synonyms ("CONFIRMED", "CONFLICTING", "STATED", etc.)
+                # onto their correct canonical status instead of a blunt
+                # substring-only fallback, while never raising on an invalid enum.
+                st = normalize_five_why_status(s.get("status"))
             question = clean_structured_leak(s.get("question", ""))
             answer = clean_structured_leak(s.get("answer", ""))
 
@@ -524,6 +550,50 @@ def _parse_causal_fields(
                 ))
                 answer = "The available evidence does not establish this — the answer could not be traced to this finding's evidence."
                 st = "UNKNOWN"
+            else:
+                # CAUSAL BOUNDARY GUARD (INV-5WHY-CAUSAL-001): a 5-Why answer
+                # must never functionally select/assert an UNVERIFIED
+                # candidate hypothesis as though it were the established
+                # explanation, no matter what status label the LLM gave the
+                # step or how the claim is hedged ("may have ..."). The
+                # 5-Why engine must consume the canonical causal-graph
+                # hypothesis state, not independently invent an explanation.
+                from app.agent.causal_guard import (
+                    answer_selects_unverified_hypothesis,
+                    build_causal_boundary_answer,
+                    five_why_answer_contains_unverified_modal_causation,
+                )
+                _has_verified_mechanism = getattr(mechanism, "status", None) == "VERIFIED"
+                _selected_hyp = answer_selects_unverified_hypothesis(answer, cand_hypotheses, status=st)
+                _modal_causation = five_why_answer_contains_unverified_modal_causation(
+                    answer, st, has_verified_mechanism=_has_verified_mechanism
+                )
+                if _selected_hyp is not None or _modal_causation:
+                    if _selected_hyp is not None:
+                        trace.append(AgentTraceStep.warn(
+                            f"Core Synthesis: 5-Why step {len(fw_steps) + 1} answer selected unverified "
+                            f"hypothesis {getattr(_selected_hyp, 'id', '?')} ({getattr(_selected_hyp, 'name', '?')}) "
+                            "as the explanation — replaced with the canonical evidence boundary"
+                        ))
+                    else:
+                        trace.append(AgentTraceStep.warn(
+                            f"Core Synthesis: 5-Why step {len(fw_steps) + 1} answer contained an unverified "
+                            "modal causal claim (INV-5WHY-CAUSAL-002) with no verified mechanism — replaced "
+                            "with the canonical evidence boundary"
+                        ))
+                    answer = build_causal_boundary_answer(
+                        candidate_hypotheses=cand_hypotheses,
+                        comparison_type=getattr(canonical, "comparison_type", None),
+                        comparison_left=getattr(canonical, "comparison_left", None),
+                        comparison_right=getattr(canonical, "comparison_right", None),
+                        comparison_left_qualifier=getattr(canonical, "comparison_left_qualifier", None),
+                        comparison_subtype=getattr(canonical, "comparison_subtype", None),
+                        measurement_value=getattr(getattr(canonical, "measurement", None), "value", None),
+                        measurement_unit=getattr(getattr(canonical, "measurement", None), "unit", None),
+                        measurement_qualifier=getattr(getattr(canonical, "measurement", None), "qualifier", None),
+                        observed_deviation=observed_deviation,
+                    )
+                    st = "UNKNOWN"
 
             fw_steps.append(FiveWhyStep(
                 level=int(s.get("level", len(fw_steps) + 1)),
@@ -633,14 +703,26 @@ def _parse_causal_fields(
             kept_factors.append(cf)
     contributing_factors = kept_factors
 
-    # Ensure candidate_hypotheses is NEVER empty
-    if not root_cause.candidate_hypotheses:
-        from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
-        fallback_hyps, _ = build_deterministic_investigation_plan(
-            finding_text, evidence_ledger, canonical_subject=canonical_subject,
-        )
-        root_cause.candidate_hypotheses = fallback_hyps
-        trace.append(AgentTraceStep.warn("Core Synthesis: generated fallback candidate hypotheses from finding text"))
+    # REQUIREMENT_UNCERTAIN CAUSAL GATE (INV-UNCERTAINTY-002):
+    # When the governing requirement/standard is unresolved, causal hypothesis generation
+    # is blocked. Plausible mechanisms (e.g. lack of awareness/training) cannot be asserted
+    # as candidate causes until the requirement and deviation status are established.
+    if canonical and (getattr(canonical, "primary_uncertainty", None) == "REQUIREMENT_UNCERTAIN" or getattr(canonical, "semantic_type", None) == "REQUIREMENT_UNCERTAIN"):
+        root_cause.candidate_hypotheses = []
+        root_cause.status = RootCauseStatus.NOT_ESTABLISHED
+        root_cause.category = "TO_BE_CONFIRMED"
+        trace.append(AgentTraceStep.ok(
+            "Core Synthesis: causal hypothesis generation blocked because governing requirement is unresolved"
+        ))
+    else:
+        # Ensure candidate_hypotheses is NEVER empty for other non-blocked finding types
+        if not root_cause.candidate_hypotheses:
+            from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+            fallback_hyps, _ = build_deterministic_investigation_plan(
+                finding_text, evidence_ledger, canonical_subject=canonical_subject, canonical_state=canonical,
+            )
+            root_cause.candidate_hypotheses = fallback_hyps
+            trace.append(AgentTraceStep.warn("Core Synthesis: generated fallback candidate hypotheses from finding text"))
 
     # Every surviving hypothesis carries its own deterministic confidence
     # grade (never asserted by the LLM) so a report never shows a bare
@@ -686,7 +768,7 @@ def _parse_causal_fields(
     return root_cause, five_why, contributing_factors
 
 
-def _derive_ca_draft_fields(root_cause, impact) -> dict:
+def _derive_ca_draft_fields(root_cause, impact, canonical=None) -> dict:
     """Derives the 5 CA-draft fields from the already-synthesized
     root_cause/impact objects instead of asking the LLM for a second,
     separate restatement of the same analysis."""
@@ -736,6 +818,69 @@ def _derive_ca_draft_fields(root_cause, impact) -> dict:
             f"Verify whether the duplicate{amt_str} payment has been reversed, recovered, or credited by the supplier "
             "and place the transaction under appropriate financial reconciliation review."
         )
+    elif canonical is not None and getattr(canonical, "semantic_type", None) == "EVENT_SEQUENCE_CONTROL" and getattr(canonical, "transition_type", None):
+        # EVENT_SEQUENCE_CONTROL finding (Section 18): the immediate action
+        # follows the control risk -- verify the authorization chain for
+        # the transition, and separately protect any downstream decision
+        # that may depend on it, without assuming either was improper.
+        _transition_label = canonical.transition_type.replace("_", " ").lower()
+        if getattr(canonical, "downstream_action_present", False):
+            immediate_action = (
+                f"Verify the authorization chain for the {_transition_label} before relying on it, and place "
+                "any downstream decision that may depend on this transition under appropriate review pending "
+                "that verification."
+            )
+        else:
+            immediate_action = (
+                f"Verify the authorization chain for the {_transition_label} and retrieve contemporaneous "
+                "records to determine whether the applicable control was executed before relying on the "
+                "affected record for further decisions."
+            )
+    elif canonical is not None and getattr(canonical, "semantic_type", None) == "MISSING_RECORD" and getattr(canonical, "missing_record_activity", None):
+        # MISSING_RECORD finding (Section 12): generated from the current
+        # evidence state -- activity status is UNKNOWN until evidence
+        # establishes it, so the action is to verify execution and
+        # reconstruct the record trail, never to assume non-performance.
+        # When a downstream action was also detected, additionally flag
+        # that it should be assessed for continued support -- never
+        # asserted as invalid.
+        _activity = canonical.missing_record_activity
+        if getattr(canonical, "downstream_action_present", False):
+            immediate_action = (
+                f"Verify execution of the required {_activity} and reconstruct the applicable record trail "
+                "before relying on the affected control evidence, and separately assess whether the "
+                "downstream action reported in the finding remains appropriately supported."
+            )
+        else:
+            immediate_action = (
+                f"Verify execution of the required {_activity} and reconstruct the applicable record trail "
+                "before relying on the affected control evidence."
+            )
+    elif canonical is not None and getattr(canonical, "comparison_type", None) and getattr(canonical, "comparison_left", None) and getattr(canonical, "comparison_right", None):
+        # COMPARISON_MISMATCH finding (Section 10): generated from the
+        # finding TYPE, not hardcoded to any one domain -- the same
+        # sentence applies whether the compared values are a yield, a
+        # temperature, an invoice amount, or a quantity.
+        _qualified_left = (
+            f"{canonical.comparison_left_qualifier} {canonical.comparison_left}"
+            if getattr(canonical, "comparison_left_qualifier", None) else canonical.comparison_left
+        )
+        if getattr(canonical, "comparison_subtype", None) == "PARAMETER_MISMATCH":
+            # Subtype-specific wording (Section 13): no "calculation" basis
+            # to reconcile against for a parameter mismatch -- the relevant
+            # authority is the approved parameter itself plus batch/process
+            # records.
+            immediate_action = (
+                f"Verify the applicable approved parameter and independently reconcile the {_qualified_left} "
+                "against authoritative batch and process records before relying on the affected batch record "
+                "for further decisions."
+            )
+        else:
+            immediate_action = (
+                f"Independently reconcile the {_qualified_left} against the underlying "
+                f"{canonical.comparison_basis or 'source records'} and applicable calculation/reference basis, "
+                "and assess the discrepancy before relying on the affected record for further decisions."
+            )
     elif affected.strip().lower().endswith(" receipt"):
         _base_subject = affected[: -len(" receipt")]
         _base_subject = _base_subject[0].lower() + _base_subject[1:] if _base_subject else _base_subject
@@ -866,6 +1011,57 @@ def _extract_use_date_text(finding_text: str) -> str | None:
     return use_match.group(1) if use_match else None
 
 
+def _reportedly_clause(obj: str, condition: str | None) -> str:
+    """Builds a grammatically safe "<obj> was reportedly <condition>" (or
+    the active-voice equivalent) clause for a deviation_condition value that
+    could be EITHER an adjective/participle predicate ("incomplete", "not
+    completed", "operated outside its validated range" -- correctly follows
+    "was reportedly") OR a bare verb-phrase naming an OMITTED action
+    ("distribute the revised SOP", from a "failed to <verb> <object>"
+    source pattern -- "X was reportedly distribute the revised SOP" is
+    ungrammatical; the deviation here IS the failure to do that action, so
+    "X reportedly failed to <verb-phrase>" is the correct reconstruction).
+    Reuses the same closed adjective vocabulary and "not "-prefix check
+    format_deviation_why_question uses for the identical classification
+    problem, so both call sites agree on which conditions are which shape."""
+    cond = (condition or "").strip().rstrip(".")
+    if not cond or cond.upper() == "UNKNOWN":
+        return f"{obj} was reportedly in a condition that has not been verified against applicable requirements."
+    from app.services.semantic_subject import _CONDITION_ADJECTIVES
+    first_word = cond.split()[0].lower()
+    if cond.lower().startswith(("was ", "were ", "not ")) or first_word in _CONDITION_ADJECTIVES:
+        stripped = re.sub(r"^(?:was|were)\s+", "", cond, flags=re.IGNORECASE)
+        return f"{obj} was reportedly {stripped}."
+    # A condition that IS (or starts with) a quantity/amount descriptor
+    # ("approximately ₹4 lakh of rework costs", "about 12 units") is neither
+    # an adjective predicate nor an omitted-action verb phrase -- it names a
+    # magnitude the finding associates with the subject, not something the
+    # subject "failed to do". "X reportedly failed to approximately ₹4
+    # lakh..." (the bare-leading-word verb heuristic below misreading
+    # "approximately" as a verb) is exactly the defect this guards against.
+    if re.match(r"^(?:approximately|about|roughly|nearly|₹|\$|€|£|\d)", cond, re.IGNORECASE):
+        return f"{obj} was reportedly associated with {cond}."
+    # A bare leading-word match alone is NOT sufficient to treat `cond` as an
+    # omitted-action verb phrase -- it also matches an already-inflected
+    # past-tense predicate describing something that DID happen (e.g.
+    # "processed the transaction twice due to a retry-queue duplication
+    # bug"), where "X reportedly failed to processed..." is both
+    # ungrammatical (tense mismatch) and semantically inverted (nothing was
+    # omitted). Only a RECOGNIZED infinitive-form omitted-action verb (the
+    # same closed whitelist format_deviation_why_question uses for the
+    # identical problem) gets the "failed to" reconstruction; anything else
+    # falls through to the neutral dash rendering below, matching
+    # semantic_subject.py's own established safe fallback for an
+    # unclassified condition.
+    from app.services.semantic_subject import _TRANSITIVE_FAILED_TO_VERBS
+    verb_match = re.match(r"^([a-z]+)\s+\S", cond, re.IGNORECASE)
+    if verb_match and verb_match.group(1).lower() in _TRANSITIVE_FAILED_TO_VERBS:
+        return f"{obj} reportedly failed to {cond}."
+    if verb_match:
+        return f"{obj} — {cond}."
+    return f"{obj} was reportedly {cond}."
+
+
 def _derive_deterministic_impact(request_finding_text: str, canonical, observed_deviation: str) -> tuple[ImpactAssessment, str, str, str | None]:
     """Shared deterministic impact derivation used both when a compact
     recovery call succeeds (recovery's schema deliberately excludes impact)
@@ -939,10 +1135,137 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
              and getattr(c, "status", "UNRESOLVED") == "UNRESOLVED"),
             None,
         )
-    if clean_noun and not clean_noun.startswith("UNKNOWN") and _delivery_receipt_conflict is not None:
+    # EVENT_SEQUENCE_CONTROL finding (Section 17): the transition and its
+    # missing justification are VERIFIED (the finding directly states
+    # them) -- state that directly. The downstream action (if any) is a
+    # SEPARATE event whose dependency on the transition requires
+    # assessment; never assert the transition or downstream action was
+    # improper. Generalizes across any transition type (invalidation,
+    # override, exception, waiver, ...), not specific to any one domain.
+    if canonical and getattr(canonical, "semantic_type", None) == "EVENT_SEQUENCE_CONTROL" and getattr(canonical, "transition_type", None):
+        transition_label = canonical.transition_type.replace("_", " ").lower()
+        derived_obj = (canonical.finding_subject or transition_label)
+        derived_obj = derived_obj[0].upper() + derived_obj[1:] if derived_obj else transition_label.capitalize()
+        derived_process = canonical.affected_process if (canonical.affected_process not in ("UNKNOWN", "NOT ESTABLISHED", "")) else f"{transition_label.capitalize()} control and authorization"
+        downstream_clause = (
+            " A downstream action is also reported in the finding; whether it depended on this transition "
+            "and remains appropriately supported requires assessment. This does not establish that the "
+            "downstream action was improper."
+            if getattr(canonical, "downstream_action_present", False) else ""
+        )
+        if canonical.finding_subject and canonical.finding_subject.lower() != transition_label:
+            derived_effect = (
+                f"The {canonical.finding_subject} {transition_label} occurred and the required justification is not documented, based on "
+                f"the available evidence.{downstream_clause} The applicable control, change justification, and downstream consequences require assessment."
+            )
+        else:
+            derived_effect = (
+                f"The {transition_label} occurred and the required justification is not documented, based on "
+                f"the available evidence.{downstream_clause} The applicable control and its execution require assessment."
+            )
+        derived_evidence_needed = (
+            f"Records documenting the {transition_label} event, the applicable procedure governing it, and "
+            "any authorization/review record for this specific transition"
+        )
+    # RECURRENCE finding (Section 11/16): the recurrence observation itself
+    # is VERIFIED (the finding directly states the deviation was identified
+    # across a population of occurrences) -- state it directly. Separate
+    # the recurrence OBSERVATION from any prior-action relationship (never
+    # implied "ineffective") and from future recurrence RISK (a distinct
+    # dimension, never inferred from the fact recurrence already occurred).
+    elif canonical and getattr(canonical, "semantic_type", None) == "RECURRENCE" and getattr(canonical, "finding_subject", None) not in (None, "UNKNOWN"):
+        deviation_subject = canonical.finding_subject
+        derived_obj = deviation_subject[0].upper() + deviation_subject[1:]
+        derived_process = canonical.affected_process if (canonical.affected_process not in ("UNKNOWN", "NOT ESTABLISHED", "")) else f"{topic_word(deviation_subject).capitalize()} operational process"
+        population_clause = f" across {canonical.occurrence_population}" if getattr(canonical, "occurrence_population", None) else ""
+        prior_action_clause = (
+            " A prior corrective action is also referenced; this does not by itself establish whether "
+            "that action was effective, fully implemented, or related to the current mechanism."
+            if getattr(canonical, "previous_capa_referenced", False) else ""
+        )
+        derived_effect = (
+            f"The {deviation_subject}{population_clause} is confirmed by the available evidence.{prior_action_clause} "
+            "The scope of the affected population and the relationship to any prior corrective action require assessment."
+        )
+        derived_evidence_needed = (
+            f"Records for each occurrence of the {deviation_subject}, the prior corrective action record "
+            "(if any), and its implementation/effectiveness evidence"
+        )
+    # MISSING_RECORD finding (Section 11): the missing evidence itself is
+    # VERIFIED (the finding directly states it) -- state that directly,
+    # never "reportedly". Separate the OBSERVED condition (record missing)
+    # from POTENTIAL impact (compliance-demonstration ability) from any
+    # DOWNSTREAM action, and never assert the downstream action was
+    # improper absent objective evidence -- only that it requires
+    # assessment. Generalizes across any domain (inspection, review,
+    # approval, verification, ...), not specific to any one activity type.
+    elif canonical and getattr(canonical, "semantic_type", None) == "MISSING_RECORD" and getattr(canonical, "missing_record_activity", None):
+        activity = canonical.missing_record_activity
+        derived_obj = activity[0].upper() + activity[1:]
+        derived_process = canonical.affected_process if (canonical.affected_process not in ("UNKNOWN", "NOT ESTABLISHED", "")) else f"{topic_word(activity).capitalize()} documentation and record control"
+        observed_clause = f"The required record for the {activity} is missing."
+        potential_clause = (
+            "This may affect the ability to demonstrate that the required activity was performed in "
+            "compliance with the applicable requirement."
+        )
+        if getattr(canonical, "downstream_action_present", False):
+            downstream_clause = (
+                " A subsequent action is separately reported in the finding; this does not establish that "
+                "the missing record affected that action, and the action is not automatically considered "
+                "improper. Whether it remains appropriately supported requires assessment."
+            )
+        else:
+            downstream_clause = ""
+        derived_effect = f"{observed_clause} {potential_clause}{downstream_clause}"
+        derived_evidence_needed = (
+            f"{derived_obj} execution/completion records, secondary or independent verification records, "
+            "and the applicable requirement defining the activity"
+        )
+    # COMPARISON/MISMATCH finding (Section 6/7): the observation itself is
+    # VERIFIED (both compared values and their discrepancy are stated facts,
+    # not a report of someone's account) -- render it directly from the
+    # canonical comparison event instead of the generic "<obj> was
+    # reportedly <condition>" template, which incorrectly implies the
+    # comparison itself is unconfirmed rather than merely its CAUSE.
+    elif canonical and getattr(canonical, "comparison_type", None) and getattr(canonical, "comparison_left", None) and getattr(canonical, "comparison_right", None):
+        from app.services.semantic_subject import render_comparison_sentence
+        _measurement = getattr(canonical, "measurement", None)
+        derived_obj = clean_noun[0].upper() + clean_noun[1:] if clean_noun and not clean_noun.startswith("UNKNOWN") else canonical.comparison_left.capitalize()
+        derived_process = canonical.affected_process if (canonical.affected_process not in ("UNKNOWN", "NOT ESTABLISHED", "")) else f"{topic_cap} reconciliation and verification"
+        _sentence = render_comparison_sentence(
+            canonical.comparison_type, canonical.comparison_left, canonical.comparison_right,
+            measurement_value=getattr(_measurement, "value", None),
+            measurement_unit=getattr(_measurement, "unit", None),
+            measurement_qualifier=getattr(_measurement, "qualifier", None),
+            left_qualifier=getattr(canonical, "comparison_left_qualifier", None),
+        ) or f"{derived_obj} differed from the compared value."
+        _batch_suffix = f" for {canonical.comparison_batch_id}" if getattr(canonical, "comparison_batch_id", None) else ""
+        if _sentence.endswith("."):
+            _sentence = f"{_sentence[:-1]}{_batch_suffix}."
+        # Downstream-impact phrasing is keyed by comparison SUBTYPE (Section
+        # 11) -- a parameter mismatch's open question is whether the actual
+        # PROCESS operated outside the approved parameter, distinct from a
+        # calculation mismatch's generic "disposition/quality/reporting"
+        # framing.
+        if getattr(canonical, "comparison_subtype", None) == "PARAMETER_MISMATCH":
+            derived_effect = (
+                f"{_sentence} The impact assessment should determine whether the actual process operated "
+                "outside the approved parameter and whether this affected process performance, product "
+                "quality, batch disposition, or release."
+            )
+        else:
+            derived_effect = (
+                f"{_sentence} The scope and downstream consequences of this discrepancy require assessment, "
+                "including whether it affected batch disposition, quality evaluation, or production reporting."
+            )
+        derived_evidence_needed = (
+            f"Original records for the {canonical.comparison_left}, the {canonical.comparison_right}, and the "
+            "applicable calculation/reference basis"
+        )
+    elif clean_noun and not clean_noun.startswith("UNKNOWN") and _delivery_receipt_conflict is not None:
         _clean_noun_cap = clean_noun[0].upper() + clean_noun[1:]
-        derived_obj = f"{_clean_noun_cap} receipt"
-        derived_process = f"{_clean_noun_cap} delivery, receipt, and acknowledgement control"
+        derived_obj = _clean_noun_cap
+        derived_process = f"{_clean_noun_cap} distribution and delivery control"
         derived_effect = (
             f"If affected personnel were required to act on {clean_noun} before receipt or acknowledgement "
             "was confirmed, the scope and compliance status of those actions may require assessment. This "
@@ -1048,7 +1371,7 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
             if _use_related_condition:
                 derived_process = f"{topic_cap} operation and validated-use control"
                 derived_effect = (
-                    f"{derived_obj} was reportedly {condition}. This may require assessment of the validity or "
+                    f"{_reportedly_clause(derived_obj, condition)} This may require assessment of the validity or "
                     "acceptability of any activity or output associated with that use against the applicable "
                     "requirements. This does not establish that any specific output was invalid or that a "
                     "particular cause was responsible."
@@ -1063,7 +1386,7 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
                 else:
                     derived_process = f"{derived_obj} control"
                 derived_effect = (
-                    f"{derived_obj} was reportedly {condition}. Scope and downstream consequence require "
+                    f"{_reportedly_clause(derived_obj, condition)} Scope and downstream consequence require "
                     "assessment against the applicable requirement and objective records. This does not "
                     "establish a cause."
                 )
@@ -1129,6 +1452,11 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
     evidence_ledger = state.get("evidence_ledger", [])
     quality = state.get("observation_quality")
     canonical = state.get("canonical_finding_state")
+    # Captured before this pass overwrites root_cause -- non-None only on the
+    # critic-send-back re-investigation loop's second (or later) pass, where
+    # it drives the monotonic merge guard below (see
+    # app.agent.causal_graph.merge_candidate_hypotheses).
+    previous_root_cause = state.get("root_cause")
     # Computed once, used everywhere a leading hypothesis is derived below
     # (primary path, recovery path, and full deterministic fallback) so the
     # conflict-tie override is applied consistently regardless of which path
@@ -1136,16 +1464,68 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
     has_unresolved_conflict = bool(
         canonical and any(getattr(c, "status", "UNRESOLVED") == "UNRESOLVED" for c in canonical.evidence_conflicts)
     )
-    # Set only by the deterministic/recovery fallback path below, which
-    # builds its own well-matched investigation questions ALONGSIDE its
-    # hypotheses (build_deterministic_investigation_plan) -- these must be
-    # propagated into state, otherwise they're silently discarded and
-    # final_evidence_verification's generic hypothesis->question fallback
-    # (designed for LLM-produced hypotheses) has to re-derive questions from
-    # confirms_if/refutes_if text it was never designed to parse, which can
-    # mis-render compound clauses. None means "leave state's existing
-    # investigation_plan untouched" (the normal LLM-success case).
-    investigation_plan_override = None
+    # NON-ACTIONABLE FAST PATH: if input is not actionable, return clean NOT_APPLICABLE/empty structures
+    if canonical and not getattr(canonical, "is_actionable", True):
+        trace.append(AgentTraceStep.ok("Core synthesis: non-actionable input — synthesis not applicable"))
+        root_cause = RootCauseAnalysis(
+            status=RootCauseStatus.NOT_APPLICABLE,
+            category=None,
+            statement=None,
+            leading_hypothesis=None,
+            candidate_hypotheses=[],
+            narrative="No actionable audit observation provided for investigation.",
+            evidence_status=EvidenceStatus.UNKNOWN,
+            verification_needed="Not applicable — input is non-actionable.",
+        )
+        five_why = FiveWhyAnalysis(
+            steps=[],
+            is_complete=False,
+            status_note="NOT APPLICABLE — NON-ACTIONABLE INPUT",
+        )
+        impact = ImpactAssessment(
+            status=ImpactStatus.IMPACT_NOT_IDENTIFIED,
+            areas=[],
+            narrative=None,
+            affected_object=None,
+            affected_people=None,
+            affected_period=None,
+            process_at_risk=None,
+            control_at_risk=None,
+            relevant_change=None,
+            potential_effect=None,
+            evidence_needed=None,
+        )
+        capa = CapaAnalysis(
+            status=CapaStatus.NO_CAPA_RECOMMENDATION_YET,
+            potential_areas=[],
+            recommended_investigation=[],
+            conditional_actions=[],
+        )
+        ca_draft = CADraft(
+            immediate_action="Not applicable — input is non-actionable.",
+            root_cause="Not applicable — input is non-actionable.",
+            root_cause_category="NOT_APPLICABLE",
+            preventive_action="Not applicable — input is non-actionable.",
+            impact_analysis="Not applicable — input is non-actionable.",
+        )
+        return {
+            **state,
+            "root_cause": root_cause,
+            "five_why": five_why,
+            "impact_assessment": impact,
+            "capa_analysis": capa,
+            "contributing_factors": [],
+            "ca_draft": ca_draft,
+            "analysis_mode": "DETERMINISTIC",
+            "analysis_engine": "DETERMINISTIC",
+            "synthesis_execution": {"source": "DETERMINISTIC", "non_actionable": True},
+            "provider_used": None,
+            "fallback_used": False,
+            "provider_attempts": [],
+            "investigation_plan": InvestigationPlan(areas=[], questions=[], evidence_to_collect=[]),
+            "trace": trace,
+            "errors": errors,
+        }
 
     settings = get_settings()
 
@@ -1312,7 +1692,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         # CA DRAFT: built deterministically from the already-synthesized
         # root_cause/impact instead of asking the LLM to restate them a
         # second time. One canonical implementation.
-        ca_draft = build_ca_draft(_derive_ca_draft_fields(root_cause, impact))
+        ca_draft = build_ca_draft(_derive_ca_draft_fields(root_cause, impact, canonical))
 
         analysis_mode = "LLM"
         analysis_engine = "LLM"
@@ -1442,7 +1822,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             build_deterministic_investigation_plan,
         )
         _, fallback_plan = build_deterministic_investigation_plan(
-            request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
+            request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None), canonical_state=canonical,
         )
         investigation_plan_override = fallback_plan
 
@@ -1483,7 +1863,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                 request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
             )
             fallback_hyps, fallback_plan = build_deterministic_investigation_plan(
-                request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
+                request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None), canonical_state=canonical,
             )
             investigation_plan_override = fallback_plan
             contributing_factors = []
@@ -1496,6 +1876,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                     evidence_items=evidence_ledger,
                     conflicts=canonical.evidence_conflicts if canonical else None,
                     referenced_docs=canonical.referenced_documents if canonical else None,
+                    canonical_state=canonical,
                 )
                 if promo and supp == SupportLevel.SUPPORTED:
                     h.status = "SUPPORTED"
@@ -1534,11 +1915,11 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             from app.agent.analytical_validator import apply_conflict_tie_override
             apply_conflict_tie_override(root_cause, has_unresolved_conflict)
 
-            from app.agent.recurrence_guard import detect_recurrence
+            from app.agent.recurrence_guard import build_recurrence_rationale, detect_recurrence
             recurrence_info = detect_recurrence(request.finding_text)
             if recurrence_info.is_recurring:
                 root_cause.risk_of_recurrence = "HIGH"
-                root_cause.risk_of_recurrence_rationale = f"Recurrence history identified ({recurrence_info.capa_id or 'previous CAPA'}); prior corrective actions were ineffective in preventing reoccurrence."
+                root_cause.risk_of_recurrence_rationale = build_recurrence_rationale(recurrence_info)
 
             # CAPA areas reuse the same dynamically-derived, finding-grounded
             # investigation plan used for hypotheses above rather than a fixed
@@ -1555,7 +1936,17 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                 conditional_actions=build_conditional_capa_actions(fallback_hyps, clean_noun, topic),
             )
 
-        ca_draft = build_ca_draft(_derive_ca_draft_fields(root_cause, impact))
+        ca_draft = build_ca_draft(_derive_ca_draft_fields(root_cause, impact, canonical))
+
+    from app.agent.causal_graph import capture_epistemic_snapshot, merge_candidate_hypotheses
+
+    if previous_root_cause is not None and root_cause is not None:
+        root_cause.candidate_hypotheses = merge_candidate_hypotheses(
+            previous_root_cause.candidate_hypotheses, root_cause.candidate_hypotheses
+        )
+
+    snapshot_history = list(state.get("epistemic_snapshot_history", []))
+    snapshot_history.append(capture_epistemic_snapshot(root_cause, canonical))
 
     return {
         **state,
@@ -1572,6 +1963,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         "fallback_used": fallback_used,
         "provider_attempts": provider_attempts,
         "investigation_plan": investigation_plan_override if investigation_plan_override is not None else state.get("investigation_plan"),
+        "epistemic_snapshot_history": snapshot_history,
         "trace": trace,
         "errors": errors,
     }

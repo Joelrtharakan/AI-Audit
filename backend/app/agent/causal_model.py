@@ -351,6 +351,7 @@ def compute_support_level(
         if is_verified_type:
             _CORE_VERIFIED_CONTROL_STEMS = _stemmed_words({
                 "disabled", "deactivated", "bypassed", "crashed", "outage", "unconfigured", "overridden", "override", "defeat", "omitted", "omiss", "uncompleted", "distribut", "delivery", "dispatch",
+                "calcul", "formula", "differ", "mismatch", "discrep", "reconcil",
             })
             unfiltered_overlap = _stemmed_words(raw_claim_words) & _stemmed_words(stmt_words_unfiltered)
             if len(overlap) >= 2 or bool(overlap & _CORE_VERIFIED_CONTROL_STEMS) or (len(overlap) >= 1 and bool(unfiltered_overlap & _CORE_VERIFIED_CONTROL_STEMS)):

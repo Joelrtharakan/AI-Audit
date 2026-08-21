@@ -131,6 +131,20 @@ class AgentState(TypedDict, total=False):
     final_state: AgentFinalState | None
 
     # ------------------------------------------------------------------
+    # Epistemic transition tracking
+    # ------------------------------------------------------------------
+    # Append-only log of compact epistemic snapshots (see
+    # app.agent.causal_graph.capture_epistemic_snapshot), one per
+    # core_synthesis_node pass (usually just one; a second appears only on
+    # the critic-send-back re-investigation loop). Lets
+    # app.agent.invariants._check_epistemic_status_transitions compare
+    # consecutive passes and catch an actual regression (a hypothesis
+    # silently downgrading, or root_cause status/causal_readiness
+    # regressing) rather than only inspecting the latest snapshot in
+    # isolation.
+    epistemic_snapshot_history: list[dict]
+
+    # ------------------------------------------------------------------
     # Trace & errors
     # ------------------------------------------------------------------
     trace: list[AgentTraceStep]

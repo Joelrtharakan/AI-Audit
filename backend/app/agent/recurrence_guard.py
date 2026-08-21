@@ -26,6 +26,25 @@ _SIMILAR_FINDING_RE = re.compile(
     r"(?:(?!\.).){0,40}?\b(?:identified|observed|found|noted|reported|existed)\b",
     re.IGNORECASE,
 )
+_NUMBER_WORD = r"(?:\d+|two|three|four|five|six|seven|eight|nine|ten|multiple|several|numerous)"
+# Population/occurrence-count evidence of recurrence (Section 1/2): "the
+# same X was identified in three separate batches", "occurred across
+# multiple locations", "identified on four separate occasions" -- a
+# generalized structural signal (count/population noun, not any specific
+# domain word like "batch") independent of whether the finding also uses
+# an explicit word like "recurring"/"repeated".
+_OCCURRENCE_POPULATION_RE = re.compile(
+    rf"\b(?:the\s+same|a\s+similar|this)\s+[\w\s-]{{1,40}}?\b(?:was|were)\s+"
+    rf"(?:identified|observed|found|noted|detected|reported)\s+"
+    rf"(?:in|across|on)\s+{_NUMBER_WORD}\s+(?:separate\s+|different\s+|distinct\s+)?(?:[a-z]+\s+){{0,2}}"
+    rf"(?:batches|records|units|transactions|locations|sites|periods|cases|instances|occasions|"
+    rf"shipments|lots|samples|invoices|files|systems|documents|departments|suppliers|employees)\b",
+    re.IGNORECASE,
+)
+_OCCURRENCE_COUNT_RE = re.compile(
+    rf"\b{_NUMBER_WORD}\s+(?:separate\s+|different\s+|distinct\s+)?(?:occasions|times|instances)\b",
+    re.IGNORECASE,
+)
 _RECURRENCE_WORD_RE = re.compile(
     r"\b(recurrence|recurring|recurred|repeated\s+finding|repeat\s+finding|reoccur(?:red|rence)?|the\s+same\s+[\w\s-]{1,30}?\s+occurred)\b",
     re.IGNORECASE,
@@ -36,7 +55,14 @@ _PREVIOUS_AUDIT_TIME_RE = re.compile(
     re.IGNORECASE,
 )
 _PREVIOUS_CAPA_RE = re.compile(
-    r"\b(?:previous|prior)\s+(?:[\w\s-]{0,30}?\s+)?(?:corrective\s+action|CAPA|preventive\s+maintenance)\b",
+    r"\b(?:previous|prior)\s+(?:[\w\s-]{0,30}?\s+)?(?:corrective\s+action|CAPA|preventive\s+maintenance)\b|"
+    # A corrective/preventive action taken "after"/"following" an earlier
+    # occurrence is a PRIOR action relative to the current finding even
+    # without the literal word "previous"/"prior" -- the temporal
+    # relationship is expressed structurally instead.
+    r"\b(?:corrective\s+action|CAPA|preventive\s+action|remediation|containment\s+action|action\s+plan)\b"
+    r"(?:(?!\.).){0,40}?\b(?:after|following)\s+the\s+(?:first|initial|earlier|prior)\s+"
+    r"(?:occurrence|instance|finding|deviation)\b",
     re.IGNORECASE,
 )
 _CAPA_COMPLETED_RE = re.compile(
@@ -47,6 +73,19 @@ _CAPA_COMPLETED_RE = re.compile(
 _EFFECTIVENESS_REVIEW_RE = re.compile(
     r"\b(effectiveness\s+(?:review|verification|check|assessment)|verified\s+(?:as\s+)?effective|"
     r"confirmed\s+(?:to\s+be\s+)?effective)\b",
+    re.IGNORECASE,
+)
+# The mere PRESENCE of the phrase "effectiveness review" does not confirm
+# effectiveness -- "the effectiveness review was not available" mentions
+# the exact same words while stating the opposite. Checked as a negation
+# window around the effectiveness-review match itself (not just a global
+# "not" anywhere in the finding, which would incorrectly suppress
+# genuinely confirmed effectiveness elsewhere in a longer finding).
+_EFFECTIVENESS_NEGATED_RE = re.compile(
+    r"\b(?:effectiveness\s+(?:review|verification|check|assessment))\b"
+    r"(?:(?!\.).){0,40}?\b(?:not\s+available|unavailable|was\s+not\s+(?:conducted|performed|completed|done)|"
+    r"could\s+not\s+be\s+(?:located|found|retrieved)|absent|missing|no\s+(?:record|evidence)\s+of)\b|"
+    r"\b(?:no|not\s+yet|without)\b(?:(?!\.).){0,20}?\beffectiveness\s+(?:review|verification|check|assessment)\b",
     re.IGNORECASE,
 )
 
@@ -75,6 +114,8 @@ def detect_recurrence(finding_text: str) -> RecurrenceInfo:
     is_recurring = bool(
         _SIMILAR_FINDING_RE.search(finding_text)
         or _RECURRENCE_WORD_RE.search(finding_text)
+        or _OCCURRENCE_POPULATION_RE.search(finding_text)
+        or _OCCURRENCE_COUNT_RE.search(finding_text)
     )
     has_previous_capa = bool(_PREVIOUS_CAPA_RE.search(finding_text))
     m_capa = re.search(r"\b(CAPA-\d{4}-\d+|CAPA-[A-Z0-9-]+)\b", finding_text, re.IGNORECASE)
@@ -82,7 +123,12 @@ def detect_recurrence(finding_text: str) -> RecurrenceInfo:
 
     capa_status = "COMPLETED" if (has_previous_capa and _CAPA_COMPLETED_RE.search(finding_text)) else None
     effectiveness = (
-        "EFFECTIVE" if (has_previous_capa and _EFFECTIVENESS_REVIEW_RE.search(finding_text))
+        "EFFECTIVE"
+        if (
+            has_previous_capa
+            and _EFFECTIVENESS_REVIEW_RE.search(finding_text)
+            and not _EFFECTIVENESS_NEGATED_RE.search(finding_text)
+        )
         else "NOT_VERIFIED"
     )
 
@@ -125,6 +171,32 @@ _CAPA_WORD_RE = re.compile(r"\b(?:corrective\s+action|capa)\b", re.IGNORECASE)
 _IMPLEMENTATION_EFFECTIVENESS_WORD_RE = re.compile(
     r"\b(?:implement\w*|effective\w*|ineffective\w*|verif\w*|recurrence)\b", re.IGNORECASE
 )
+
+
+def build_recurrence_rationale(rec: RecurrenceInfo) -> str:
+    """Deterministic recurrence-risk rationale text (Section 5/9 of the
+    recurrence-hardening spec): recurrence after a previous CAPA's closure
+    is a reason to flag HIGH recurrence RISK -- it is never, by itself,
+    proof that the previous CAPA was ineffective (that requires its own
+    explicit effectiveness-review evidence, tracked separately in
+    previous_capa_effectiveness). The two dimensions must never be
+    conflated into one assertion.
+    """
+    capa_ref = rec.capa_id or "a previous CAPA"
+    if rec.previous_capa_effectiveness == "EFFECTIVE":
+        # Recurring despite a verified-effective previous CAPA -- still a
+        # HIGH-risk signal (something is still going wrong), but framed
+        # around the recurrence itself, not a (contradicted) ineffectiveness
+        # claim.
+        return (
+            f"The same issue recurred after {capa_ref} was verified effective; the current "
+            "recurrence indicates a materially different mechanism or a control gap requiring investigation."
+        )
+    return (
+        f"The same issue recurred after {capa_ref} was marked complete, while objective "
+        "effectiveness-verification evidence is unavailable. This is a recurrence-risk signal, "
+        "not proof that the previous corrective action was ineffective."
+    )
 
 
 def is_previous_capa_mechanism_hypothesis(statement: str | None) -> bool:

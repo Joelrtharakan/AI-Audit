@@ -85,15 +85,15 @@ _NEGATIVE_POLARITY_RE = re.compile(
     r"\b(not\s+(?:received|completed|performed|conducted|done|provided|given|attended|"
     r"assigned|delivered|distributed|available|accessible|found|present|documented|recorded|"
     r"maintained|updated|followed|applied|verified|confirmed|communicated|informed|"
-    r"notified|acknowledged|opened|accessed|viewed|retrieved|approved|granted|authorized)|"
-    r"had\s+not\s+(?:received|completed|been)|"
-    r"did\s+not\s+(?:receive|complete|attend|perform)|"
-    r"never\s+(?:received|completed|performed|attended|been|given|granted|approved)|"
-    r"was\s+never\s+(?:available|accessible|found|present|opened|given|granted)|"
+    r"notified|acknowledged|opened|accessed|viewed|retrieved|approved|granted|authorized|monitored)|"
+    r"had\s+not\s+(?:received|completed|been|monitored)|"
+    r"did\s+not\s+(?:receive|complete|attend|perform|monitor)|"
+    r"never\s+(?:received|completed|performed|attended|been|given|granted|approved|monitored)|"
+    r"was\s+never\s+(?:available|accessible|found|present|opened|given|granted|monitored)|"
     r"missing|absent|unavailable|incomplete|unaware|not\s+aware|"
     r"\bno\s+[\w\s-]{1,60}?\s*(?:was|were|has\s+been|have\s+been|could\s+be)?\s*(?:completed|performed|conducted|"
     r"done|provided|given|received|attended|delivered|distributed|assigned|available|accessible|found|present|"
-    r"documented|recorded|maintained|updated|followed|applied|verified|confirmed|informed|notified|located))\b",
+    r"documented|recorded|maintained|updated|followed|applied|verified|confirmed|informed|notified|located|monitored))\b",
     re.IGNORECASE,
 )
 
@@ -106,13 +106,13 @@ _POSITIVE_POLARITY_RE = re.compile(
     r"\b(?:(?:was|were|has\s+been|have\s+been|had\s+been)\s+)?"
     r"(?:completed|performed|conducted|provided|given|received|attended|"
     r"delivered|distributed|assigned|documented|recorded|opened|accessed|viewed|retrieved|approved|"
-    r"granted|authorized|"
+    r"granted|authorized|monitored|"
     r"maintained|updated|followed|applied|verified|confirmed|informed|notified|acknowledged|"
     r"dispatched|dispatch|delivered|delivery|distributed|distribution|sent|transmitted|transmission)\b|"
     r"\b(?:was|were|has\s+been|have\s+been|had\s+been)\s+(?:done|available|accessible|found|present)\b|"
     # "<Record/system/log> shows/show/records/indicates/confirms <completion/
-    # approval/delivery/receipt/dispatch/distribution>"
-    r"\b(?:shows?|records?|indicates?|confirms?|establishes?)\s+(?:[\w\s]{0,20}?\s+)?(?:completion|approval|delivery|receipt|dispatch|distribution|transmission)\b",
+    # approval/delivery/receipt/dispatch/distribution/readings/monitoring>"
+    r"\b(?:shows?|records?|indicates?|confirms?|establishes?)\s+(?:[\w\s]{0,20}?\s+)?(?:completion|approval|delivery|receipt|dispatch|distribution|transmission|readings|monitoring)\b",
     re.IGNORECASE,
 )
 
@@ -187,7 +187,26 @@ def extract_claims(
 
     sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(finding_text.strip()) if s.strip()]
 
+    # Defect 6 -- instruction quarantine at the claim boundary. `extract_claims`
+    # is the SECOND, independent producer of ledger content (evidence_claims);
+    # understand_finding_node's own filter only covered the EvidenceItem path,
+    # so instruction-like text still reached evidence_claims as a VERIFIED
+    # AUDITOR_OBSERVED claim. Segment first, quarantine per-segment, keep every
+    # valid audit proposition that sits alongside the injection.
+    from app.services.attribution_extraction import _is_expressive_non_substantive
+    from app.services.instruction_detector import classify_instruction
+
     for sentence in sentences:
+        if classify_instruction(sentence).is_untrusted:
+            continue
+        # Purely expressive/social content (thanks, praise, greetings) with
+        # no evidentiary marker of its own carries no verifiable audit
+        # proposition -- excluded here for the same reason instruction-like
+        # text is excluded above, so it can never become the ledger's only
+        # claim or supply the "affected object". See
+        # attribution_extraction._is_expressive_non_substantive.
+        if _is_expressive_non_substantive(sentence):
+            continue
         # A sentence that opens with a discourse connector ("However, ...")
         # continues the PREVIOUS sentence's proposition rather than starting
         # a new one -- keep it in the same sentence_group so anaphoric
@@ -206,6 +225,10 @@ def extract_claims(
             # "operator said X but supervisor said Y" from becoming one
             # VERIFIED compound claim.
             for clause in clauses:
+                if classify_instruction(clause).is_untrusted:
+                    continue
+                if _is_expressive_non_substantive(clause):
+                    continue
                 claim_counter += 1
                 claim = _extract_single_claim(clause, claim_counter)
                 claim.sentence_group = group_idx
@@ -249,6 +272,62 @@ def _strip_leading_discourse_connector(text: str) -> str:
 def _extract_single_claim(text: str, counter: int) -> EvidenceClaim:
     """Extract a single claim from a sentence or clause."""
     matchable_text = _strip_leading_discourse_connector(text.strip())
+
+    # Grammatical mood (Defect 2) -- an orthogonal axis carried on every
+    # claim regardless of which branch below produces it. A non-actual claim
+    # is preserved but can never be VERIFIED.
+    from app.services.epistemic_modality import (
+        classify_epistemic_stance,
+        classify_modality,
+    )
+    _mood = classify_modality(matchable_text)
+
+    # Epistemic stance (Defect 1) -- checked before speech attribution
+    # because "X believes that Y" and "X stated that Y" share a surface
+    # shape and only the predicate's semantic class separates them.
+    _stance = classify_epistemic_stance(matchable_text)
+    if _stance is not None:
+        return EvidenceClaim(
+            claim_id=f"C{counter}",
+            text=text.strip(),
+            subject=_extract_subject(_stance.proposition),
+            predicate=_stance.proposition,
+            source="finding_text",
+            status=EvidenceStatus.BELIEF,
+            confidence="LOW",
+            evidence_reference="Epistemic-stance statement in finding text",
+            attribution=ClaimAttribution.PERSON_BELIEF,
+            polarity=_classify_polarity(_stance.proposition),
+            speaker=_stance.holder,
+            source_type="REPORTED_STATEMENT",
+            statement_status="BELIEF",
+            underlying_event_status="UNKNOWN",
+            modality=_mood.modality,
+            modality_marker=_mood.marker,
+            epistemic_stance=_stance.stance,
+            stance_holder=_stance.holder,
+        )
+
+    if not _mood.is_actual:
+        return EvidenceClaim(
+            claim_id=f"C{counter}",
+            text=text.strip(),
+            subject=_extract_subject(matchable_text),
+            predicate=matchable_text,
+            source="finding_text",
+            # Preserved (never discarded) but explicitly NOT verified: a
+            # conditional/counterfactual describes a non-actual world.
+            status=EvidenceStatus.UNVERIFIED,
+            confidence="LOW",
+            evidence_reference=f"{_mood.modality.capitalize()} proposition in finding text",
+            attribution=ClaimAttribution.UNKNOWN,
+            polarity=_classify_polarity(matchable_text),
+            source_type="AUDIT_OBSERVATION",
+            statement_status=_mood.modality,
+            underlying_event_status="NOT_APPLICABLE",
+            modality=_mood.modality,
+            modality_marker=_mood.marker,
+        )
 
     # Check if this clause is explicitly describing evidence availability
     if _EVIDENCE_AVAILABILITY_RE.search(matchable_text):
@@ -590,15 +669,15 @@ def _claims_conflict(c1: EvidenceClaim, c2: EvidenceClaim) -> bool:
 
 
 # Captures a negated verb clause and its direct object/tail (e.g. "had not
-# received retraining after the monitoring procedure was revised") so a
+# received retraining after the monitoring procedure was revised" or "did not attend the training") so a
 # conflict proposition can be built from a claim's OWN specific wording
 # instead of from incidental shared vocabulary between two unrelated
 # sentences (which is what produced nonsense like "whether laboratory was
 # completed"). Deliberately generic verb list, no domain words.
 _NEGATION_CLAUSE_RE = re.compile(
     r"\b(?:had\s+not|did\s+not|was\s+not|were\s+not|has\s+not|have\s+not|never)\s+"
-    r"(?:received|completed|performed|conducted|attended|been\s+(?:given|provided|informed|notified))\s+"
-    r"[\w\s-]{1,80}?(?=[.,;]|$|\s+(?:because|since|but|however)\b)",
+    r"(?:receive|received|complete|completed|perform|performed|conduct|conducted|attend|attended|undergo|undergone|participate\s+in|participated\s+in|be\s+given|been\s+given|be\s+provided|been\s+provided|be\s+informed|been\s+informed|be\s+notified|been\s+notified)\s+"
+    r"[\w\s-]{1,80}?(?=[.,;]|$|\s+(?:because|since|but|however|and)\b)",
     re.IGNORECASE,
 )
 _NEGATION_LEAD_STRIP_RE = re.compile(
@@ -629,6 +708,21 @@ def _derive_conflict_proposition(c1: EvidenceClaim, c2: EvidenceClaim) -> str:
         if m:
             core = _NEGATION_LEAD_STRIP_RE.sub("", m.group(0).strip()).strip()
             if core:
+                # Normalize base verbs ("attend the training" -> "attended the training", "receive training" -> "received training")
+                _BASE_TO_PAST = {
+                    "attend": "attended",
+                    "receive": "received",
+                    "complete": "completed",
+                    "perform": "performed",
+                    "conduct": "conducted",
+                    "undergo": "underwent",
+                    "participate": "participated",
+                }
+                words = core.split()
+                if words and words[0].lower() in _BASE_TO_PAST:
+                    words[0] = _BASE_TO_PAST[words[0].lower()]
+                    core = " ".join(words)
+
                 actor_phrase = None
                 if negative_claim.speaker:
                     from app.services.semantic_subject import strip_leading_article
@@ -644,10 +738,18 @@ def _derive_conflict_proposition(c1: EvidenceClaim, c2: EvidenceClaim) -> str:
     # claim subject rather than emit a malformed one-word proposition.
     words1 = significant_words(c1.text)
     words2 = significant_words(c2.text)
-    ignore = {"stated", "claimed", "reported", "said", "operator", "supervisor", "auditor", "trainer", "technician", "completed", "received", "performed"}
-    common = (words1 & words2) - ignore
+    from app.services.semantic_subject import is_actor_noun
+    ignore = {
+        "stated", "claimed", "reported", "said", "operator", "supervisor",
+        "auditor", "trainer", "technician", "employee", "personnel", "staff",
+        "manager", "analyst", "inspector", "completed", "received", "performed", "attended",
+    }
+    common = {w for w in (words1 & words2) - ignore if not is_actor_noun(w)}
     if len(common) >= 2:
         topic = " ".join(sorted(common))
+        return f"Whether {topic} was completed/performed as required"
+    elif len(common) == 1:
+        topic = list(common)[0]
         return f"Whether {topic} was completed/performed as required"
     subject = c1.subject or c2.subject or "the required activity"
     return f"Whether {subject} was completed/performed as required"

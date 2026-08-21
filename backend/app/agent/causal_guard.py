@@ -81,6 +81,37 @@ _SYSTEM_FAILURE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Evidence-ABSENCE firewall (Section 1/2/7 of the causal-evidence spec): a
+# claim that itself states "the cause is unknown" / "no information is
+# available about X" is meta-evidence ABOUT the evidence gap, not evidence
+# OF a mechanism -- even when it happens to contain an embedded phrase that
+# would otherwise match one of the polarity regexes above (e.g. "...or why
+# the checklist was not completed" inside a longer "no information is
+# available about..." sentence matches _NON_PERFORMANCE_RE's "not
+# completed" on its own). Checked FIRST, before any polarity match, so an
+# evidence-absence claim can never be misread as the mechanism it explicitly
+# says is unknown -- the exact production defect this guards against: a
+# "no information available" claim being cited as VERIFIED causal support
+# for a 5-Why answer.
+_EVIDENCE_ABSENCE_RE = re.compile(
+    r"\b(?:no\s+information\s+is\s+available|no\s+information\s+available|"
+    r"no\s+evidence\s+(?:is\s+)?available|insufficient\s+evidence|"
+    r"cannot\s+be\s+determined|could\s+not\s+be\s+determined|"
+    r"is\s+(?:currently\s+)?unknown|not\s+established\s+from\s+(?:the\s+)?available\s+evidence|"
+    r"unable\s+to\s+determine|not\s+documented\s+whether|"
+    r"no\s+records?\s+(?:are\s+|is\s+)?available\s+(?:to\s+)?(?:confirm|establish|determine))\b",
+    re.IGNORECASE,
+)
+
+
+def is_evidence_absence_claim(text: str | None) -> bool:
+    """True if `text` is itself a statement that causal information is
+    UNAVAILABLE -- never a statement OF a causal mechanism, regardless of
+    what action-verb vocabulary it happens to contain (Section 1: evidence
+    type C, 'information unavailable', must never be reclassified as type D,
+    'causal evidence')."""
+    return bool(text) and bool(_EVIDENCE_ABSENCE_RE.search(text))
+
 
 @dataclass
 class MechanismInfo:
@@ -90,12 +121,28 @@ class MechanismInfo:
     source_claim: str | None = None
 
 
+_OBJECTIVE_PROOF_RE = re.compile(
+    r"\b(?:as\s+proven\s+by|proven\s+by|audit\s+log\s+proves|log\s+proves|telemetry\s+proves|event\s+log\s+show(?:s|ing)|scada\s+(?:event\s+)?log\s+show(?:s|ing)|trace\s+proves|intermittent\s+open\s+circuit|failed\s+high|failed\s+low|broken\s+seal|calibration\s+record\s+proves)\b",
+    re.IGNORECASE,
+)
+
+
 def classify_mechanism_polarity(text: str) -> str | None:
     """Structural classification of a claim's mechanism shape. Returns None
     if the claim doesn't state an action-level mechanism at all (e.g. it's
-    just describing the artifact's state, not what a person/system did)."""
-    if not text:
+    just describing the artifact's state, not what a person/system did).
+
+    Checked here (the single choke point every extract_immediate_mechanism
+    caller goes through) rather than in each caller separately: an
+    evidence-ABSENCE claim ("no information is available about why...")
+    must never be classified as stating a mechanism, even when it happens
+    to contain embedded action-verb vocabulary that would otherwise match
+    one of the polarities below.
+    """
+    if not text or is_evidence_absence_claim(text):
         return None
+    if _OBJECTIVE_PROOF_RE.search(text):
+        return "system_failure"
     if _NON_PERFORMANCE_RE.search(text):
         return "non_performance"
     if _NON_RECORDING_RE.search(text):
@@ -141,12 +188,24 @@ def extract_immediate_mechanism(
             return MechanismInfo(
                 statement=naturalize_reported_claim(claim), status="REPORTED", polarity=polarity, source_claim=claim
             )
-    for claim in verified_facts or []:
+    # By convention across every caller of this function, verified_facts[0]
+    # is the finding's own OBSERVATION/deviation, not a deeper mechanism --
+    # but its verb shape can still coincidentally match a recognized
+    # polarity (e.g. "was not performed" matches non_performance just as
+    # readily as a genuinely deeper "was never assigned" fact would),
+    # producing a circular Why ("Why was X not performed?" -> "X was not
+    # performed"). When additional verified facts exist, check them FIRST;
+    # only fall back to verified_facts[0] if nothing else matches (a
+    # single-fact finding still correctly uses its only available fact).
+    _ordered_verified = list(verified_facts or [])
+    if len(_ordered_verified) > 1:
+        _ordered_verified = _ordered_verified[1:] + _ordered_verified[:1]
+    for claim in _ordered_verified:
         polarity = classify_mechanism_polarity(claim)
         if polarity:
             return MechanismInfo(statement=claim, status="VERIFIED", polarity=polarity, source_claim=claim)
     for claim in reported_statements or []:
-        if claim and claim.strip():
+        if claim and claim.strip() and not is_evidence_absence_claim(claim):
             return MechanismInfo(
                 statement=naturalize_reported_claim(claim), status="REPORTED", polarity="general", source_claim=claim
             )
@@ -262,20 +321,33 @@ def mechanism_already_names_generic_hypothesis(hypothesis_statement: str, mechan
 _WHY_STOPWORDS = {"why", "did", "was", "were", "the", "that", "this"}
 
 
+def _why_word_stem(word: str) -> str:
+    """Crude fixed-prefix stem so "notification"/"notified",
+    "duplicate"/"duplicated", "fail"/"failed" compare equal for
+    restatement-overlap purposes without an NLP dependency -- otherwise a
+    pure tense/inflection change ("Why did the notification fail?" / "The
+    notification failed.") would slip past the circularity check simply
+    because "fail" != "failed" as literal strings."""
+    return word[:4] if len(word) > 4 else word
+
+
 def is_circular_why_answer(question: str, answer: str | None) -> bool:
     """True if `answer` contributes essentially no new vocabulary beyond its
     own question -- i.e. it restates the question rather than answering it
     (e.g. Q: "Why was the record incomplete?" A: "The record was
-    incomplete.")."""
+    incomplete."), tolerant of tense/inflection changes ("Why did the
+    notification fail?" / "The notification failed.")."""
     if not answer:
         return False
     q_words = significant_words(question) - _WHY_STOPWORDS
     a_words = significant_words(answer) - _WHY_STOPWORDS
     if not a_words:
         return False
-    new_words = a_words - q_words
-    overlap = q_words & a_words
-    return len(new_words) <= 1 and len(overlap) >= 2
+    q_stems = {_why_word_stem(w) for w in q_words}
+    a_stems = {_why_word_stem(w) for w in a_words}
+    new_stems = a_stems - q_stems
+    overlap = q_stems & a_stems
+    return len(new_stems) <= 1 and len(overlap) >= 2
 
 
 def is_reporting_why_question(question: str) -> bool:
@@ -402,6 +474,194 @@ def five_why_answer_invents_mechanism_at_unknown_status(answer: str | None, stat
 
 
 # ---------------------------------------------------------------------------
+# 4c. INV-5WHY-CAUSAL-002: a 5-Why answer cannot contain an unverified MODAL
+#     causal claim ("may have been...", "could have been...", "likely...",
+#     "possibly...", "appears to have...", "was probably...") when no
+#     verified causal mechanism exists -- independent of whether any
+#     candidate hypothesis exists to compare against (answer_selects_
+#     unverified_hypothesis above requires a hypothesis list; this catches
+#     the same failure mode with ZERO hypotheses, e.g. root_cause.status
+#     NOT_ESTABLISHED with candidate_hypotheses == []). "A cautious modal
+#     phrase is still a causal claim."
+# ---------------------------------------------------------------------------
+
+_MODAL_CAUSAL_MARKER_RE = re.compile(
+    r"\b(?:may\s+(?:not\s+)?have|might\s+(?:not\s+)?have|could\s+(?:not\s+)?have|"
+    r"likely|possibly|probably|"
+    r"appears?\s+(?:not\s+)?to\s+have|seems?\s+(?:not\s+)?to\s+have|presumably)\b",
+    re.IGNORECASE,
+)
+
+
+def five_why_answer_contains_unverified_modal_causation(
+    answer: str | None, status: str | None, has_verified_mechanism: bool = False
+) -> bool:
+    """True if a 5-Why `answer` uses hedged/modal language ("may have been
+    incorrectly entered") to assert a causal mechanism while no verified
+    causal mechanism exists for this finding. A modal hedge softens the
+    GRAMMAR, not the CLAIM -- "the operator may have recorded it
+    incorrectly" still names operator+manner as the explanation, just as
+    assertively as an unhedged sentence to a reader. Exempt only when a
+    verified mechanism actually exists (the modal language would then be
+    describing a genuinely uncertain residual question, not inventing the
+    entire mechanism) or when the step is honestly labeled SUPPORTED/
+    VERIFIED/ESTABLISHED off real evidence."""
+    if not answer or has_verified_mechanism or status in ("SUPPORTED", "VERIFIED", "ESTABLISHED"):
+        return False
+    return bool(_MODAL_CAUSAL_MARKER_RE.search(answer))
+
+
+# ---------------------------------------------------------------------------
+# 4b. Causal boundary: a 5-Why answer must never promote/select an
+#     UNVERIFIED candidate hypothesis as though it were the established
+#     explanation (INV-5WHY-CAUSAL-001) -- regardless of what STATUS label
+#     the answer was given, and regardless of hedging language ("may have")
+#     that softens the grammar without actually leaving the mechanism open.
+# ---------------------------------------------------------------------------
+
+_HYPOTHESIS_VERIFIED_STATUSES = ("SUPPORTED", "VERIFIED", "ESTABLISHED")
+
+# Structural overlap threshold: an answer whose significant vocabulary
+# overlaps this much with ONE specific unverified hypothesis's own
+# statement/name is functionally asserting that hypothesis as the
+# explanation, not merely mentioning a topic in common with it.
+_HYPOTHESIS_SELECTION_OVERLAP_THRESHOLD = 0.35
+
+
+def hypothesis_significant_terms(hypothesis) -> set[str]:
+    """The distinguishing vocabulary of one candidate hypothesis: its own
+    statement plus its controlled-vocabulary `name` (e.g.
+    "TRANSCRIPTION_DATA_ENTRY_ERROR" -> {"transcription", "data", "entry",
+    "error"}) -- deliberately generic, works for any hypothesis-generation
+    branch (comparison, financial, notification, ...), not just one shape."""
+    words = significant_words(getattr(hypothesis, "statement", "") or "")
+    words |= significant_words((getattr(hypothesis, "name", "") or "").replace("_", " "))
+    return words
+
+
+def answer_selects_unverified_hypothesis(
+    answer: str | None, candidate_hypotheses: list | None, status: str | None = None
+):
+    """Returns the matched hypothesis if a 5-Why `answer` functionally
+    selects/asserts ONE specific candidate hypothesis whose status is not
+    SUPPORTED/VERIFIED/ESTABLISHED as though it were the established
+    explanation -- e.g. "The operator may have recorded the final yield
+    incorrectly" for an UNVERIFIED "transcription/data-entry error"
+    hypothesis. Returns None when:
+      - there are no hypotheses, or all are already verified (nothing to
+        protect against);
+      - the answer's vocabulary doesn't concentrate on any single
+        hypothesis (a generic evidence-boundary statement, or one that
+        evenhandedly lists several hypotheses' mechanisms as open
+        possibilities, is safe -- only a single dominant match counts as
+        "selecting" one).
+    This is a STRUCTURAL check (vocabulary overlap against the hypothesis's
+    own controlled name/statement), not a lookup of any specific finding's
+    wording -- generalizes across finding types and hypothesis branches.
+
+    A step already labeled REPORTED/MIXED is exempt: that status is itself
+    an honest signal the content is someone's unconfirmed account, not an
+    asserted established cause (e.g. two witnesses' conflicting REPORTED
+    statements naturally share vocabulary with a "REPORTED_FACTOR"
+    hypothesis about the same claim -- that is restating what was reported,
+    not silently promoting it to an established mechanism).
+    """
+    if not answer or not candidate_hypotheses or status in ("REPORTED", "MIXED"):
+        return None
+    # An answer matching the canonical evidence-BOUNDARY shape ("does not
+    # establish whether ... resulted from ... or another mechanism") is
+    # safe BY CONSTRUCTION -- it is evenhandedly listing open mechanism
+    # categories, not selecting one. Exempted before the vocabulary-overlap
+    # scoring below, which can otherwise spuriously flag it: a short
+    # mechanism-category phrase naturally shares more incidental vocabulary
+    # with whichever hypothesis's own NAME happens to use similar words
+    # (e.g. "data entry, transcription" vs. hypothesis name
+    # "DATA_ENTRY_TRANSCRIPTION_ERROR") than with hypotheses phrased more
+    # differently, even though the sentence itself treats all of them as
+    # equally open possibilities.
+    if _NEGATED_CAUSAL_HEDGE_RE.search(answer):
+        return None
+    unverified = [
+        h for h in candidate_hypotheses
+        if getattr(h, "status", "") not in _HYPOTHESIS_VERIFIED_STATUSES
+    ]
+    if not unverified:
+        return None
+    ans_words = significant_words(answer)
+    if not ans_words:
+        return None
+    matches = []
+    for h in unverified:
+        hyp_words = hypothesis_significant_terms(h)
+        if not hyp_words:
+            continue
+        shared = ans_words & hyp_words
+        # Ratio relative to the SHORTER of the two vocabularies (matching
+        # the convention used by hypothesis_statement_asserts_unsupported_
+        # causation above) -- a terse LLM answer sharing most of its own
+        # words with a verbose hypothesis statement is a real match even
+        # though it shares only a fraction of the statement's own length.
+        overlap = len(shared) / max(1, min(len(ans_words), len(hyp_words)))
+        if len(shared) >= 2 and overlap >= _HYPOTHESIS_SELECTION_OVERLAP_THRESHOLD:
+            matches.append(h)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def build_causal_boundary_answer(
+    candidate_hypotheses: list | None = None,
+    comparison_type: str | None = None,
+    comparison_left: str | None = None,
+    comparison_right: str | None = None,
+    comparison_left_qualifier: str | None = None,
+    comparison_subtype: str | None = None,
+    measurement_value: float | None = None,
+    measurement_unit: str | None = None,
+    measurement_qualifier: str | None = None,
+    observed_deviation: str | None = None,
+) -> str:
+    """Deterministically construct the safe "mechanism not established"
+    5-Why answer FROM the canonical semantic event / candidate-hypothesis
+    state (Section 2), for use whenever a 5-Why step must be overridden
+    because it selected an unverified hypothesis. Never trusts free-text
+    LLM content for this specific sentence -- the causal boundary is always
+    rebuilt from structured fields, so it can never accidentally repeat the
+    very unverified claim being rejected."""
+    if comparison_type and comparison_left and comparison_right:
+        from app.services.semantic_subject import (
+            COMPARISON_SUBTYPE_MECHANISM_CATEGORIES,
+            _DEFAULT_COMPARISON_MECHANISM_CATEGORIES,
+        )
+        qualified_left = f"{comparison_left_qualifier} {comparison_left}" if comparison_left_qualifier else comparison_left
+        if measurement_value is not None:
+            qual = f"{measurement_qualifier} " if measurement_qualifier else ""
+            magnitude_phrase = f"{qual}{measurement_value}{measurement_unit or ''} discrepancy"
+        else:
+            magnitude_phrase = "discrepancy"
+        article = "an" if magnitude_phrase[:1].lower() in "aeiou" else "a"
+        # Mechanism-category vocabulary comes from the comparison SUBTYPE
+        # (a property of the finding TYPE, e.g. "parameter mismatch" ->
+        # never mentions "calculation"/"formula"), not from hypothesis
+        # names -- keeps this override text consistent with the same
+        # subtype-keyed table five_why_fallback.py's generation-time path
+        # uses, and avoids introducing vocabulary the finding never raised.
+        mechanism_categories = COMPARISON_SUBTYPE_MECHANISM_CATEGORIES.get(
+            comparison_subtype or "", _DEFAULT_COMPARISON_MECHANISM_CATEGORIES
+        )
+        return (
+            f"The available evidence confirms {article} {magnitude_phrase} between the {qualified_left} "
+            f"and the {comparison_right}, but does not establish whether the difference resulted from "
+            f"{mechanism_categories}, or another mechanism."
+        )
+    base = observed_deviation or "the deviation occurred"
+    return (
+        f"The available evidence establishes that {base}, but does not establish the specific underlying "
+        "mechanism or root cause responsible."
+    )
+
+
+# ---------------------------------------------------------------------------
 # 5. Hypothesis causality: reject a "hypothesis" that is really just an
 #    evidence-gap/observation restatement, not a proposed explanation.
 # ---------------------------------------------------------------------------
@@ -448,7 +708,12 @@ def answer_asserts_verified_but_is_reported(
     but Z was also true") can dilute a pure word-overlap ratio below any
     reasonable threshold even though it plainly narrates a report.
     """
-    if status != "VERIFIED" or not answer:
+    # SUPPORTED is just as capable of over-claiming a REPORTED statement as
+    # VERIFIED is -- "the operator claimed X caused Y" labeled SUPPORTED is
+    # the identical over-claim, just spelled with a different status word.
+    # Checking only "VERIFIED" left SUPPORTED as an unguarded escape hatch
+    # for exactly the promotion this function exists to prevent.
+    if status not in ("VERIFIED", "SUPPORTED") or not answer:
         return False
 
     if _ATTRIBUTION_LANGUAGE_RE.search(answer):
@@ -1144,8 +1409,9 @@ _SYSTEMIC_ESCALATION_RE = re.compile(
 _SYSTEMIC_EVIDENCE_RE = re.compile(
     r"\b(?:review\s+(?:showed|found|revealed|identified|noted)|audit\s+(?:showed|found|revealed|identified|noted|observed)|"
     r"during\s+the\s+audit\b|"
-    r"documentation\s+(?:shows|showed|confirms|confirmed)|records?\s+(?:shows?|showed|confirms?|confirmed)|"
-    r"log\s+(?:shows?|showed)|investigation\s+(?:found|showed|revealed)|"
+    r"documentation\s+(?:shows?|showed|confirms?|confirmed)|records?\s+(?:shows?|showed|confirms?|confirmed|verif(?:y|ies|ied))|"
+    r"logs?\s+(?:shows?|showed|confirms?|confirmed|verif(?:y|ies|ied)|indicat(?:e|es|ed)|reveal(?:s|ed)?|establish(?:es|ed)?)|"
+    r"investigation\s+(?:found|showed|revealed)|"
     r"(?:process|system|control)\s+documentation\s+(?:shows?|showed|confirms?)|"
     r"no\s+\w+\s+(?:step|control)\s+(?:was\s+)?defined)\b",
     re.IGNORECASE,
@@ -1359,6 +1625,13 @@ _CAUSAL_CONNECTOR_RE = re.compile(
     re.IGNORECASE,
 )
 
+_NEGATED_CAUSAL_HEDGE_RE = re.compile(
+    r"\b(?:does\s+not|cannot|could\s+not|is\s+not|was\s+not|has\s+not|have\s+not)\s+"
+    r"(?:yet\s+|by\s+itself\s+|alone\s+|independently\s+)?"
+    r"(?:establish|establishes|confirm|confirms|determine|determines)\w*\s+whether\b",
+    re.IGNORECASE,
+)
+
 
 def reported_claims_contain_causal_explanation(reported_claims: list[str] | None) -> bool:
     """True if any REPORTED claim actually attributes a REASON for the
@@ -1401,6 +1674,16 @@ def hypothesis_statement_asserts_unsupported_causation(statement: str | None, ve
     is itself grounded in a VERIFIED fact (i.e. citing an already-
     established causal link, not inventing one)."""
     if not statement or not _CAUSAL_CONNECTOR_RE.search(statement):
+        return False
+    # A causal connector inside a NEGATED "does not establish/confirm/
+    # determine whether X resulted from Y" hedge clause is not asserting
+    # causation -- it is the evidence-boundary statement itself ("the
+    # available evidence... does not establish whether the difference
+    # resulted from data entry, ..., or another mechanism"). Regex-based,
+    # not tied to any one connector word or finding domain, so it exempts
+    # this shape regardless of which causal connector or mechanism
+    # vocabulary follows it.
+    if _NEGATED_CAUSAL_HEDGE_RE.search(statement):
         return False
     stmt_words = significant_words(statement)
     for fact in verified_facts or []:
@@ -1760,6 +2043,199 @@ def should_generate_investigation_plan(
         return True
 
     return True
+
+
+# ---------------------------------------------------------------------------
+# Generalized Uncertainty Detection & Investigation Strategy Selection
+# ---------------------------------------------------------------------------
+
+def detect_uncertainties(
+    canonical_state: Any = None,
+    evidence_ledger: list[Any] | None = None,
+    finding_text: str = "",
+) -> tuple[str, list[str], str, list[str]]:
+    """Deterministically detects primary uncertainty, secondary uncertainties,
+    causal readiness, and blocked reasoning steps from evidence structure and
+    canonical state.
+
+    Returns:
+        (primary_uncertainty, secondary_uncertainties, causal_readiness, blocked_reasoning_steps)
+    """
+    primary = "NO_MATERIAL_UNCERTAINTY"
+    secondaries: list[str] = []
+    blocked_steps: list[str] = []
+    readiness = "NOT_READY"
+
+    text = (finding_text or getattr(canonical_state, "raw_finding", "") or "").strip()
+    sem_type = getattr(canonical_state, "semantic_type", None)
+    req_status = getattr(canonical_state, "requirement_status", "UNKNOWN")
+    mech_status = getattr(canonical_state, "mechanism_status", "UNKNOWN") or getattr(canonical_state, "immediate_mechanism_status", "UNKNOWN")
+    conflicts = getattr(canonical_state, "evidence_conflicts", []) or []
+    has_unresolved_conflict = any(getattr(c, "status", "UNRESOLVED") == "UNRESOLVED" for c in conflicts)
+
+    # 1. Check for Conflicts
+    if has_unresolved_conflict:
+        secondaries.append("CONFLICTING_EVIDENCE")
+
+    # 2. Structural requirement uncertainty check
+    is_req_uncertain = (
+        sem_type == "REQUIREMENT_UNCERTAIN"
+        or (req_status == "UNKNOWN" and sem_type in ("REQUIREMENT_UNCERTAIN", "OBSERVATION_VERIFICATION"))
+        or (
+            sem_type != "ATTRIBUTED_EXPLANATION"
+            and bool(re.search(
+                r"\b(?:the\s+)?(?:applicable\s+|governing\s+|relevant\s+)?"
+                r"(?:requirement|specification|procedure|standard|instruction|limit|criteria|criterion)\b"
+                r"(?:(?!\.).){0,60}?\b(?:could\s+not\s+be\s+(?:determined|confirmed|located)|"
+                r"is\s+unavailable|was\s+unavailable|is\s+unknown|was\s+unknown|"
+                r"is\s+unclear|was\s+unclear|(?:is|was)\s+not\s+established|"
+                r"(?:is|was)\s+uncertain)\b",
+                text, re.IGNORECASE,
+            ))
+        )
+    )
+
+    # 3. Missing record / documentation check
+    is_doc_uncertain = (
+        sem_type == "MISSING_RECORD"
+        or bool(re.search(
+            r"\b(?:was\s+not\s+document(?:ed)?|were\s+not\s+document(?:ed)?|"
+            r"was\s+not\s+recorded|were\s+not\s+recorded|"
+            r"was\s+not\s+logged|were\s+not\s+logged|"
+            r"no\s+record\s+(?:exists|was\s+found|could\s+be\s+found)|"
+            r"lacks?\s+documentation|undocumented)\b",
+            text, re.IGNORECASE,
+        ))
+    )
+
+    # 4. Controlled transition / authorization check
+    is_auth_uncertain = (
+        sem_type == "EVENT_SEQUENCE_CONTROL"
+        or getattr(canonical_state, "control_justification_missing", False)
+        or bool(re.search(
+            r"\b(?:no\s+(?:justification|authorization|authorisation|approval|rationale)\s+(?:was|is|were)\s+(?:documented|recorded|provided|available)|"
+            r"without\s+(?:documented\s+|approved\s+)?(?:justification|authorization|authorisation|approval|rationale))\b",
+            text, re.IGNORECASE,
+        ))
+    )
+
+    # 5. Financial recovery / loss check
+    is_recovery_uncertain = bool(re.search(
+        r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment|overpayment)\b",
+        text, re.IGNORECASE,
+    ))
+
+    # 6. Recurrence check
+    is_recurrence_uncertain = bool(re.search(
+        r"\b(?:the\s+same|a\s+similar|this)\s+[\w\s-]{1,40}?\s+(?:was|were)\s+"
+        r"(?:identified|observed|found|noted|detected|reported)\s+(?:in|across|on)\s+",
+        text, re.IGNORECASE,
+    ))
+
+    # 7. Comparison / mismatch check
+    is_comparison = sem_type == "COMPARISON" or bool(re.search(
+        r"\b(?:did\s+not\s+match|differed\s+from|was\s+inconsistent\s+with|exceeded|was\s+below)\b",
+        text, re.IGNORECASE,
+    ))
+
+    # Determine Primary Uncertainty & Blocked Steps
+    if is_req_uncertain:
+        primary = "REQUIREMENT_UNCERTAIN"
+        readiness = "NOT_READY"
+        blocked_steps = [
+            "Compliance determination (cannot evaluate compliance without an established requirement)",
+            "Deviation confirmation (cannot confirm deviation until requirement is resolved)",
+            "Causal mechanism investigation (why-analysis is deferred until deviation is confirmed)",
+        ]
+        if is_doc_uncertain:
+            secondaries.append("DOCUMENTATION_UNCERTAIN")
+        if is_auth_uncertain:
+            secondaries.append("AUTHORIZATION_UNCERTAIN")
+    elif is_auth_uncertain:
+        primary = "AUTHORIZATION_UNCERTAIN"
+        readiness = "READY_FOR_HYPOTHESIS"
+        secondaries.append("CONTROL_EXECUTION_UNCERTAIN")
+        blocked_steps = [
+            "Downstream decision validity assessment (requires transition authorization verification)",
+        ]
+    elif is_doc_uncertain:
+        primary = "DOCUMENTATION_UNCERTAIN"
+        readiness = "READY_FOR_HYPOTHESIS"
+        secondaries.append("CONTROL_EXECUTION_UNCERTAIN")
+        blocked_steps = [
+            "Physical execution confirmation (requires secondary verification to distinguish omission from non-performance)",
+        ]
+    elif is_recovery_uncertain:
+        primary = "RECOVERY_UNCERTAIN"
+        readiness = "READY_FOR_HYPOTHESIS"
+        secondaries.append("CONTROL_EXECUTION_UNCERTAIN")
+        secondaries.append("IMPACT_UNCERTAIN")
+        blocked_steps = [
+            "Actual financial loss determination (requires recovery and credit verification)",
+        ]
+    elif is_recurrence_uncertain:
+        primary = "RECURRENCE_UNCERTAIN"
+        readiness = "READY_FOR_HYPOTHESIS"
+        secondaries.append("SCOPE_UNCERTAIN")
+        blocked_steps = [
+            "Prior CAPA effectiveness evaluation (requires implementation records)",
+        ]
+    elif is_comparison:
+        primary = "MECHANISM_UNCERTAIN"
+        readiness = "READY_FOR_HYPOTHESIS"
+        secondaries.append("DOCUMENTATION_UNCERTAIN")
+        blocked_steps = [
+            "Source entry validation (requires re-derivation against approved parameters/records)",
+        ]
+    elif has_unresolved_conflict:
+        primary = "CONFLICTING_EVIDENCE"
+        readiness = "READY_FOR_HYPOTHESIS"
+        blocked_steps = [
+            "Causal verification (requires independent audit trail to resolve conflicting statements)",
+        ]
+    else:
+        # Default when observation is present but mechanism is unknown
+        if mech_status == "VERIFIED":
+            primary = "NO_MATERIAL_UNCERTAINTY"
+            readiness = "ESTABLISHED"
+        else:
+            primary = "MECHANISM_UNCERTAIN"
+            readiness = "READY_FOR_HYPOTHESIS"
+            secondaries.append("CONTROL_EXECUTION_UNCERTAIN")
+
+    # Scope and Impact are frequently secondary uncertainties if not explicitly bounded
+    if getattr(canonical_state, "time_period", "UNKNOWN") == "UNKNOWN" and getattr(canonical_state, "affected_period", "UNKNOWN") == "UNKNOWN":
+        secondaries.append("TIME_UNCERTAIN")
+    if getattr(canonical_state, "occurrence_population", None) is None:
+        secondaries.append("SCOPE_UNCERTAIN")
+
+    # Deduplicate secondaries and remove primary from secondaries
+    secondaries = [s for s in dict.fromkeys(secondaries) if s != primary]
+
+    return primary, secondaries, readiness, blocked_steps
+
+
+def select_investigation_strategy(
+    primary_uncertainty: str,
+    canonical_state: Any = None,
+) -> str:
+    """Selects the authoritative investigation strategy based on primary uncertainty."""
+    if primary_uncertainty == "REQUIREMENT_UNCERTAIN":
+        return "REQUIREMENT_RESOLUTION"
+    if primary_uncertainty == "AUTHORIZATION_UNCERTAIN":
+        return "AUTHORIZATION_VERIFICATION"
+    if primary_uncertainty == "DOCUMENTATION_UNCERTAIN":
+        return "DOCUMENTATION_VS_PERFORMANCE"
+    if primary_uncertainty == "RECOVERY_UNCERTAIN":
+        return "FINANCIAL_RECOVERY_AND_CONTAINMENT"
+    if primary_uncertainty == "RECURRENCE_UNCERTAIN":
+        return "RECURRENCE_AND_PREVIOUS_CAPA"
+    if primary_uncertainty == "CONFLICTING_EVIDENCE":
+        return "CONFLICT_RESOLUTION"
+    if primary_uncertainty == "SCOPE_UNCERTAIN":
+        return "POPULATION_AND_SCOPE_RESOLUTION"
+    return "MECHANISM_DISCRIMINATION"
+
 
 
 

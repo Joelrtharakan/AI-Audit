@@ -74,6 +74,7 @@ def evaluate_root_cause_eligibility(
     conflicts: list[EvidenceConflict] | None = None,
     referenced_docs: list[ReferencedDocumentInfo] | None = None,
     source_text: str = "",
+    canonical_state: Any = None,
 ) -> tuple[bool, SupportLevel, str | None, list[str], CausalLevel, bool]:
     """Evaluate whether a candidate causal hypothesis is eligible and calculate its support level.
 
@@ -133,6 +134,12 @@ def evaluate_root_cause_eligibility(
                 missing_evidence.append(f"Objective verification resolving {conf.conflict_type}")
                 return True, SupportLevel.UNRESOLVED, "conflicting_evidence_unresolved", missing_evidence, causal_level, False
 
+    # 5.5 If the finding is an EVENT_SEQUENCE_CONTROL transition with unverified mechanism, block promotion (INV-EVENT-003, INV-EVENT-004)
+    if canonical_state and getattr(canonical_state, "semantic_type", None) == "EVENT_SEQUENCE_CONTROL":
+        if getattr(canonical_state, "mechanism_status", "UNKNOWN") != "VERIFIED":
+            missing_evidence.append("Objective records establishing whether the transition was authorized, bypassed, or omitted")
+            return True, SupportLevel.POSSIBLE, None, missing_evidence, CausalLevel.L3_IMMEDIATE_MECHANISM, False
+
     # 6. Evaluate Positive Grounding / Evidence Confirmation:
     # Check if objective evidence materially establishes the causal failure
     # (e.g. "audit log shows block was disabled", "server log shows service outage", "authorization record shows unvalidated approval")
@@ -164,20 +171,21 @@ def evaluate_root_cause_eligibility(
             f_low,
         ))
         has_system_outage = bool(re.search(r"\b(?:server|system|service|channel|network|queue|message queue)\b.*?\b(?:outage|failure|down|crashed|unresponsive|failed)\b", f_low))
+        has_instrument_proof = bool(re.search(r"\b(?:scada|event\s+log|telemetry|sensor|thermocouple|micrometer|instrument|open\s+circuit|seal\s+broken|calibration\s+record|tolerance\s+error)\b.*?\b(?:failed|open\s+circuit|error|broken|exceeded|out\s+of\s+calibration)\b", f_low))
         has_unauthorized_action = bool(re.search(r"\b(?:authorized|approved|executed|operated)\b.*?\b(?:without|unvalidated|unqualified|untrained|no\s+completed)\b", f_low))
         has_training_proof = bool(re.search(r"\b(?:lms|training log|training records?)\b.*?\b(?:no\s+operators|not\s+completed|never\s+completed|uncompleted|failed\s+to\s+complete)\b", f_low))
         has_change_mgmt_bypass = bool(re.search(r"\b(?:change[- ]management|sop-eng-\w+)\b.*?\b(?:bypassed|skipped|unvalidated|unconfigured)\b", f_low))
         has_task_assignment_proof = bool(re.search(r"\b(?:never\s+assigned|not\s+assigned|unassigned|assignment\s+(?:failed|not\s+configured))\b", f_low))
-        has_explicit_audit_proof = ("audit log" in f_low or "audit trail" in f_low or "system log" in f_low or "server log" in f_low or "security_audit_log" in f_low or "security audit" in f_low) and any(
-            w in f_low for w in ("disabled", "bypassed", "failure", "outage", "defeated", "overridden", "override", "never assigned", "not assigned", "unassigned", "crashed", "unconfigured")
+        has_explicit_audit_proof = ("audit log" in f_low or "audit trail" in f_low or "system log" in f_low or "server log" in f_low or "security_audit_log" in f_low or "security audit" in f_low or "scada" in f_low) and any(
+            w in f_low for w in ("disabled", "bypassed", "failure", "outage", "defeated", "overridden", "override", "never assigned", "not assigned", "unassigned", "crashed", "unconfigured", "open circuit", "fault")
         )
 
         is_bypass_hyp = any(w in stmt_low for w in ("bypass", "bypassed", "disabled", "defeated", "overridden", "override", "skipped", "without training validation", "without dual authorization"))
         is_training_hyp = any(w in stmt_low for w in ("training", "lms", "competenc")) and not is_bypass_hyp
-        is_system_hyp = any(w in stmt_low for w in ("server", "service", "queue", "outage", "crashed"))
+        is_system_hyp = any(w in stmt_low for w in ("server", "service", "queue", "outage", "crashed", "thermocouple", "sensor", "scada", "instrument", "open circuit", "hardware", "mechanical"))
         is_assignment_hyp = any(w in stmt_low for w in ("assignment", "assigned"))
 
-        if is_bypass_hyp and (has_disabled_control or has_change_mgmt_bypass or has_explicit_audit_proof or has_unauthorized_action):
+        if is_bypass_hyp and (has_disabled_control or has_change_mgmt_bypass or (has_explicit_audit_proof and "override" not in f_low and "overridden" not in f_low) or has_unauthorized_action):
             has_verified_causal_proof = True
             proven_causal_level = CausalLevel.L5_SYSTEMIC_CAUSE
             break
@@ -185,7 +193,7 @@ def evaluate_root_cause_eligibility(
             has_verified_causal_proof = True
             proven_causal_level = CausalLevel.L4_ROOT_CAUSE
             break
-        elif is_system_hyp and (has_system_outage or has_explicit_audit_proof):
+        elif is_system_hyp and (has_system_outage or has_instrument_proof or has_explicit_audit_proof):
             has_verified_causal_proof = True
             proven_causal_level = CausalLevel.L2_IMMEDIATE_MECHANISM
             break
@@ -193,11 +201,11 @@ def evaluate_root_cause_eligibility(
             has_verified_causal_proof = True
             proven_causal_level = CausalLevel.L4_ROOT_CAUSE
             break
-        elif has_disabled_control or has_system_outage or has_change_mgmt_bypass or has_explicit_audit_proof:
-            if any(w in stmt_low for w in ("disable", "bypass", "outage", "service failure", "workflow", "authorization", "control", "interlock", "block", "rule")):
+        elif has_disabled_control or has_system_outage or has_instrument_proof or has_change_mgmt_bypass or has_explicit_audit_proof:
+            if any(w in stmt_low for w in ("disable", "bypass", "outage", "service failure", "workflow", "authorization", "control", "interlock", "block", "rule", "thermocouple", "sensor", "fault", "hardware", "instrument")):
                 has_verified_causal_proof = True
                 proven_causal_level = (
-                    CausalLevel.L2_IMMEDIATE_MECHANISM if has_system_outage and not has_disabled_control
+                    CausalLevel.L2_IMMEDIATE_MECHANISM if (has_system_outage or has_instrument_proof) and not has_disabled_control
                     else CausalLevel.L5_SYSTEMIC_CAUSE
                 )
                 break
@@ -244,7 +252,14 @@ def select_authoritative_leading_hypothesis(
     if not hypotheses:
         return None, "NONE", RootCauseStatus.NOT_ESTABLISHED, "No eligible causal hypotheses identified"
 
-    if conflicts and len(conflicts) > 0:
+    # Only an UNRESOLVED conflict blocks establishment -- a conflict already
+    # RESOLVED_FOR/RESOLVED_AGAINST elsewhere in the evidence set is not a
+    # reason to collapse an otherwise-legitimate SUPPORTED immediate
+    # mechanism to NOT_ESTABLISHED. Mirrors the same status-filtered check
+    # already used at nodes/final_evidence_verification.py's
+    # has_unresolved_conflict.
+    unresolved_conflicts = [c for c in (conflicts or []) if getattr(c, "status", "UNRESOLVED") == "UNRESOLVED"]
+    if unresolved_conflicts:
         return None, "NONE", RootCauseStatus.NOT_ESTABLISHED, "Available evidence contains unresolved conflicts requiring investigation"
 
     # Separate primary root-cause candidates from detection failures and contributing factors
@@ -275,6 +290,95 @@ def select_authoritative_leading_hypothesis(
         return leading.id, "POSSIBLE", RootCauseStatus.NOT_ESTABLISHED, "Single candidate hypothesis pending objective verification"
 
     return None, "TIED", RootCauseStatus.NOT_ESTABLISHED, "Multiple candidate hypotheses remain equally plausible pending investigation"
+
+
+# ---------------------------------------------------------------------------
+# Epistemic transition tracking & monotonic merge (INV-UNCERTAINTY-005)
+# ---------------------------------------------------------------------------
+
+# Ordinal rank so a hypothesis's evidence backing can be compared across two
+# core_synthesis passes. CONFLICTING sits below CORROBORATED/VERIFIED
+# deliberately: new conflicting evidence is exactly the kind of change that
+# is ALLOWED to lower a hypothesis's standing (see merge_candidate_hypotheses).
+EVIDENCE_STRENGTH_RANK: dict[str, int] = {
+    "NONE": 0,
+    "REPORTED": 1,
+    "INDICATIVE": 2,
+    "CONFLICTING": 2,
+    "CORROBORATED": 3,
+    "VERIFIED": 4,
+}
+
+HYPOTHESIS_STATUS_RANK: dict[str, int] = {
+    "UNVERIFIED": 0,
+    "UNRESOLVED": 0,
+    "REFUTED": 0,
+    "POSSIBLE": 1,
+    "SUPPORTED": 2,
+}
+
+
+def capture_epistemic_snapshot(root_cause: RootCauseAnalysis | Any, canonical: Any = None) -> dict[str, Any]:
+    """Compact, comparable snapshot of the current epistemic state.
+
+    AgentState only ever holds the LATEST root_cause/canonical_finding_state
+    -- there is no history. Appending one of these to
+    AgentState["epistemic_snapshot_history"] at each point root_cause is
+    (re)written gives app.agent.invariants._check_epistemic_status_transitions
+    something to actually diff, instead of only inspecting a single snapshot.
+    """
+    hypotheses: dict[str, dict[str, str]] = {}
+    for h in getattr(root_cause, "candidate_hypotheses", None) or []:
+        key = getattr(h, "name", None) or getattr(h, "id", None) or ""
+        hypotheses[key] = {
+            "status": str(getattr(h, "status", "")),
+            "evidence_strength": str(getattr(h, "evidence_strength", "NONE")),
+        }
+    conflicts = getattr(canonical, "evidence_conflicts", None) or []
+    return {
+        "root_cause_status": str(getattr(root_cause, "status", None)) if root_cause is not None else None,
+        "causal_readiness": getattr(canonical, "causal_readiness", None) if canonical is not None else None,
+        "unresolved_conflict_ids": sorted(
+            getattr(c, "conflict_id", "") for c in conflicts if getattr(c, "status", "UNRESOLVED") == "UNRESOLVED"
+        ),
+        "hypotheses": hypotheses,
+    }
+
+
+def merge_candidate_hypotheses(
+    previous: list[CandidateHypothesis] | None,
+    new: list[CandidateHypothesis] | None,
+) -> list[CandidateHypothesis]:
+    """Monotonic merge guard for the critic-send-back re-investigation loop.
+
+    core_synthesis_node runs a second time when the critic sends the
+    investigation back for more evidence; that second pass regenerates
+    candidate_hypotheses from scratch and fully replaces the first pass's
+    result in AgentState. Nothing prevented a later, lower-confidence
+    synthesis from silently under-stating a hypothesis an earlier pass had
+    already established (e.g. VERIFIED evidence_strength quietly becoming
+    REPORTED because the second LLM call phrased evidence more tentatively).
+
+    This restores a matched hypothesis's evidence_strength/status to the
+    higher of the two passes UNLESS the later pass explicitly REFUTED it --
+    an explicit refutation is new evidence-driven information, not a
+    regression, and is always respected.
+    """
+    if not previous or not new:
+        return new or []
+    prev_by_key = {(getattr(h, "name", None) or h.id): h for h in previous}
+    for h in new:
+        key = getattr(h, "name", None) or h.id
+        prev = prev_by_key.get(key)
+        if prev is None or getattr(h, "status", "") == "REFUTED":
+            continue
+        prev_rank = EVIDENCE_STRENGTH_RANK.get(str(getattr(prev, "evidence_strength", "NONE")), 0)
+        new_rank = EVIDENCE_STRENGTH_RANK.get(str(getattr(h, "evidence_strength", "NONE")), 0)
+        if prev_rank > new_rank:
+            h.evidence_strength = prev.evidence_strength
+            if HYPOTHESIS_STATUS_RANK.get(str(prev.status), 0) > HYPOTHESIS_STATUS_RANK.get(str(h.status), 0):
+                h.status = prev.status
+    return new
 
 
 def validate_final_analysis(state: dict[str, Any]) -> tuple[bool, list[str]]:

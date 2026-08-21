@@ -48,6 +48,18 @@ async def critic_node(state: AgentState) -> AgentState:
     five_why = state.get("five_why")
     settings = get_settings()
 
+    # NON-ACTIONABLE FAST PATH: if input is not actionable, skip critic
+    canonical = state.get("canonical_finding_state")
+    if canonical and not getattr(canonical, "is_actionable", True):
+        trace.append(AgentTraceStep.ok("Critic: non-actionable input (0ms fast path)"))
+        state["critic_approved"] = True
+        state["critic_feedback"] = "Non-actionable input approved."
+        state["critic_send_back"] = False
+        state["critic_status"] = "SKIPPED"
+        state["trace"] = trace
+        state["errors"] = errors
+        return state
+
     # DETERMINISTIC PRE-CRITIC QUALITY GATE: the critic is an exception-path
     # quality-control mechanism, not a mandatory step on every successful
     # synthesis (it costs a full extra LLM round-trip -- ~15-20s on this

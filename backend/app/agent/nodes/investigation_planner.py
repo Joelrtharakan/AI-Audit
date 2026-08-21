@@ -41,11 +41,40 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     settings = get_settings()
     plan = InvestigationPlan()
 
-    # FAST-PATH: If ASP.NET integration is not configured and not testing mocked client, skip 30s LLM call
+    # NON-ACTIONABLE FAST PATH: if input contains no actionable audit finding,
+    # do NOT manufacture false investigation plans, questions, or tool calls.
+    canonical = state.get("canonical_finding_state")
+    if canonical and not getattr(canonical, "is_actionable", True):
+        trace.append(AgentTraceStep.ok("Investigation Planner: non-actionable input — investigation plan not applicable"))
+        state["investigation_plan"] = InvestigationPlan(areas=[], questions=[], evidence_to_collect=[])
+        state["needs_investigation"] = False
+        state["planned_tools"] = []
+        state["trace"] = trace
+        state["errors"] = errors
+        return state
+
+    # FAST-PATH: If ASP.NET integration is not configured and not testing mocked client,
+    # generate the authoritative deterministic investigation plan right here from the canonical state.
     client = get_llm_client()
     is_mocked = hasattr(client, "chat_completion") and isinstance(client.chat_completion, AsyncMock)
     if not settings.lqms_aspnet_base_url and not is_mocked:
-        trace.append(AgentTraceStep.ok("No tool endpoints configured; proceeding directly to core synthesis (0ms fast path)"))
+        from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
+        from app.agent.causal_guard import select_investigation_strategy
+        
+        prim_unc = getattr(canonical, "primary_uncertainty", "UNKNOWN") if canonical else "UNKNOWN"
+        strategy_label = select_investigation_strategy(prim_unc, canonical)
+        
+        _, plan = build_deterministic_investigation_plan(
+            request.finding_text,
+            state.get("evidence_ledger", []),
+            canonical_subject=getattr(canonical, "finding_subject", None),
+            canonical_state=canonical,
+        )
+        
+        trace.append(AgentTraceStep.ok(
+            f"Investigation Planner: constructed plan for uncertainty '{prim_unc}' "
+            f"via strategy '{strategy_label}' with {len(plan.questions)} question(s) (fast-path)"
+        ))
         state["investigation_plan"] = plan
         state["needs_investigation"] = False
         state["planned_tools"] = []

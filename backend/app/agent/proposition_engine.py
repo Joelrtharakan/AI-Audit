@@ -190,6 +190,10 @@ def build_propositions_from_ledger(
             statement_status = "REPORTED"
             underlying_event_status = "UNKNOWN"
 
+        # Extract atomic dimensions for Proposition
+        subject_cand = getattr(item, "subject", None)
+        pred_cand = getattr(item, "predicate", None)
+
         prop = Proposition(
             id=f"P{pid_counter}",
             statement=claim_text,
@@ -200,6 +204,8 @@ def build_propositions_from_ledger(
             supporting_evidence_ids=[claim_id],
             contradicting_evidence_ids=[],
             status=getattr(status, "value", str(status)),
+            subject=subject_cand,
+            predicate=pred_cand,
             speaker=speaker,
             statement_status=statement_status,
             underlying_event_status=underlying_event_status,
@@ -208,3 +214,178 @@ def build_propositions_from_ledger(
         pid_counter += 1
 
     return propositions
+
+
+def build_semantic_graph(
+    finding_text: str,
+    evidence_claims: list[EvidenceClaim] | list[EvidenceItem],
+    propositions: list[Proposition],
+    conflicts: list[EvidenceConflict] | None = None,
+) -> SemanticGraph:
+    """Build the formal Semantic Graph with atomic entity/event/state nodes and directed relations."""
+    from app.models.agent import (
+        SemanticEdge,
+        SemanticGraph,
+        SemanticNode,
+        SemanticNodeType,
+        SemanticRelationType,
+    )
+    from app.services.semantic_subject import extract_actors, extract_entities
+
+    nodes_by_label: dict[str, SemanticNode] = {}
+    edges: list[SemanticEdge] = []
+    n_idx = 1
+    e_idx = 1
+
+    def _get_or_create_node(
+        label: str,
+        node_type: SemanticNodeType = SemanticNodeType.ENTITY,
+        status: EvidenceStatus = EvidenceStatus.UNKNOWN,
+        source_type: EpistemicSource = EpistemicSource.AUDIT_OBSERVATION,
+        claim_id: str | None = None,
+    ) -> str:
+        nonlocal n_idx
+        clean_lbl = label.strip()
+        key = clean_lbl.lower()
+        if key in nodes_by_label:
+            node = nodes_by_label[key]
+            if claim_id and claim_id not in node.source_claim_ids:
+                node.source_claim_ids.append(claim_id)
+            return node.id
+        node_id = f"N{n_idx}"
+        n_idx += 1
+        node = SemanticNode(
+            id=node_id,
+            label=clean_lbl,
+            node_type=node_type,
+            epistemic_status=status,
+            provenance=source_type,
+            source_claim_ids=[claim_id] if claim_id else [],
+        )
+        nodes_by_label[key] = node
+        return node_id
+
+    # 1. Base entities and actors from finding
+    for act in extract_actors(finding_text):
+        _get_or_create_node(act, SemanticNodeType.ENTITY, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
+
+    for ent in extract_entities(finding_text):
+        _get_or_create_node(ent, SemanticNodeType.ENTITY, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
+
+    # 1b. Base nodes from claim subjects & speaker
+    for claim in evidence_claims:
+        subj = getattr(claim, "subject", None)
+        spkr = getattr(claim, "speaker", None)
+        c_status = getattr(claim, "status", EvidenceStatus.UNKNOWN)
+        c_id = getattr(claim, "claim_id", None)
+        if subj and len(subj.strip()) >= 3:
+            _get_or_create_node(subj, SemanticNodeType.ENTITY, c_status, EpistemicSource.AUDIT_OBSERVATION, c_id)
+        if spkr and len(spkr.strip()) >= 3:
+            _get_or_create_node(spkr, SemanticNodeType.ENTITY, c_status, EpistemicSource.AUDIT_OBSERVATION, c_id)
+
+    # 2. Add nodes and edges per claim / proposition
+    for claim in evidence_claims:
+        c_text = getattr(claim, "claim", getattr(claim, "text", str(claim)))
+        c_id = getattr(claim, "claim_id", None)
+        c_status = getattr(claim, "status", EvidenceStatus.UNKNOWN)
+        c_speaker = getattr(claim, "speaker", None)
+        c_low = c_text.lower()
+
+        # Epistemic source
+        source_type = EpistemicSource.AUDIT_OBSERVATION
+        attr = getattr(claim, "attribution", None)
+        if attr == ClaimAttribution.SYSTEM_EVIDENCE:
+            source_type = EpistemicSource.SYSTEM_RECORD
+        elif attr in (ClaimAttribution.PERSON_REPORTED, ClaimAttribution.SUPERVISOR_REPORTED):
+            source_type = EpistemicSource.REPORTED_STATEMENT
+        elif attr == ClaimAttribution.DOCUMENTARY_EVIDENCE:
+            source_type = EpistemicSource.OBJECTIVE_RECORD
+
+        # Structural relation & participant extraction
+        if "deliver" in c_low or "dispatch" in c_low or "sent" in c_low:
+            sys_id = _get_or_create_node(c_speaker or "System", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            notif_id = _get_or_create_node("Notification", SemanticNodeType.RECORD, c_status, source_type, c_id)
+            edges.append(SemanticEdge(
+                id=f"E{e_idx}",
+                source_id=sys_id,
+                target_id=notif_id,
+                relation_type=SemanticRelationType.TRANSMITTED_TO,
+                epistemic_status=c_status,
+                provenance=source_type,
+                source_claim_ids=[c_id] if c_id else [],
+                notes="Delivery recorded by system",
+            ))
+            e_idx += 1
+
+        elif "receiv" in c_low:
+            recp_id = _get_or_create_node(c_speaker or "Recipient", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            notif_id = _get_or_create_node("Notification", SemanticNodeType.RECORD, c_status, source_type, c_id)
+            edges.append(SemanticEdge(
+                id=f"E{e_idx}",
+                source_id=recp_id,
+                target_id=notif_id,
+                relation_type=SemanticRelationType.RECEIVED_BY,
+                epistemic_status=c_status,
+                provenance=source_type,
+                source_claim_ids=[c_id] if c_id else [],
+                notes="Receipt account",
+            ))
+            e_idx += 1
+
+        elif "access" in c_low or "opened" in c_low or "viewed" in c_low:
+            recp_id = _get_or_create_node(c_speaker or "Recipient", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            notif_id = _get_or_create_node("Notification", SemanticNodeType.RECORD, c_status, source_type, c_id)
+            edges.append(SemanticEdge(
+                id=f"E{e_idx}",
+                source_id=recp_id,
+                target_id=notif_id,
+                relation_type=SemanticRelationType.ACCESSED_BY,
+                epistemic_status=c_status,
+                provenance=source_type,
+                source_claim_ids=[c_id] if c_id else [],
+            ))
+            e_idx += 1
+
+        elif "acknowledg" in c_low or "sign-off" in c_low:
+            recp_id = _get_or_create_node(c_speaker or "Personnel", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            notif_id = _get_or_create_node("Notification", SemanticNodeType.RECORD, c_status, source_type, c_id)
+            edges.append(SemanticEdge(
+                id=f"E{e_idx}",
+                source_id=recp_id,
+                target_id=notif_id,
+                relation_type=SemanticRelationType.ACKNOWLEDGED_BY,
+                epistemic_status=c_status,
+                provenance=source_type,
+                source_claim_ids=[c_id] if c_id else [],
+            ))
+            e_idx += 1
+
+        elif "calibrat" in c_low:
+            equip_id = _get_or_create_node("Equipment", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            rec_id = _get_or_create_node("Calibration Record", SemanticNodeType.RECORD, c_status, source_type, c_id)
+            edges.append(SemanticEdge(
+                id=f"E{e_idx}",
+                source_id=rec_id,
+                target_id=equip_id,
+                relation_type=SemanticRelationType.VERIFIES,
+                epistemic_status=c_status,
+                provenance=source_type,
+                source_claim_ids=[c_id] if c_id else [],
+            ))
+            e_idx += 1
+
+        elif "train" in c_low:
+            actor_id = _get_or_create_node(c_speaker or "Personnel", SemanticNodeType.ENTITY, c_status, source_type, c_id)
+            req_id = _get_or_create_node("Training Requirement", SemanticNodeType.REQUIREMENT, c_status, source_type, c_id)
+            edges.append(SemanticEdge(
+                id=f"E{e_idx}",
+                source_id=req_id,
+                target_id=actor_id,
+                relation_type=SemanticRelationType.APPLIES_TO,
+                epistemic_status=c_status,
+                provenance=source_type,
+                source_claim_ids=[c_id] if c_id else [],
+            ))
+            e_idx += 1
+
+    return SemanticGraph(nodes=list(nodes_by_label.values()), edges=edges)

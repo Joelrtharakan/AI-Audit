@@ -39,6 +39,11 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     finding_text = state["request"].finding_text
     canonical = state.get("canonical_finding_state")
 
+    # NON-ACTIONABLE FAST PATH: preserve clean not_applicable state without backfills
+    if canonical and not getattr(canonical, "is_actionable", True):
+        trace.append(AgentTraceStep.ok("Final evidence verification: non-actionable input verified (0ms fast path)"))
+        return state
+
     # Extract all SOP / Document identifiers from finding text and evidence ledger
     allowed_terms = set(re.findall(r"\bSOP-[\w-]+\b", finding_text, re.IGNORECASE))
     for e in evidence_ledger:
@@ -167,6 +172,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 state["request"].finding_text,
                 evidence_ledger,
                 canonical_subject=getattr(canonical, "finding_subject", None),
+                canonical_state=canonical,
             )
             inv.questions = fallback_plan.questions
             if not inv.areas:
@@ -252,6 +258,9 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             step.question = q_text
             step.answer = _clean_text(step.answer)
             from app.agent.causal_guard import (
+                answer_selects_unverified_hypothesis,
+                build_causal_boundary_answer,
+                five_why_answer_contains_unverified_modal_causation,
                 detect_unsupported_causal_specificity,
                 five_why_answer_invents_mechanism_at_unknown_status,
                 hypothesis_asserts_referenced_document_content,
@@ -290,7 +299,45 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             _spurious_mixed = (
                 step.status == "MIXED" and not (_fw_canonical and _fw_canonical.evidence_conflicts)
             )
-            if _unsupported or _unsupported_causation or _unestablished_at_unknown or _systemic_escalation or _notification_inversion or _change_event_inversion or _referenced_doc_content:
+            # CAUSAL BOUNDARY GUARD (INV-5WHY-CAUSAL-001), defense-in-depth:
+            # re-checked here independent of core_synthesis's own guard so a
+            # 5-Why step that reaches this node by any path (LLM recovery,
+            # deterministic fallback edited downstream, etc.) is held to the
+            # same standard -- never let an UNVERIFIED candidate hypothesis
+            # be functionally selected as the explanation.
+            _rc_hypotheses = getattr(rc, "candidate_hypotheses", None) if rc else None
+            _selected_hyp = answer_selects_unverified_hypothesis(step.answer, _rc_hypotheses, status=step.status)
+            _fev_has_verified_mechanism = getattr(_fw_canonical, "mechanism_status", None) == "VERIFIED"
+            _modal_causation = five_why_answer_contains_unverified_modal_causation(
+                step.answer, step.status, has_verified_mechanism=_fev_has_verified_mechanism
+            )
+            if _selected_hyp is not None or _modal_causation:
+                if _selected_hyp is not None:
+                    trace.append(AgentTraceStep.warn(
+                        f"Final Evidence Verification: 5-Why step answer selected unverified hypothesis "
+                        f"{getattr(_selected_hyp, 'id', '?')} ({getattr(_selected_hyp, 'name', '?')}) as the "
+                        "explanation — replaced with the canonical evidence boundary"
+                    ))
+                else:
+                    trace.append(AgentTraceStep.warn(
+                        "Final Evidence Verification: 5-Why step answer contained an unverified modal "
+                        "causal claim (INV-5WHY-CAUSAL-002) with no verified mechanism — replaced with "
+                        "the canonical evidence boundary"
+                    ))
+                step.answer = build_causal_boundary_answer(
+                    candidate_hypotheses=_rc_hypotheses,
+                    comparison_type=getattr(_fw_canonical, "comparison_type", None),
+                    comparison_left=getattr(_fw_canonical, "comparison_left", None),
+                    comparison_right=getattr(_fw_canonical, "comparison_right", None),
+                    comparison_left_qualifier=getattr(_fw_canonical, "comparison_left_qualifier", None),
+                    comparison_subtype=getattr(_fw_canonical, "comparison_subtype", None),
+                    measurement_value=getattr(getattr(_fw_canonical, "measurement", None), "value", None),
+                    measurement_unit=getattr(getattr(_fw_canonical, "measurement", None), "unit", None),
+                    measurement_qualifier=getattr(getattr(_fw_canonical, "measurement", None), "qualifier", None),
+                    observed_deviation=getattr(_fw_canonical, "observed_deviation", None),
+                )
+                step.status = "UNKNOWN"
+            elif _unsupported or _unsupported_causation or _unestablished_at_unknown or _systemic_escalation or _notification_inversion or _change_event_inversion or _referenced_doc_content:
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: 5-Why step answer asserted an unlicensed causal "
                     f"mechanism ({step.answer!r}, status {step.status}"
@@ -388,7 +435,15 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 iq.evidence = _clean_text(iq.evidence) or iq.evidence
             report.investigation.areas = [_clean_text(a) or a for a in report.investigation.areas]
             if report.investigation.evidence_to_collect:
-                report.investigation.evidence_to_collect = [_clean_text(e) or e for e in report.investigation.evidence_to_collect]
+                # _clean_text can map two DIFFERENT source items onto the
+                # same canonical replacement text (e.g. two SOP-identifier
+                # patterns both normalizing to "approved procedure revision
+                # and distribution records") -- dedup AFTER rewriting so
+                # the rewrite itself never reintroduces a literal duplicate
+                # (Section 10/INV-EVIDENCE-001).
+                report.investigation.evidence_to_collect = list(dict.fromkeys(
+                    _clean_text(e) or e for e in report.investigation.evidence_to_collect
+                ))
         if report.five_why and report.five_why.steps:
             for step in report.five_why.steps:
                 step.question = _clean_text(step.question) or step.question
@@ -787,17 +842,30 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 _significant_words(canonical.finding_subject)
                 if canonical and canonical.finding_subject else None
             )
-            det_status, det_strength = determine_hypothesis_status(
-                h.statement,
-                verified_facts,
-                reported_claims,
-                canonical.evidence_conflicts if canonical else None,
-                mechanism,
-                allow_verified_promotion=not is_recurrence_hyp,
-                subject_words=_subject_words,
-            )
-            h.status = det_status
-            h.evidence_strength = det_strength
+            # Common-factor hypotheses (Section: COMMON-FACTOR CAUSAL
+            # REASONING) are deliberately POSSIBLE/INDICATIVE by
+            # construction -- a pattern across multiple claims, not a
+            # single-claim overlap determine_hypothesis_status looks for.
+            # Re-deriving status/strength from single-claim overlap here
+            # would either strand it at status=POSSIBLE with the
+            # provenance-losing generic "NONE" strength, or (worse) let a
+            # coincidental wording overlap with one VERIFIED claim promote
+            # it toward SUPPORTED on pattern evidence alone -- exactly the
+            # premature-causality risk this hypothesis type must never take.
+            if h.name == "SHARED_SYSTEM_COMMON_FACTOR":
+                pass
+            else:
+                det_status, det_strength = determine_hypothesis_status(
+                    h.statement,
+                    verified_facts,
+                    reported_claims,
+                    canonical.evidence_conflicts if canonical else None,
+                    mechanism,
+                    allow_verified_promotion=not is_recurrence_hyp,
+                    subject_words=_subject_words,
+                )
+                h.status = det_status
+                h.evidence_strength = det_strength
             # Evidence traceability firewall: a hypothesis must never be
             # SUPPORTED without a citable supporting fact -- determine_hypothesis_status
             # already requires a VERIFIED-fact overlap to reach SUPPORTED, so
@@ -884,6 +952,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             backfill_hyps, backfill_plan = build_deterministic_investigation_plan(
                 finding_text, evidence_ledger,
                 canonical_subject=getattr(canonical, "finding_subject", None),
+                canonical_state=canonical,
             )
             # Backfilled hypotheses must pass through the SAME unsupported-
             # specificity firewall as every other path (no output may bypass
@@ -929,16 +998,13 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                         backfill_hyps, backfill_subject, topic_word(backfill_subject)
                     )
             # Investigation questions/areas are adopted from the backfill
-            # plan whenever it has content, REGARDLESS of whether any
+            # plan whenever inv has no questions, REGARDLESS of whether any
             # hypothesis survived -- a finding can correctly produce zero
             # causal hypotheses (no reported explanation licenses one) while
             # still deserving a genuine, non-presupposing investigation plan
             # (Section 10/11: never fall back to "no questions generated"
             # just because no hypothesis exists to attach them to).
-            # Questions built earlier may reference now-discarded hypothesis
-            # IDs/content, so the backfill's own questions replace them
-            # outright rather than being merged.
-            if inv is not None and backfill_plan.questions:
+            if inv is not None and not inv.questions and backfill_plan.questions:
                 inv.questions = backfill_plan.questions
                 inv.areas = backfill_plan.areas
                 inv.evidence_to_collect = backfill_plan.evidence_to_collect
@@ -1139,6 +1205,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 evidence_items=evidence_ledger,
                 conflicts=canonical.evidence_conflicts if canonical else None,
                 referenced_docs=canonical.referenced_documents if canonical else None,
+                canonical_state=canonical,
             )
             if promo and supp == SupportLevel.SUPPORTED:
                 h.status = "SUPPORTED"
@@ -1153,7 +1220,15 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 h.evidence_strength = "VERIFIED"
             else:
                 h.status = "POSSIBLE"
-                h.evidence_strength = "NONE"
+                # INDICATIVE is preserved, never reset to NONE: a common-
+                # factor/pattern-derived hypothesis (Section: COMMON-FACTOR
+                # CAUSAL REASONING) legitimately has a real, citable signal
+                # (the shared system/process across multiple locations) even
+                # though it isn't promoted to SUPPORTED -- collapsing that
+                # to NONE would indistinguishably conflate "a pattern points
+                # here" with "there is no evidence at all here."
+                if h.evidence_strength != "INDICATIVE":
+                    h.evidence_strength = "NONE"
 
         lead_id, lead_mode, authoritative_rc_status, lead_rationale = select_authoritative_leading_hypothesis(
             rc.candidate_hypotheses,
@@ -1172,12 +1247,12 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             rc.status = RootCauseStatus.NOT_ESTABLISHED
             rc.leading_hypothesis = None
             rc.leading_hypothesis_status = lead_status_literal
-        from app.agent.recurrence_guard import detect_recurrence
+        from app.agent.recurrence_guard import build_recurrence_rationale, detect_recurrence
         _finding_txt = getattr(state.get("request"), "finding_text", "")
         _rec = detect_recurrence(_finding_txt)
         if _rec.is_recurring:
             rc.risk_of_recurrence = "HIGH"
-            rc.risk_of_recurrence_rationale = f"Recurrence history identified ({_rec.capa_id or 'previous CAPA'}); prior corrective actions were ineffective in preventing reoccurrence."
+            rc.risk_of_recurrence_rationale = build_recurrence_rationale(_rec)
 
         # Causal-verb firewall on the "Why" text (narrative/root_cause_basis):
         # the same "because"/"due to"/"caused by" over-claim that a
@@ -1294,10 +1369,17 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         from app.agent.causal_guard import _ATTRIBUTION_LANGUAGE_RE
         for step in fw.steps:
             if step.answer and _ATTRIBUTION_LANGUAGE_RE.search(step.answer):
-                if step.status == "VERIFIED":
+                # SUPPORTED is just as capable of over-claiming an
+                # attributed statement as VERIFIED -- checked here too
+                # (defense-in-depth alongside core_synthesis's own guard)
+                # so no path (LLM, recovery, downstream edit) can leave a
+                # narrated report labeled as though it were an established
+                # causal finding.
+                if step.status in ("VERIFIED", "SUPPORTED"):
+                    _old_status = step.status
                     step.status = "REPORTED"
                     trace.append(AgentTraceStep.warn(
-                        "Final Evidence Verification: downgraded 5-Why answer containing attribution from VERIFIED to REPORTED"
+                        f"Final Evidence Verification: downgraded 5-Why answer containing attribution from {_old_status} to REPORTED"
                     ))
         if canonical and canonical.evidence_conflicts:
             # When evidence conflicts exist, rebuild deterministic 5-Why chain if LLM fabricated steps
@@ -1495,6 +1577,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     from app.agent.analytical_validator import (
         compute_analytical_quality,
         five_why_skips_available_mechanism,
+        repair_five_why_restatement,
         repair_five_why_with_mechanism,
         sync_five_why_status_with_causal_state,
         validate_capa_causal_linkage,
@@ -1513,8 +1596,8 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # fabricated explanation) rather than silently pass through a chain
     # that stopped one level too early.
     if fw and mechanism and mechanism.statement:
-        if five_why_skips_available_mechanism(fw.steps, mechanism):
-            observed = canonical.observed_deviation if canonical else None
+        observed = canonical.observed_deviation if canonical else None
+        if five_why_skips_available_mechanism(fw.steps, mechanism, observed):
             repaired_steps = repair_five_why_with_mechanism(fw.steps, mechanism, observed)
             if repaired_steps != fw.steps:
                 trace.append(AgentTraceStep.warn(
@@ -1538,6 +1621,21 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 "causal resolution — a step restating the established mechanism cannot remain UNKNOWN"
             ))
             fw.steps = synced_steps
+
+    # Generalized restatement guard (Section 2): a Why answer that merely
+    # repeats its own question's proposition is never causal reasoning,
+    # regardless of which node produced it -- runs after the status sync
+    # above so a step correctly promoted to VERIFIED/SUPPORTED is still
+    # caught if its TEXT is circular (a wrong status was never the only
+    # possible defect here).
+    if fw and fw.steps:
+        restated_steps = repair_five_why_restatement(fw.steps)
+        if restated_steps != fw.steps:
+            trace.append(AgentTraceStep.warn(
+                "Analytical Validator: 5-Why step answer merely restated its own question — "
+                "replaced with the evidence-boundary response"
+            ))
+            fw.steps = restated_steps
 
     # Contributing factor established/potential/rejected split: a factor
     # that structurally contradicts the mechanism or a VERIFIED completion
@@ -1593,6 +1691,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 state["request"].finding_text,
                 evidence_ledger,
                 canonical_subject=getattr(canonical, "finding_subject", None),
+                canonical_state=canonical,
             )
             if inv is None:
                 inv = fallback_plan
@@ -1683,10 +1782,166 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         report.cost_impact = cost_impact
         report.financial_amount = fin_amt
 
+    # ---------------------------------------------------------------------
+    # FINAL OUTPUT VALIDATION LAYER: the formal invariant registry
+    # (app.agent.invariants.INVARIANT_REGISTRY) is otherwise only exercised
+    # by test harnesses that call evaluate_all_invariants() directly on a
+    # hand-built state -- it was never actually invoked by the production
+    # graph itself. Every individual invariant already has its own targeted
+    # deterministic repair earlier in this function (root-cause certainty
+    # downgrade, 5-Why mechanism/status sync, semantic cleanliness, etc.),
+    # so this is a closing backstop, not a substitute for those: it re-runs
+    # the full registry against the final, fully-hardened state and (a)
+    # surfaces anything that still slipped through (never silently), and
+    # (b) applies the one blanket-safe repair available at this point --
+    # downgrading an inappropriately certain root-cause status. Reducing
+    # certainty is always safe; inventing a fix for an arbitrary invariant
+    # class here would not be.
+    # -----------------------------------------------------------------
+    # Pre-registry deterministic REPAIR for the three invariants that the
+    # blind audit found were detected-but-shipped (INV-SEC-003, INV-EPIS-001,
+    # INV-SEM-002). Per the audit brief, "any violation must be repaired
+    # before report generation", so these are actively corrected here rather
+    # than only warned about. All three repairs move the output in the
+    # conservative direction (strip untrusted content, downgrade
+    # over-claimed status, replace a false-confident entity with an honest
+    # unresolved marker) -- none of them can loosen a causal conclusion.
+    # -----------------------------------------------------------------
+    _canonical = state.get("canonical_finding_state")
+    _ledger_in = state.get("evidence_ledger") or []
+    try:
+        from app.models.agent import EvidenceStatus as _ES
+        from app.services.epistemic_modality import (
+            classify_epistemic_stance as _stance_of,
+            classify_modality as _modality_of,
+        )
+        from app.services.instruction_detector import classify_instruction as _cls_instr
+
+        _repaired_ledger = []
+        for _item in _ledger_in:
+            _txt = getattr(_item, "claim", None)
+            if _txt and _cls_instr(_txt).is_untrusted:
+                trace.append(AgentTraceStep.warn(
+                    f"[INV-SEC-003 repaired] instruction-like content stripped from "
+                    f"evidence ledger: {_txt!r}"
+                ))
+                continue
+            if _txt and getattr(_item, "status", None) == _ES.VERIFIED:
+                if _stance_of(_txt) is not None:
+                    _item.status = _ES.BELIEF
+                    trace.append(AgentTraceStep.warn(
+                        f"[INV-EPIS-001 repaired] belief/opinion claim downgraded "
+                        f"VERIFIED -> BELIEF: {_txt!r}"
+                    ))
+                elif not _modality_of(_txt).is_actual:
+                    _item.status = _ES.UNVERIFIED
+                    _item.modality = _modality_of(_txt).modality
+                    trace.append(AgentTraceStep.warn(
+                        f"[INV-EPIS-001 repaired] {_item.modality.lower()} claim downgraded "
+                        f"VERIFIED -> UNVERIFIED: {_txt!r}"
+                    ))
+            _repaired_ledger.append(_item)
+        _ledger_in = _repaired_ledger
+
+        if _canonical is not None:
+            _kept_claims = []
+            for _c in (getattr(_canonical, "evidence_claims", None) or []):
+                _ct = getattr(_c, "text", None)
+                if _ct and _cls_instr(_ct).is_untrusted:
+                    trace.append(AgentTraceStep.warn(
+                        f"[INV-SEC-003 repaired] instruction-like content stripped from "
+                        f"evidence_claims: {_ct!r}"
+                    ))
+                    continue
+                if _ct and getattr(_c, "status", None) == _ES.VERIFIED:
+                    if _stance_of(_ct) is not None:
+                        _c.status = _ES.BELIEF
+                    elif not _modality_of(_ct).is_actual:
+                        _c.status = _ES.UNVERIFIED
+                        _c.modality = _modality_of(_ct).modality
+                _kept_claims.append(_c)
+            _canonical.evidence_claims = _kept_claims
+
+            # INV-SEM-002 repair: a generic placeholder entity is replaced by
+            # an explicit unresolved marker + note. Never silently shipped.
+            from app.agent.invariants import is_generic_placeholder_entity
+            from app.services.semantic_subject import best_partial_noun_phrase
+            for _fname in ("affected_object", "finding_subject"):
+                _val = getattr(_canonical, _fname, None)
+                if _val and is_generic_placeholder_entity(_val):
+                    _frag = best_partial_noun_phrase(getattr(_canonical, "raw_finding", "") or "")
+                    _new = _frag or "UNRESOLVED — the specific entity involved could not be isolated from the finding text"
+                    setattr(_canonical, _fname, _new)
+                    _canonical.entity_resolution = "PARTIAL" if _frag else "UNRESOLVED"
+                    _canonical.entity_resolution_note = (
+                        "Entity extraction was uncertain — this value was a generic "
+                        "placeholder and has been replaced with a flagged best-effort value."
+                    )
+                    _canonical.subject_unresolved = True
+            # Semantic Drift Gate: Ensure final report's affected object / process / root cause
+            # align directly with the upstream canonical semantic authority.
+            if _canonical is not None:
+                if impact is not None:
+                    # Enforce that impact affected_object matches canonical subject/affected_object
+                    canon_obj = getattr(_canonical, "affected_object", None) or getattr(_canonical, "finding_subject", None)
+                    if canon_obj and canon_obj != "UNKNOWN":
+                        impact.affected_object = canon_obj
+                    canon_proc = getattr(_canonical, "affected_process", None)
+                    if canon_proc and canon_proc != "UNKNOWN" and getattr(impact, "process_at_risk", None) in (None, "", "UNKNOWN", "Operational process"):
+                        impact.process_at_risk = canon_proc
+
+                # Enforce that report carries the semantic graph and canonical traceability matrix
+                if report is not None:
+                    if getattr(_canonical, "semantic_graph", None) and not getattr(report, "semantic_graph", None):
+                        report.semantic_graph = _canonical.semantic_graph
+
+            if impact is not None and getattr(impact, "affected_object", None):
+                if is_generic_placeholder_entity(impact.affected_object):
+                    impact.affected_object = getattr(_canonical, "affected_object", None) or impact.affected_object
+                    trace.append(AgentTraceStep.warn(
+                        "[INV-SEM-002 repaired] generic placeholder impact.affected_object "
+                        "replaced with the canonical entity value"
+                    ))
+    except Exception as _repair_err:  # never let a repair break the pipeline
+        errors.append(f"Evidence-semantics repair skipped: {_repair_err}")
+
+    final_check_state = {
+        **state,
+        "evidence_ledger": _ledger_in,
+        "canonical_finding_state": _canonical,
+        "root_cause": rc,
+        "five_why": fw,
+        "investigation_plan": inv,
+        "capa_analysis": capa if capa else ca,
+        "impact_assessment": impact,
+        "cost_impact": cost_impact,
+        "report": report,
+    }
+    from app.agent.invariants import evaluate_all_invariants
+    _final_valid, _final_violations = evaluate_all_invariants(final_check_state)
+    if not _final_valid:
+        for _v in _final_violations:
+            trace.append(AgentTraceStep.warn(f"Final Output Validation: {_v}"))
+        if rc and rc.status in (RootCauseStatus.SUPPORTED, RootCauseStatus.ESTABLISHED) and any(
+            "[INV-CAUS" in v or "[INV-WHY" in v for v in _final_violations
+        ):
+            trace.append(AgentTraceStep.warn(
+                f"Final Output Validation: root_cause.status={rc.status} downgraded to NOT_ESTABLISHED "
+                "— unresolved causal-consistency violation(s) at final validation"
+            ))
+            rc.status = RootCauseStatus.NOT_ESTABLISHED
+            rc.leading_hypothesis = None
+            if report:
+                report.root_cause = rc
+
     trace.append(AgentTraceStep.ok("Final evidence verification and consistency validation completed"))
 
     return {
         **state,
+        # Carry the repaired ledger/canonical state forward -- otherwise the
+        # repairs above would be validated and then thrown away.
+        "evidence_ledger": _ledger_in,
+        "canonical_finding_state": _canonical,
         "root_cause": rc,
         "five_why": fw,
         "investigation_plan": inv,

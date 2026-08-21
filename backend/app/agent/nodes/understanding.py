@@ -15,7 +15,7 @@ import re
 
 from app.agent.state import AgentState
 from app.config import get_settings
-from app.models.agent import AgentTraceStep
+from app.models.agent import AgentTraceStep, InvestigationMode
 from app.services.extraction import extract_finding
 from app.services.llm_client import LLMError, get_llm_client
 from app.services.observation_quality import check_observation_quality
@@ -64,11 +64,118 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     settings = get_settings()
     client = get_llm_client(timeout_seconds=settings.ollama_extraction_timeout_seconds)
 
-    # Deterministic observation quality assessment (0ms fast path)
     from app.models.analysis import ObservationQualityResult, ObservationQualityStatus
+    from app.services.semantic_subject import resolve_deviation, validate_semantic_subject
+    from app.services.instruction_detector import classify_instruction
+
     finding_text = request.finding_text.strip()
     words = finding_text.split()
-    if len(words) < 8:
+
+    # F1 — Generalized content segmentation and actionability determination:
+    # Segment input into independently classifiable segments.
+    # Distinguish:
+    #   1. Auditable evidence / propositions (facts, reported statements, events)
+    #   2. Untrusted instructions / prompt injection attempts
+    #   3. Conversational non-audit content
+    # A finding remains ACTIONABLE if at least one meaningful auditable proposition exists,
+    # regardless of whether untrusted instructions are present alongside it.
+    # Untrusted instructions are excluded from the evidence ledger and never influence RCA.
+    _SENTENCE_SPLIT_PATTERN = re.compile(r"(?:(?<=[.!?])|(?<=[.!?]['\"]))\s+|;\s+")
+    segments = [s.strip() for s in _SENTENCE_SPLIT_PATTERN.split(finding_text) if s.strip()]
+    if not segments:
+        segments = [finding_text]
+
+    auditable_segments: list[str] = []
+    untrusted_segments: list[str] = []
+
+    _CONVERSATIONAL_RE = re.compile(
+        r"^(?:good\s+(?:morning|afternoon|evening)|hi|hello|hey|hope\s+you\s+had|thanks|thank\s+you|please\s+note|don't\s+forget|lunch\s+is|"
+        r"(?:just\s+)?(?:wanted|want)\s+to\s+say|(?:really\s+)?appreciat(?:e|ed))\b",
+        re.IGNORECASE,
+    )
+
+    # A segment that resolve_deviation() couldn't structurally match is only
+    # treated as auditable evidence if it independently carries an
+    # evidentiary marker -- a negation/absence of a required state, a
+    # deviation/discrepancy term, a quantity, date, or record/document
+    # reference. A bare word-count threshold ("4+ words, no greeting")
+    # accepts any expressive or evaluative sentence (praise, small talk,
+    # opinion about the audit process itself) as if it were audit content,
+    # which is how non-substantive narrative ends up supplying the
+    # "affected object." This generalizes across domains because it keys on
+    # the presence of evidentiary vocabulary, not on any specific finding's
+    # wording.
+    _EVIDENTIARY_MARKER_RE = re.compile(
+        r"\b(?:not|no|never|without|missing|absent|overdue|unauthoriz(?:ed|ation)|duplicat(?:e|ed|ion)|"
+        r"discrepanc(?:y|ies)|deviat(?:e|ed|ion)|nonconform(?:ing|ance|ity)|exceed(?:s|ed|ing)?|"
+        r"below|above|breach(?:ed)?|violat(?:e|ed|ion)|expired?|incomplete|could\s+not|failed?\s+to|"
+        r"was\s+not|were\s+not|has\s+not|have\s+not|had\s+not|record|records|log|logs|certificate|"
+        r"report|checklist|procedure|requirement|specification|inspection|audit\s+trail|invoice|"
+        r"payment|permit|calibrat|signature|approv(?:al|ed)|reconcil)\b",
+        re.IGNORECASE,
+    )
+
+    from app.services.attribution_extraction import _is_expressive_non_substantive
+    _excluded_non_substantive_segments: list[str] = []
+
+    for seg in segments:
+        instr_res = classify_instruction(seg)
+        if instr_res.is_untrusted:
+            untrusted_segments.append(seg)
+        elif _is_expressive_non_substantive(seg) or _CONVERSATIONAL_RE.search(seg.strip()):
+            _excluded_non_substantive_segments.append(seg)
+        else:
+            seg_resolved = resolve_deviation(seg)
+            if seg_resolved.matched and seg_resolved.subject and validate_semantic_subject(seg_resolved.subject):
+                auditable_segments.append(seg)
+            elif (
+                len(seg.split()) >= 4
+                and (
+                    _EVIDENTIARY_MARKER_RE.search(seg)
+                    or any(ch.isdigit() for ch in seg)
+                )
+            ):
+                auditable_segments.append(seg)
+
+    # Preliminary subject match used only for the actionability check below.
+    # Computed from trusted (non-untrusted, non-expressive) segments only --
+    # running this on the raw, unfiltered text let a subject phrase inside
+    # an injected instruction (e.g. "...issue a closure certificate") get
+    # picked up as if it were a legitimate finding subject.
+    _trusted_text_for_initial_check = " ".join(
+        s for s in segments if s not in untrusted_segments and s not in _excluded_non_substantive_segments
+    )
+    initial_resolved = resolve_deviation(_trusted_text_for_initial_check) if _trusted_text_for_initial_check else resolve_deviation("")
+
+    # Conversational greetings / meaningless single words
+    _CONVERSATIONAL_WORDS = {
+        "hi", "hello", "thanks", "thank you", "okay", "ok", "test", "good morning",
+        "good afternoon", "good evening", "abc", "i need help", "what is this?",
+        "something was wrong", "anything is bad",
+    }
+    is_pure_conversational = finding_text.strip().lower().rstrip(".!?") in _CONVERSATIONAL_WORDS
+    is_entirely_untrusted = (len(untrusted_segments) == len(segments) and len(segments) > 0)
+
+    # Deterministic degraded-mode extraction (facts & attributed statements)
+    extraction = _fallback_extraction_result(finding_text)
+
+    has_auditable_content = (
+        not is_pure_conversational
+        and not is_entirely_untrusted
+        and (
+            len(auditable_segments) > 0
+            or (initial_resolved.matched and initial_resolved.subject and validate_semantic_subject(initial_resolved.subject))
+            or len(extraction.stated_facts) > len(untrusted_segments)
+            or len(extraction.attributed_statements) > 0
+        )
+    )
+
+    if not has_auditable_content:
+        quality = ObservationQualityResult(
+            status=ObservationQualityStatus.INSUFFICIENT,
+            missing_information=["Input does not contain an actionable audit finding, deviation, or verifiable condition."],
+        )
+    elif len(words) < 8 and not initial_resolved.matched and not any(w in finding_text.lower() for w in ("missing", "overdue", "wrong", "absent", "duplicated", "altered", "failed", "deviated", "nonconforming")):
         quality = ObservationQualityResult(
             status=ObservationQualityStatus.INSUFFICIENT,
             missing_information=["Observation is too brief to establish a verifiable deviation."],
@@ -93,51 +200,139 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             trace.append(AgentTraceStep.warn(f"Missing information: {gap}"))
 
     # Populate initial evidence ledger directly from finding facts (VERIFIED) & attributed statements (REPORTED)
-    # Apply instruction detector guard to ensure prompt injection instructions are stripped from evidence ledger
-    from app.services.instruction_detector import is_instruction
+    # Security classification guard (Section 1-5 of the prompt-injection
+    # hardening spec): the finding is UNTRUSTED DATA. Every candidate
+    # claim/attributed statement is deterministically classified before it
+    # can enter the evidence ledger -- classification is a dimension
+    # separate from evidence status, never overloaded onto it. Only
+    # NORMAL/QUOTED_INSTRUCTION content becomes evidence; anything
+    # INSTRUCTION_LIKE or more severe is excluded and recorded in
+    # security_flags/excluded_claim_texts for observability instead.
+    from app.services.instruction_detector import classify_instruction, is_instruction
     ledger = list(state.get("evidence_ledger", []))
     from app.models.agent import EvidenceItem, EvidenceStatus
-    if extraction:
-        if extraction.stated_facts:
-            for fact in extraction.stated_facts:
-                if is_instruction(fact):
-                    trace.append(AgentTraceStep.warn(f"Untrusted instruction in finding ignored: {fact!r}"))
-                    continue
-                if not any(e.claim == fact for e in ledger):
-                    ledger.append(EvidenceItem(
-                        claim=fact,
-                        source="AUDITOR_FINDING",
-                        source_reference="Auditor finding text",
-                        status=EvidenceStatus.VERIFIED,
-                        relevance="HIGH",
-                        notes="Fact stated directly in auditor finding text",
-                    ))
-        if extraction.attributed_statements:
-            for stmt in extraction.attributed_statements:
-                if isinstance(stmt, dict):
-                    speaker = stmt.get("speaker", "")
-                    claim = stmt.get("claim", "")
-                else:
-                    speaker = getattr(stmt, "speaker", "")
-                    claim = getattr(stmt, "claim", "")
-                if is_instruction(claim):
-                    trace.append(AgentTraceStep.warn(f"Untrusted instruction in attributed statement ignored: {claim!r}"))
-                    continue
-                text = f"{speaker}: {claim}" if speaker else str(claim)
-                from app.agent.claim_extractor import _SYSTEM_RECORD_SPEAKER_RE
-                is_sys = bool(_SYSTEM_RECORD_SPEAKER_RE.search(speaker)) if speaker else False
-                if text and not any(e.claim == text for e in ledger):
-                    ledger.append(EvidenceItem(
-                        claim=text,
-                        source="SYSTEM_RECORD" if is_sys else "REPORTED_STATEMENT",
-                        source_reference="System record in finding text" if is_sys else "Attributed statement in finding text",
-                        status=EvidenceStatus.VERIFIED if is_sys else EvidenceStatus.REPORTED,
-                        relevance="HIGH",
-                        notes="System record verification" if is_sys else "Reported statement — unverified causal explanation",
-                    ))
+    _security_flags: list[str] = []
+    _excluded_claim_texts: list[str] = []
+    _worst_classification = "NORMAL"
+    _classification_severity = {
+        "NORMAL": 0, "QUOTED_INSTRUCTION": 1, "INSTRUCTION_LIKE": 2,
+        "PROMPT_INJECTION_SUSPECTED": 3, "MALICIOUS_INSTRUCTION": 4,
+    }
+
+    def _record_classification(text: str, result) -> None:
+        nonlocal _worst_classification
+        if result.classification != "NORMAL":
+            flag = f"{result.classification}: {text!r}"
+            if flag not in _security_flags:
+                _security_flags.append(flag)
+        if _classification_severity[result.classification] > _classification_severity[_worst_classification]:
+            _worst_classification = result.classification
+
+    # Every proposition in the finding is classified on four independent
+    # structural axes before it can become a ledger entry (see
+    # app/services/attribution_extraction.classify_finding_segments):
+    #   instruction-quarantine -> epistemic stance -> speech attribution ->
+    #   grammatical mood. VERIFIED is now the residue of those exclusions,
+    #   not the unexamined default it used to be.
+    from app.agent.claim_extractor import _SYSTEM_RECORD_SPEAKER_RE
+    from app.services.attribution_extraction import classify_finding_segments
+
+    for _seg in classify_finding_segments(request.finding_text):
+        if _seg.kind == "UNTRUSTED":
+            _record_classification(_seg.text, classify_instruction(_seg.text))
+            _excluded_claim_texts.append(_seg.text)
+            trace.append(AgentTraceStep.warn(
+                f"Untrusted instruction in finding quarantined "
+                f"({_seg.security_classification}) — excluded from evidence ledger: {_seg.text!r}"
+            ))
+            continue
+
+        if _seg.kind == "NON_SUBSTANTIVE":
+            _excluded_claim_texts.append(_seg.text)
+            trace.append(AgentTraceStep.warn(
+                f"Non-substantive/expressive content excluded from evidence ledger: {_seg.text!r}"
+            ))
+            continue
+
+        _record_classification(_seg.text, classify_instruction(_seg.text))
+
+        if _seg.kind == "STANCE":
+            _holder = _seg.speaker or "Unattributed source"
+            _text = _seg.text
+            if not any(e.claim == _text for e in ledger):
+                ledger.append(EvidenceItem(
+                    claim=_text,
+                    source="REPORTED_BELIEF",
+                    source_reference="Epistemic-stance statement in finding text",
+                    status=EvidenceStatus.BELIEF,
+                    relevance="MEDIUM",
+                    notes=(
+                        f"{_seg.stance or 'BELIEF'} held by {_holder} — an opinion about the "
+                        "world, not an observation of it; carries less weight than a "
+                        "REPORTED first-hand account and can never support a causal conclusion"
+                    ),
+                    modality=_seg.modality,
+                    epistemic_stance=_seg.stance,
+                    stance_holder=_seg.speaker,
+                ))
+            continue
+
+        if _seg.kind == "ATTRIBUTED":
+            speaker = _seg.speaker or ""
+            claim = _seg.claim or ""
+            text = f"{speaker}: {claim}" if speaker else str(claim)
+            is_sys = bool(_SYSTEM_RECORD_SPEAKER_RE.search(speaker)) if speaker else False
+            _non_actual = _seg.modality != "ACTUAL"
+            if text and not any(e.claim == text for e in ledger):
+                ledger.append(EvidenceItem(
+                    claim=text,
+                    source="SYSTEM_RECORD" if is_sys else "REPORTED_STATEMENT",
+                    source_reference="System record in finding text" if is_sys else "Attributed statement in finding text",
+                    status=(
+                        EvidenceStatus.UNVERIFIED if _non_actual
+                        else EvidenceStatus.VERIFIED if is_sys
+                        else EvidenceStatus.REPORTED
+                    ),
+                    relevance="HIGH",
+                    notes=(
+                        f"{_seg.modality.capitalize()} proposition — describes a non-actual "
+                        "state of affairs, never an observed event"
+                        if _non_actual else
+                        "System record verification" if is_sys
+                        else "Reported statement — unverified causal explanation"
+                    ),
+                    modality=_seg.modality,
+                ))
+            continue
+
+        # FACT
+        fact = _seg.text
+        _non_actual = _seg.modality != "ACTUAL"
+        if not any(e.claim == fact for e in ledger):
+            ledger.append(EvidenceItem(
+                claim=fact,
+                source="AUDITOR_FINDING",
+                source_reference="Auditor finding text",
+                # Preserved but explicitly NOT verified: a conditional or
+                # counterfactual asserts what WOULD have been, not what was.
+                status=EvidenceStatus.UNVERIFIED if _non_actual else EvidenceStatus.VERIFIED,
+                relevance="HIGH" if not _non_actual else "MEDIUM",
+                notes=(
+                    f"{_seg.modality.capitalize()} proposition ({_seg.modality_marker!r}) — "
+                    "a hypothetical, not an observed past event"
+                    if _non_actual else
+                    "Fact stated directly in auditor finding text"
+                ),
+                modality=_seg.modality,
+            ))
+
+    if _worst_classification != "NORMAL":
+        trace.append(AgentTraceStep.warn(
+            f"Input integrity: {_worst_classification} ({len(_excluded_claim_texts)} claim(s) excluded from evidence ledger)"
+        ))
 
     # Build CanonicalFindingState as the single source of truth for all downstream nodes (Section 1)
-    from app.models.agent import CanonicalFindingState
+    from app.models.agent import CanonicalFindingState, SemanticMeasurement
     fact_claims = [e.claim for e in ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in ledger if e.status == EvidenceStatus.REPORTED]
 
@@ -156,11 +351,33 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     # subject is now used ONLY as a last resort, when the deterministic
     # resolver itself produced no usable result -- never to override a
     # result the authoritative resolver actually found.
-    from app.services.semantic_subject import resolve_deviation, validate_semantic_subject
+    from app.services.semantic_subject import (
+        best_partial_noun_phrase,
+        resolve_deviation,
+        validate_semantic_subject,
+    )
     from app.services.text_grounding import phrase_is_grounded, significant_words
 
-    resolved = resolve_deviation(request.finding_text, fact_claims)
-    source_words = significant_words(request.finding_text)
+    # Security-quarantined text for subject/deviation resolution: if
+    # untrusted instructions or non-substantive/expressive segments were
+    # detected and stripped, pass only the auditable text spans to
+    # resolve_deviation so injected or purely social text never becomes the
+    # subject. Falling back to the raw finding_text is only safe when
+    # nothing was deliberately excluded (i.e. segmentation just failed to
+    # recognize otherwise-legitimate content) -- when every segment was
+    # excluded as untrusted/non-substantive, there is no legitimate content
+    # to fall back to, and resolve_deviation must simply find nothing.
+    _all_segments_excluded = bool(segments) and (
+        len(untrusted_segments) + len(_excluded_non_substantive_segments) >= len(segments)
+    )
+    if auditable_segments:
+        resolution_text = " ".join(auditable_segments)
+    elif _all_segments_excluded:
+        resolution_text = ""
+    else:
+        resolution_text = request.finding_text
+    resolved = resolve_deviation(resolution_text, fact_claims)
+    source_words = significant_words(resolution_text)
     _DEGRADED_SUBJECTS = {"process compliance", None, ""}
     resolver_succeeded = (resolved.finding_subject or resolved.subject) not in _DEGRADED_SUBJECTS
 
@@ -182,8 +399,46 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             deviation_actor = resolved.actor or (extraction.deviation_actor if extraction else None)
             deviation_date = resolved.date or (extraction.timeframe if extraction else None)
 
+    # Defect 3 — entity fidelity. The old line here was
+    #     deviation_subject = resolved.finding_subject or "process compliance"
+    # which fabricated a confident-sounding generic identity whenever
+    # extraction failed, and then propagated it into affected_object,
+    # impact.affected_object and CAPA potential_areas with no connection to
+    # the finding. A placeholder is now NEVER emitted as if it were a real
+    # entity: we take the best genuine noun-phrase fragment the resolver
+    # recovered and mark the extraction as PARTIAL/UNRESOLVED so the
+    # invariant layer and the investigation planner can both see it.
+    _entity_resolution = getattr(resolved, "extraction_confidence", "RESOLVED")
+    _entity_note: str | None = None
     if not deviation_subject or not validate_semantic_subject(deviation_subject):
-        deviation_subject = resolved.finding_subject or "process compliance"
+        _fragment = (
+            resolved.finding_subject
+            or getattr(resolved, "partial_subject_fragment", None)
+            or best_partial_noun_phrase(resolution_text)
+        )
+        if _fragment and validate_semantic_subject(_fragment):
+            deviation_subject = _fragment
+            _entity_resolution = "PARTIAL"
+            _entity_note = (
+                "Entity extraction was uncertain — the specific affected "
+                "object/record/equipment could not be isolated from the finding text; "
+                f"'{_fragment}' is a best-effort fragment and must be confirmed."
+            )
+        else:
+            deviation_subject = "UNRESOLVED — the specific entity involved could not be isolated from the finding text"
+            _entity_resolution = "UNRESOLVED"
+            _entity_note = (
+                "Entity extraction failed — the finding text does not name a "
+                "specific affected object, record, or equipment item."
+            )
+    elif getattr(resolved, "subject_unresolved", False):
+        _entity_resolution = getattr(resolved, "extraction_confidence", "PARTIAL")
+        _entity_note = (
+            "Entity extraction was uncertain — the affected object is a best-effort "
+            "noun-phrase fragment and must be confirmed during investigation."
+        )
+    if _entity_note:
+        trace.append(AgentTraceStep.warn(f"Entity fidelity: {_entity_note}"))
 
     observed_deviation = deviation_subject
     if deviation_condition and deviation_condition != "UNKNOWN":
@@ -240,11 +495,41 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             "Recurrence signal detected: " + (recurrence.rationale or "a similar finding was previously identified")
         ))
 
-    from app.agent.proposition_engine import build_propositions_from_ledger, classify_investigation_mode
+    from app.agent.proposition_engine import build_propositions_from_ledger, build_semantic_graph, classify_investigation_mode
     investigation_mode = classify_investigation_mode(
         request.finding_text, evidence_claims, evidence_conflicts, referenced_documents
     )
     propositions = build_propositions_from_ledger(request.finding_text, evidence_claims, evidence_conflicts)
+    semantic_graph = build_semantic_graph(request.finding_text, evidence_claims, propositions, evidence_conflicts)
+
+    # Typed measurement (Section 8): a discrepancy magnitude ("approximately
+    # 4.2%") is semantically OBSERVED_DISCREPANCY, never a financial amount,
+    # probability, or confidence score -- tag its own evidence status/claim
+    # provenance from the SAME evidence ledger every other claim uses (the
+    # "C1, C2, ..." positional convention core_synthesis assigns later), so
+    # downstream nodes never need to re-derive it from raw text.
+    semantic_measurement = None
+    if getattr(resolved, "measurement_value", None) is not None:
+        _meas_status = EvidenceStatus.UNKNOWN
+        _meas_claim_id = None
+        for _i, _e in enumerate(ledger):
+            if str(resolved.measurement_value) in (_e.claim or ""):
+                _meas_status = _e.status
+                _meas_claim_id = f"C{_i + 1}"
+                break
+        canonical_state_measurement_status = (
+            "VERIFIED" if _meas_status == EvidenceStatus.VERIFIED
+            else "REPORTED" if _meas_status in (EvidenceStatus.REPORTED, EvidenceStatus.MIXED)
+            else "UNKNOWN"
+        )
+        semantic_measurement = SemanticMeasurement(
+            value=resolved.measurement_value,
+            unit=resolved.measurement_unit,
+            qualifier=resolved.measurement_qualifier,
+            role="OBSERVED_DISCREPANCY",
+            evidence_status=canonical_state_measurement_status,
+            source_claim_id=_meas_claim_id,
+        )
 
     canonical_state = CanonicalFindingState(
         raw_finding=request.finding_text,
@@ -272,19 +557,67 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         mechanism_status=mechanism.status,
         mechanism_polarity=mechanism.polarity,
         prompt_injection_detected=is_instruction(request.finding_text),
+        input_integrity_status=_worst_classification,
+        security_flags=_security_flags,
+        instruction_like_claim_count=len(_excluded_claim_texts),
+        excluded_claim_texts=_excluded_claim_texts,
         evidence_claims=evidence_claims,
         evidence_conflicts=evidence_conflicts,
         referenced_documents=referenced_documents,
+        semantic_graph=semantic_graph,
         investigation_mode=investigation_mode,
         propositions=propositions,
         relevant_change=resolved.relevant_change,
         semantic_type=resolved.semantic_type,
+        comparison_type=resolved.comparison_type,
+        comparison_left=resolved.comparison_left,
+        comparison_left_qualifier=resolved.comparison_left_qualifier,
+        comparison_right=resolved.comparison_right,
+        comparison_basis=resolved.comparison_basis,
+        comparison_subtype=resolved.comparison_subtype,
+        comparison_reference_type=resolved.comparison_reference_type,
+        comparison_batch_id=resolved.comparison_batch_id,
+        missing_record_activity=resolved.missing_record_activity,
+        missing_record_context=resolved.missing_record_context,
+        downstream_action_text=resolved.downstream_action_text,
+        downstream_action_present=resolved.downstream_action_present,
+        occurrence_population=resolved.occurrence_population,
+        attributed_source=resolved.attributed_source,
+        attributed_proposition=resolved.attributed_proposition,
+        transition_type=resolved.transition_type,
+        control_justification_missing=resolved.control_justification_missing,
+        requirement_status=resolved.requirement_status,
+        observed_entity=resolved.observed_entity or deviation_subject,
+        affected_entity=deviation_subject,
+        control_entity=resolved.affected_process if resolved.affected_process != "NOT_ESTABLISHED" else None,
+        actor_entity=deviation_actor,
+        measurement=semantic_measurement,
         recurrence_signal=recurrence.is_recurring,
         previous_capa_referenced=recurrence.has_previous_capa_reference,
         previous_capa_status=recurrence.previous_capa_status,
         previous_capa_effectiveness=recurrence.previous_capa_effectiveness,
         recurrence_rationale=recurrence.rationale,
+        entity_resolution=_entity_resolution,
+        entity_resolution_note=_entity_note,
+        subject_unresolved=(_entity_resolution != "RESOLVED"),
+        is_actionable=bool(quality.status == ObservationQualityStatus.SUFFICIENT),
+        actionability_reason=None if quality.status == ObservationQualityStatus.SUFFICIENT else (quality.missing_information[0] if quality.missing_information else "Input does not contain an actionable audit finding, deviation, or verifiable condition."),
     )
+
+    if not canonical_state.is_actionable:
+        canonical_state.investigation_mode = InvestigationMode.NON_ACTIONABLE
+
+    from app.agent.causal_guard import detect_uncertainties
+    prim_unc, sec_unc, c_ready, blk_steps = detect_uncertainties(
+        canonical_state=canonical_state,
+        evidence_ledger=ledger,
+        finding_text=request.finding_text,
+    )
+    canonical_state.primary_uncertainty = prim_unc
+    canonical_state.secondary_uncertainties = sec_unc
+    canonical_state.causal_readiness = c_ready
+    canonical_state.blocked_reasoning_steps = blk_steps
+
 
     # Deterministic Cost & Financial Impact Analysis (Sections 26-42)
     from app.services.cost_analysis import analyze_cost_and_financial_impact
@@ -304,13 +637,18 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     # If a concrete affected object and observed deviation exist, quality is SUFFICIENT.
     # Root cause uncertainty must NEVER downgrade observation quality.
     from app.models.analysis import ObservationQualityResult, ObservationQualityStatus
-    if not deviation_subject.startswith("UNKNOWN") and len(observed_deviation.strip()) >= 5:
+    if canonical_state.is_actionable and not deviation_subject.startswith("UNKNOWN") and len(observed_deviation.strip()) >= 5:
         # Unless text is extremely vague ("something was wrong"), mark as SUFFICIENT
         if not re.search(r"^(something|anything|stuff)\s+(was|is)\s+(wrong|bad)", request.finding_text.strip(), re.IGNORECASE):
             quality = ObservationQualityResult(
                 status=ObservationQualityStatus.SUFFICIENT,
                 missing_information=[],
             )
+    elif not canonical_state.is_actionable:
+        quality = ObservationQualityResult(
+            status=ObservationQualityStatus.INSUFFICIENT,
+            missing_information=["Input does not contain an actionable audit finding, deviation, or verifiable condition."],
+        )
 
     return {
         **state,

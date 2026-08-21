@@ -30,6 +30,15 @@ class EvidenceStatus(str, Enum):
     REPORTED = "REPORTED"
     MIXED = "MIXED"
     INFERRED = "INFERRED"
+    # An entity's epistemic STANCE about the world ("the security team
+    # believes the two events are related") -- strictly weaker than
+    # REPORTED. REPORTED means a person asserted something they may have
+    # directly observed; BELIEF means a person asserted a mental state
+    # ABOUT something. Because every causal-strength filter in the codebase
+    # tests `== VERIFIED` or `== REPORTED` explicitly, BELIEF is invisible
+    # to all of them by construction and can therefore never support a
+    # SUPPORTED/ESTABLISHED hypothesis.
+    BELIEF = "BELIEF"
     UNVERIFIED = "UNVERIFIED"
     CONTRADICTED = "CONTRADICTED"
     REFUTED = "REFUTED"
@@ -56,6 +65,33 @@ class PropositionType(str, Enum):
     CONFLICTED_PROPOSITION = "CONFLICTED_PROPOSITION"
     IMPACT = "IMPACT"
     REQUIREMENT = "REQUIREMENT"
+
+
+class SemanticUncertainty(str, Enum):
+    REQUIREMENT_UNCERTAIN = "REQUIREMENT_UNCERTAIN"
+    OBSERVATION_UNCERTAIN = "OBSERVATION_UNCERTAIN"
+    SCOPE_UNCERTAIN = "SCOPE_UNCERTAIN"
+    TIME_UNCERTAIN = "TIME_UNCERTAIN"
+    RESPONSIBILITY_UNCERTAIN = "RESPONSIBILITY_UNCERTAIN"
+    AUTHORIZATION_UNCERTAIN = "AUTHORIZATION_UNCERTAIN"
+    CONTROL_EXECUTION_UNCERTAIN = "CONTROL_EXECUTION_UNCERTAIN"
+    DOCUMENTATION_UNCERTAIN = "DOCUMENTATION_UNCERTAIN"
+    EVENT_SEQUENCE_UNCERTAIN = "EVENT_SEQUENCE_UNCERTAIN"
+    MECHANISM_UNCERTAIN = "MECHANISM_UNCERTAIN"
+    CAUSAL_LINK_UNCERTAIN = "CAUSAL_LINK_UNCERTAIN"
+    IMPACT_UNCERTAIN = "IMPACT_UNCERTAIN"
+    RECURRENCE_UNCERTAIN = "RECURRENCE_UNCERTAIN"
+    RECOVERY_UNCERTAIN = "RECOVERY_UNCERTAIN"
+    CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
+    NO_MATERIAL_UNCERTAINTY = "NO_MATERIAL_UNCERTAINTY"
+
+
+class CausalReadiness(str, Enum):
+    NOT_READY = "NOT_READY"
+    READY_FOR_HYPOTHESIS = "READY_FOR_HYPOTHESIS"
+    READY_FOR_CAUSAL_VERIFICATION = "READY_FOR_CAUSAL_VERIFICATION"
+    ESTABLISHED = "ESTABLISHED"
+
 
 
 class CausalLevel(str, Enum):
@@ -94,6 +130,7 @@ class InvestigationMode(str, Enum):
     REPORTED_MECHANISM = "REPORTED_MECHANISM"
     TEMPORAL_DEVIATION = "TEMPORAL_DEVIATION"
     COMBINED = "COMBINED"
+    NON_ACTIONABLE = "NON_ACTIONABLE"
 
 
 class CausalEdgeType(str, Enum):
@@ -146,6 +183,9 @@ class ClaimAttribution(str, Enum):
     AUDIT_FINDING = "AUDIT_FINDING"
     PERSON_REPORTED = "PERSON_REPORTED"
     SUPERVISOR_REPORTED = "SUPERVISOR_REPORTED"
+    # An opinion/belief/suspicion/assumption held by a person or team --
+    # distinct from PERSON_REPORTED (an account of something observed).
+    PERSON_BELIEF = "PERSON_BELIEF"
     DOCUMENTARY_EVIDENCE = "DOCUMENTARY_EVIDENCE"
     SYSTEM_EVIDENCE = "SYSTEM_EVIDENCE"
     ATTACHMENT = "ATTACHMENT"
@@ -165,8 +205,84 @@ class EpistemicSource(str, Enum):
     UNKNOWN_SOURCE = "UNKNOWN_SOURCE"
 
 
+class SemanticNodeType(str, Enum):
+    ENTITY = "ENTITY"
+    EVENT = "EVENT"
+    STATE = "STATE"
+    REQUIREMENT = "REQUIREMENT"
+    CONTROL = "CONTROL"
+    RECORD = "RECORD"
+    MEASUREMENT = "MEASUREMENT"
+
+
+class SemanticRelationType(str, Enum):
+    GOVERNS = "GOVERNS"
+    TRANSMITTED_TO = "TRANSMITTED_TO"
+    RECEIVED_BY = "RECEIVED_BY"
+    ACCESSED_BY = "ACCESSED_BY"
+    ACKNOWLEDGED_BY = "ACKNOWLEDGED_BY"
+    EXECUTED_BY = "EXECUTED_BY"
+    RECORDED_IN = "RECORDED_IN"
+    APPLIES_TO = "APPLIES_TO"
+    MONITORS = "MONITORS"
+    VERIFIES = "VERIFIES"
+    AUTHORIZES = "AUTHORIZES"
+    DEVIATES_FROM = "DEVIATES_FROM"
+    PRECEDES = "PRECEDES"
+    RELATES_TO = "RELATES_TO"
+
+
+class SemanticNode(BaseModel):
+    """An atomic entity, event, state, requirement, or record node in the Semantic Graph."""
+    id: str  # e.g. "N_SYS", "N_RECP", "N_NOTIF"
+    label: str
+    node_type: SemanticNodeType = SemanticNodeType.ENTITY
+    epistemic_status: EvidenceStatus = EvidenceStatus.UNKNOWN
+    provenance: EpistemicSource = EpistemicSource.AUDIT_OBSERVATION
+    source_claim_ids: list[str] = []
+    temporal_scope: str | None = None
+    quantitative_scope: str | None = None
+
+
+class SemanticEdge(BaseModel):
+    """An explicit semantic relation edge connecting two semantic nodes."""
+    id: str  # e.g. "E_DELIVERY"
+    source_id: str
+    target_id: str
+    relation_type: SemanticRelationType = SemanticRelationType.RELATES_TO
+    epistemic_status: EvidenceStatus = EvidenceStatus.UNKNOWN
+    provenance: EpistemicSource = EpistemicSource.AUDIT_OBSERVATION
+    source_claim_ids: list[str] = []
+    notes: str | None = None
+
+
+class SemanticGraph(BaseModel):
+    """The explicit structural Semantic Graph answering: 'What entities, events, states, and relations are present?'"""
+    nodes: list[SemanticNode] = []
+    edges: list[SemanticEdge] = []
+
+
+class SemanticTraceabilityEntry(BaseModel):
+    """Traceability mapping linking an output field concept to its source proposition/semantic relation."""
+    field_name: str  # e.g. "root_cause.statement", "impact_assessment.affected_object"
+    concept: str
+    source_proposition_ids: list[str] = []
+    source_relation_ids: list[str] = []
+    epistemic_status: str = "VERIFIED"
+    provenance: str = "AUDIT_OBSERVATION"
+    derivation_type: str | None = None  # None | "STRUCTURAL_INFERENCE" | "CAUSAL_PROGRESSION"
+    confidence: str = "HIGH"
+
+
+class SemanticTraceabilityMatrix(BaseModel):
+    """Full machine-validated traceability matrix for all final report fields."""
+    entries: list[SemanticTraceabilityEntry] = []
+    is_valid: bool = True
+    untraced_concepts: list[str] = []
+
+
 class Proposition(BaseModel):
-    """A canonical proposition in the causal graph."""
+    """A canonical proposition in the causal graph with strict dimension atomicity."""
     id: str  # e.g. "P1"
     statement: str
     type: PropositionType = PropositionType.OBSERVATION
@@ -181,12 +297,20 @@ class Proposition(BaseModel):
     subject: str | None = None
     predicate: str | None = None
     object: str | None = None
+    participants: list[str] = []
+    event_type: str | None = None
+    state: str | None = None
     temporal_context: str | None = None
+    temporal_scope: str | None = None
+    quantitative_scope: str | None = None
     speaker: str | None = None
     document_available: bool = True
     document_content_verified: bool = False
     statement_status: str | None = None
     underlying_event_status: str | None = None
+    derived_concept: bool = False
+    derived_from: list[str] = []
+    derivation_type: str | None = None
 
 
 class EvidenceClaim(BaseModel):
@@ -209,11 +333,27 @@ class EvidenceClaim(BaseModel):
     document_content_verified: bool = False
     statement_status: str | None = None
     underlying_event_status: str | None = None
+    # ---- Orthogonal axes added for generalized evidence semantics ----
+    # MODALITY is the grammatical MOOD of the proposition and is deliberately
+    # a separate axis from `status` (evidentiary weight): a counterfactual
+    # could itself be corroborated as "yes, this hypothetical was genuinely
+    # raised" while remaining non-actual in content. Overloading
+    # EvidenceStatus would have destroyed that distinction and forced every
+    # existing status check to be rewritten.
+    modality: Literal["ACTUAL", "CONDITIONAL", "COUNTERFACTUAL"] = "ACTUAL"
+    modality_marker: str | None = None
+    # The epistemic stance sub-type when status == BELIEF.
+    epistemic_stance: str | None = None   # BELIEF|DOUBT|SUSPICION|ASSUMPTION|OPINION
+    stance_holder: str | None = None
 
     @property
     def provenance(self) -> str:
         if self.status == EvidenceStatus.INFERRED:
             return "INFERRED"
+        if self.status == EvidenceStatus.BELIEF:
+            return "BELIEF"
+        if self.modality != "ACTUAL":
+            return self.modality
         if self.status == EvidenceStatus.VERIFIED:
             return "VERIFIED"
         return "REPORTED"
@@ -250,6 +390,20 @@ class EvidenceConflict(BaseModel):
     resolution_evidence: str | None = None
     resolution_note: str | None = None
     severity: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
+
+
+class SemanticMeasurement(BaseModel):
+    """A typed, semantically-scoped numeric measurement extracted from a
+    finding (Section 8) -- e.g. the 4.2% discrepancy between a recorded and
+    calculated yield. Kept as its own typed object with an explicit `role`
+    so downstream nodes can never silently reinterpret an OBSERVED_DISCREPANCY
+    as a financial amount, a probability, or a confidence score."""
+    value: float
+    unit: str | None = None  # e.g. "%"
+    qualifier: str | None = None  # e.g. "approximately"
+    role: Literal["OBSERVED_DISCREPANCY"] = "OBSERVED_DISCREPANCY"
+    evidence_status: Literal["VERIFIED", "REPORTED", "UNKNOWN"] = "UNKNOWN"
+    source_claim_id: str | None = None
 
 
 class CanonicalFindingState(BaseModel):
@@ -307,6 +461,46 @@ class CanonicalFindingState(BaseModel):
     procedure: str = "UNKNOWN"
     requirement: str = "UNKNOWN"
     facts: list[str] = []
+    # Canonical comparison/relational-finding event (Section 2/7): populated
+    # only when the finding is a comparison ("X did not match Y", "X
+    # exceeded Y", ...). Downstream nodes (5-Why, impact rendering) MUST
+    # read these typed fields instead of re-deriving comparison semantics
+    # from raw text.
+    comparison_type: str | None = None  # MISMATCH/EXCEEDED/BELOW/INCONSISTENT/RECONCILIATION_FAILURE/MISSING/DUPLICATE
+    comparison_left: str | None = None
+    comparison_left_qualifier: str | None = None  # e.g. "recorded", "measured"
+    comparison_right: str | None = None
+    comparison_basis: str | None = None
+    # Comparison SUBTYPE/investigation-framework selector (Section 4/5) --
+    # e.g. PARAMETER_MISMATCH vs CALCULATION_MISMATCH -- and the reference
+    # value's own type (e.g. "APPROVED_PARAMETER").
+    comparison_subtype: str | None = None
+    comparison_reference_type: str | None = None
+    comparison_batch_id: str | None = None
+    measurement: SemanticMeasurement | None = None
+    # Missing-record/missing-documentation semantic fields (Section 2):
+    # ACTIVITY_OR_CONTROL, REQUIRED_EVIDENCE context, and any DOWNSTREAM_EVENT
+    # kept distinct so 5-Why/impact/investigation never conflate "documentation
+    # is missing" with "the activity did not happen".
+    missing_record_activity: str | None = None
+    missing_record_context: str | None = None
+    downstream_action_text: str | None = None
+    downstream_action_present: bool = False
+    occurrence_population: str | None = None
+    attributed_source: str | None = None
+    attributed_proposition: str | None = None
+    transition_type: str | None = None
+    control_justification_missing: bool = False
+    requirement_status: str = "UNKNOWN"
+    observed_entity: str | None = None
+    affected_entity: str | None = None
+    control_entity: str | None = None
+    actor_entity: str | None = None
+    location_entity: str | None = None
+    primary_uncertainty: str = "NO_MATERIAL_UNCERTAINTY"
+    secondary_uncertainties: list[str] = []
+    blocked_reasoning_steps: list[str] = []
+    causal_readiness: str = "NOT_READY"
     verified_observations: list[str] = []
     reported_statements: list[str] = []
     inferred_statements: list[str] = []
@@ -325,6 +519,7 @@ class CanonicalFindingState(BaseModel):
     # referenced document's type/name can never be mistaken for an
     # established claim about its contents (Referenced-Evidence Boundary).
     referenced_documents: list[ReferencedDocumentInfo] = []
+    semantic_graph: SemanticGraph = Field(default_factory=SemanticGraph)
 
     # ------------------------------------------------------------------
     # Temporal / recurrence reasoning (app.agent.recurrence_guard). A
@@ -340,6 +535,37 @@ class CanonicalFindingState(BaseModel):
     previous_capa_effectiveness: str = "NOT_VERIFIED"  # "EFFECTIVE" | "NOT_VERIFIED"
     recurrence_rationale: str | None = None
     cost_impact: CostImpact | None = None
+
+    # ------------------------------------------------------------------
+    # Security / input-integrity telemetry (prompt-injection hardening).
+    # A SEPARATE dimension from evidence status -- never overloaded onto
+    # EvidenceStatus. Populated by understand_finding_node from
+    # app.services.instruction_detector.classify_instruction(); observable
+    # via the API for administrators without exposing prompt internals.
+    # ------------------------------------------------------------------
+    input_integrity_status: Literal[
+        "NORMAL", "QUOTED_INSTRUCTION", "INSTRUCTION_LIKE",
+        "PROMPT_INJECTION_SUSPECTED", "MALICIOUS_INSTRUCTION",
+    ] = "NORMAL"
+    security_flags: list[str] = []
+    instruction_like_claim_count: int = 0
+    excluded_claim_texts: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Semantic actionability gate
+    # ------------------------------------------------------------------
+    is_actionable: bool = True
+    actionability_reason: str | None = None
+    # ---- Entity-fidelity (Defect 3) ----
+    # How confident the deterministic resolver is that finding_subject /
+    # affected_object name the REAL entity in the finding. When RESOLVED is
+    # not achievable the system must say so rather than emit a plausible
+    # generic placeholder ("process compliance") that reads as a real
+    # entity. PARTIAL = a genuine noun-phrase fragment was recovered but may
+    # be imprecise; UNRESOLVED = nothing usable could be isolated.
+    entity_resolution: Literal["RESOLVED", "PARTIAL", "UNRESOLVED"] = "RESOLVED"
+    entity_resolution_note: str | None = None
+    subject_unresolved: bool = False
 
 
 
@@ -376,6 +602,13 @@ class EvidenceItem(BaseModel):
     status: EvidenceStatus
     relevance: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
     notes: str | None = None
+    # Grammatical mood of the claim -- orthogonal to `status` (see
+    # EvidenceClaim.modality). A non-ACTUAL claim is preserved in the ledger
+    # (the audit brief forbids discarding the proposition) but can never be
+    # VERIFIED.
+    modality: Literal["ACTUAL", "CONDITIONAL", "COUNTERFACTUAL"] = "ACTUAL"
+    epistemic_stance: str | None = None
+    stance_holder: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +646,7 @@ class RootCauseStatus(str, Enum):
     CONTRADICTED = "CONTRADICTED"
     CONFLICTED = "CONFLICTED"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class CandidateHypothesis(BaseModel):
@@ -441,7 +675,13 @@ class CandidateHypothesis(BaseModel):
     contradicting_claim_ids: list[str] = []
     causal_level: CausalLevel = CausalLevel.L3_IMMEDIATE_MECHANISM
     # Evidence strength categorization
-    evidence_strength: Literal["NONE", "REPORTED", "CORROBORATED", "VERIFIED", "CONFLICTING"] = "NONE"
+    # INDICATIVE: a common-factor/pattern-derived signal (e.g. "these three
+    # departments all use the same shared system") that creates a candidate
+    # hypothesis worth investigating but does NOT itself evidence the
+    # hypothesis's mechanism -- distinct from REPORTED (someone's account of
+    # HOW something happened) and never sufficient for promotion to
+    # SUPPORTED/ESTABLISHED (only VERIFIED is).
+    evidence_strength: Literal["NONE", "REPORTED", "CORROBORATED", "VERIFIED", "CONFLICTING", "INDICATIVE"] = "NONE"
     # Deterministic per-hypothesis confidence grade (never asserted by the
     # LLM — set by app.agent.analytical_validator.hypothesis_confidence so
     # every hypothesis in a report carries a grade, not just the leading one.
@@ -610,6 +850,10 @@ class InvestigationQuestion(BaseModel):
     category: str | None = None
     decision_effect: str | None = None
     target_hypothesis_ids: list[str] = []
+    hypotheses_tested: list[str] = []
+    uncertainty_resolved: str | None = None
+    next_step_if_true: str | None = None
+    next_step_if_false: str | None = None
     decision_branches: list[str] = []
     discrimination_criterion: str | None = None
 
@@ -653,6 +897,7 @@ class CapaStatus(str, Enum):
     INVESTIGATION_REQUIRED = "INVESTIGATION_REQUIRED"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
     NO_CAPA_RECOMMENDATION_YET = "NO_CAPA_RECOMMENDATION_YET"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class ConditionalCapaAction(BaseModel):
@@ -685,6 +930,7 @@ class ImpactStatus(str, Enum):
     IMPACT_NOT_IDENTIFIED = "IMPACT_NOT_IDENTIFIED"
     IMPACT_POSSIBLE = "IMPACT_POSSIBLE"
     IMPACT_REQUIRES_ASSESSMENT = "IMPACT_REQUIRES_ASSESSMENT"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class ImpactAssessment(BaseModel):
@@ -726,6 +972,7 @@ class CostEvidenceStatus(str, Enum):
 class CostFactorType(str, Enum):
     DUPLICATE_PAYMENT = "DUPLICATE PAYMENT"
     OVERPAYMENT = "OVERPAYMENT"
+    UNAUTHORIZED_PAYMENT = "UNAUTHORIZED PAYMENT"
     TRANSACTION_AMOUNT = "TRANSACTION AMOUNT"
     PAYMENT_AMOUNT = "PAYMENT AMOUNT"
     PURCHASE_VALUE = "PURCHASE VALUE"
@@ -847,6 +1094,8 @@ class InvestigationReport(BaseModel):
     evidence_claims: list[EvidenceClaim] = []
     evidence_conflicts: list[EvidenceConflict] = []
     referenced_documents: list[ReferencedDocumentInfo] = []
+    semantic_graph: SemanticGraph = Field(default_factory=SemanticGraph)
+    semantic_traceability: SemanticTraceabilityMatrix = Field(default_factory=SemanticTraceabilityMatrix)
     human_review_required: bool = True  # always True -- enforced here, not just prompted
     analysis_mode: Literal["LLM", "DETERMINISTIC", "DEGRADED"] = "LLM"
     analysis_engine: Literal["LLM", "DETERMINISTIC"] = "LLM"

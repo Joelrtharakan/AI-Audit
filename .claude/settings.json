@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_epistemic_transition_regression.py tests/test_monotonic_merge_regression.py tests/test_cross_section_consistency_regression.py -q)",
+      "Bash(python3 -c ' *)",
+      "Bash(python -m pytest tests/test_entity_scope_separation_regression.py tests/test_redundant_question_suppression_regression.py -q)",
+      "Bash(python -m pytest tests/ -q -k \"not test_real_llm and not test_live_graph_never_crashes and not test_live_github_copilot_integration and not test_live_groq_openrouter_unavailable_gemini_real_success\")",
+      "Bash(python -m pytest tests/test_entity_scope_separation_regression.py tests/test_redundant_question_suppression_regression.py tests/test_semantic_normalization_regression.py tests/test_semantic_quantity_and_capa_lifecycle.py tests/test_semantic_subject_extraction.py tests/test_calibration_regression.py -q)",
+      "Bash(python -m pytest tests/test_redundant_question_suppression_regression.py tests/test_entity_scope_separation_regression.py -q)",
+      "Bash(python -m pytest tests/test_conflict_status_causal_collapse_regression.py tests/test_reportedly_clause_grammar_regression.py -q)",
+      "Bash(git stash *)",
+      "Read(//tmp/**)",
+      "Bash(cd \"/Users/joeltharakan/Documents/Audit Management System/backend\" && cp app/services/semantic_subject.py /tmp/semantic_subject_backup.py)",
+      "Bash(cp /tmp/semantic_subject_backup.py \"/Users/joeltharakan/Documents/Audit Management System/backend/app/services/semantic_subject.py\")",
+      "Bash(python -m pytest tests/test_conflict_status_causal_collapse_regression.py tests/test_reportedly_clause_grammar_regression.py tests/test_entity_scope_separation_regression.py tests/test_semantic_normalization_regression.py tests/test_semantic_quantity_and_capa_lifecycle.py tests/test_semantic_subject_extraction.py -q)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

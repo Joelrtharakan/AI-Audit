@@ -95,21 +95,121 @@ _IRRECOVERABLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# An unrecovered/remaining balance the finding itself says is still "under
+# review"/"pending"/"to be determined" is explicitly NOT a settled final-
+# accounting outcome -- outstanding exposure is never automatically actual
+# loss, and this is the strongest possible signal that it is not (Section
+# 5: recoverability/final accounting treatment remains under review).
+_REMAINING_UNDER_REVIEW_RE = re.compile(
+    r"\b(?:remaining|outstanding|balance|unrecovered)\b(?:(?!\.).){0,40}?\b(?:under\s+review|pending|"
+    r"yet\s+to\s+be\s+determined|to\s+be\s+determined|subject\s+to\s+review|being\s+reviewed|"
+    r"under\s+investigation)\b|"
+    r"\b(?:under\s+review|pending|subject\s+to\s+review)\b(?:(?!\.).){0,20}?\b(?:remaining|outstanding|balance)\b",
+    re.IGNORECASE,
+)
+
 _REFUND_RE = re.compile(
     r"\b(?:refund(?:ed|s)?|recover(?:ed|y)?|credit(?:ed)?|revers(?:ed|al)?|returned)\b",
     re.IGNORECASE,
 )
+
+# A cost-domain noun immediately followed by a generic document/process noun
+# ("expense report", "cost policy", "penalty procedure", "fine register") is
+# naming an administrative artifact, not asserting that a financial amount
+# was actually incurred -- e.g. "the travel expense report was submitted
+# late" contains no financial evidence at all. This is a structural
+# disambiguation (noun-compound modifier position), not a per-finding patch:
+# it applies to any cost term paired with any document/process noun.
+_COST_TERM_AS_DOCUMENT_NOUN_RE = re.compile(
+    r"\b(?:cost|costs|expense|expenses|fine|fines|penalty|penalties|fee|fees|budget|refund|refunds|"
+    r"credit|credits|compensation)\s+(?:report|reports|form|forms|claim|claims|policy|policies|"
+    r"process|procedure|procedures|system|systems|log|logs|register|registers|deadline|deadlines|"
+    r"template|templates|schedule|schedules|checklist|checklists|form)\b",
+    re.IGNORECASE,
+)
+
+# "fine" is lexically ambiguous between the financial-penalty noun ("a fine
+# of $500", "the fine was waived") and the predicate adjective meaning
+# satisfactory ("the shift ended fine", "everything is fine"). Only count it
+# as a cost signal when it appears in noun position (determiner/possessive/
+# amount before it, or a penalty-verb/amount after it) -- never bare after a
+# copula or intransitive-completion verb. This is a grammatical-position
+# check, not a keyword list, and applies to "fine" in any finding.
+_FINE_AS_ADJECTIVE_RE = re.compile(
+    r"\b(?:ended?|is|was|are|were|be|being|been|seem(?:s|ed)?|look(?:s|ed)?|"
+    r"feel(?:s|felt)?|sound(?:s|ed)?|doing|going|turned\s+out)\s+fine\b",
+    re.IGNORECASE,
+)
+_FINE_AS_NOUN_RE = re.compile(
+    r"\b(?:a|the|no|any|heavy|hefty|substantial|\$|₹|€|£)\s*fine\b|"
+    r"\bfine\s+of\b|"
+    r"\bfine\s+(?:was|is|has\s+been|had\s+been)\s+(?:imposed|levied|issued|paid|waived|assessed)\b",
+    re.IGNORECASE,
+)
+
+
+# A handful of cost-domain nouns name a topic or document category
+# ("expense", "cost", "fee", "budget", "credit", "compensation", "refund")
+# without asserting that any amount was actually incurred -- "the expense
+# report was late" is not financial evidence, but "the expense was later
+# reimbursed" or "$400 in expenses" is. These weak terms only count as a
+# genuine cost signal when corroborated, within the same local window, by
+# either a currency amount or a realization/settlement verb indicating the
+# amount actually materialized (incurred, resulted in, caused, led to,
+# totaled, amounted to, paid, owed, charged, billed, invoiced, reimbursed,
+# waived, recovered, written off). Terms that are inherently unambiguous
+# financial events on their own (overpayment, duplicate payment, penalty,
+# revenue/production loss, etc.) are exempt from this extra corroboration.
+# This is a strength-of-evidence rule applied to the term category, not a
+# per-finding keyword list.
+_WEAK_COST_TERMS = {"expense", "expenses", "cost", "costs", "fee", "fees", "budget", "credit", "credits", "compensation", "refund", "refunds"}
+_COST_REALIZATION_RE = re.compile(
+    r"\b(?:incur(?:red|s)?|result(?:ed|s)?\s+in|caus(?:ed|es)|led\s+to|total(?:ed|led|s)?|"
+    r"amount(?:ed|s)?\s+to|paid|owed|owing|charg(?:ed|es)|bill(?:ed|s)?|invoic(?:ed|es)?|"
+    r"reimburs(?:ed|es)?|waiv(?:ed|es)?|recover(?:ed|s|y)?|written?\s+off|wrote\s+off)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_genuine_cost_term(text: str) -> bool:
+    """Cost-term detection with structural disambiguation for ambiguous cases.
+
+    A bare keyword match on the cost-term list is not sufficient evidence of
+    a financial proposition: the term may be part of a document/process noun
+    compound (naming an artifact, not asserting an amount), may be a weak
+    topical term with no corroborating amount/realization language nearby,
+    or, for "fine" specifically, may be the unrelated predicate adjective.
+    All checks are generalized grammatical/evidentiary rules, not
+    per-finding exceptions.
+    """
+    has_currency_anywhere = bool(_CURRENCY_SYMBOLS_RE.search(text))
+    for match in _EXPLICIT_COST_TERMS_RE.finditer(text):
+        term = match.group(0).lower()
+        window_start = max(0, match.start() - 30)
+        window_end = min(len(text), match.end() + 30)
+        window = text[window_start:window_end]
+
+        if _COST_TERM_AS_DOCUMENT_NOUN_RE.search(window):
+            continue
+        if term == "fine":
+            if _FINE_AS_ADJECTIVE_RE.search(window) and not _FINE_AS_NOUN_RE.search(window):
+                continue
+        if term in _WEAK_COST_TERMS:
+            if not (has_currency_anywhere or _COST_REALIZATION_RE.search(window)):
+                continue
+        return True
+    return False
 
 
 def has_cost_signals(text: str) -> bool:
     """True if text contains explicit monetary amounts, cost terms, or semantic consequence markers."""
     if not text:
         return False
-    return bool(
-        _CURRENCY_SYMBOLS_RE.search(text)
-        or _EXPLICIT_COST_TERMS_RE.search(text)
-        or _SEMANTIC_FINANCIAL_CONSEQUENCE_RE.search(text)
-    )
+    # Ensure there is an actual currency indicator or explicit cost term
+    has_curr = bool(_CURRENCY_SYMBOLS_RE.search(text))
+    has_cost_term = _has_genuine_cost_term(text)
+    has_semantic = bool(_SEMANTIC_FINANCIAL_CONSEQUENCE_RE.search(text))
+    return has_curr or has_cost_term or has_semantic
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +223,8 @@ def classify_cost_factor_type(text: str) -> str:
         return CostFactorType.DUPLICATE_PAYMENT.value
     if "overpayment" in t or "overpaid" in t:
         return CostFactorType.OVERPAYMENT.value
+    if "unauthorized payment" in t or "unauthorised payment" in t:
+        return CostFactorType.UNAUTHORIZED_PAYMENT.value
     if "rework" in t:
         return CostFactorType.REWORK.value
     if "scrap" in t or "scrapped" in t:
@@ -187,6 +289,14 @@ def get_default_missing_evidence(factor_type: str, text: str) -> tuple[list[str]
             "Bank and payment transaction records",
             "Accounts-payable reconciliation records",
         ])
+    elif factor_type in (CostFactorType.OVERPAYMENT.value, CostFactorType.UNAUTHORIZED_PAYMENT.value) or "overpaid" in t or "overpayment" in t:
+        missing.extend(["Authorized payment amount", "Payment reversal/credit note status"])
+        evidence_req.extend([
+            "Invoice, purchase order, and payment authorization records",
+            "Payment approval and authorization workflow logs",
+            "Supplier credit note or reversal records",
+            "Accounts-payable reconciliation records",
+        ])
     elif "rework" in t:
         missing.extend(["Documented rework labor hours", "Applicable hourly labor rate", "Rework material consumption"])
         evidence_req.extend(["Signed rework batch records", "Shop-floor labor logs", "Material requisition records"])
@@ -220,22 +330,40 @@ def parse_currency(text: str) -> str:
     return "INR"
 
 
+# Indian numbering-system magnitude words -- "lakh"/"lac" = 100,000,
+# "crore"/"cr" = 10,000,000. Deterministic multiplication, never left to an
+# LLM to compute. "cr" is only matched immediately after a number (word
+# boundary on both sides) to avoid colliding with unrelated abbreviations
+# elsewhere in a finding.
+_INDIAN_MAGNITUDE_MULTIPLIERS = {
+    "lakh": 100_000, "lakhs": 100_000, "lac": 100_000, "lacs": 100_000,
+    "crore": 10_000_000, "crores": 10_000_000, "cr": 10_000_000,
+}
+_INDIAN_MAGNITUDE_RE = r"(?:lakhs?|lacs?|crores?|cr)\b"
+
+
 def extract_explicit_amounts(text: str) -> list[tuple[float, str]]:
-    """Extract (amount, currency) tuples from text, supporting Indian numbering (e.g. 1,25,000)."""
+    """Extract (amount, currency) tuples from text, supporting Indian
+    numbering (e.g. 1,25,000) AND Indian magnitude words (lakh/lac/crore/cr,
+    e.g. "₹4 lakh" -> 400000, "₹1.5 crore" -> 15000000)."""
     results = []
     for m in re.finditer(
-        r"(?P<prefix>₹|\$|€|£|Rs\.?|INR|USD|EUR)?\s*(?P<num>\d+(?:,\d+)*(?:\.\d+)?)\s*(?P<suffix>INR|USD|EUR|GBP|rupees?|dollars?|euros?)?",
+        rf"(?P<prefix>₹|\$|€|£|Rs\.?|INR|USD|EUR|GBP)?\s*(?P<num>\d+(?:,\d+)*(?:\.\d+)?)\s*"
+        rf"(?P<magnitude>{_INDIAN_MAGNITUDE_RE})?\s*(?P<suffix>INR|USD|EUR|GBP|rupees?|dollars?|euros?|pounds?)?",
         text,
         re.IGNORECASE,
     ):
         raw_num = m.group("num").replace(",", "")
         prefix = m.group("prefix") or ""
         suffix = m.group("suffix") or ""
-        if not prefix and not suffix:
+        magnitude = (m.group("magnitude") or "").lower()
+        if not prefix and not suffix and not magnitude:
             continue
         try:
             val = float(raw_num)
-            curr = parse_currency(f"{prefix} {suffix}")
+            if magnitude:
+                val *= _INDIAN_MAGNITUDE_MULTIPLIERS[magnitude]
+            curr = parse_currency(f"{prefix} {suffix}") if (prefix or suffix) else "INR"
             results.append((val, curr))
         except ValueError:
             continue
@@ -426,17 +554,49 @@ def analyze_cost_and_financial_impact(
         # -------------------------------------------------------------------
         # 3a. Specialized Duplicate Payment / Transaction Logic (Hardening)
         # -------------------------------------------------------------------
-        if factor_type in (CostFactorType.DUPLICATE_PAYMENT.value, CostFactorType.OVERPAYMENT.value) or re.search(r"\b(?:duplicate\s+(?:supplier\s+|vendor\s+|invoice\s+)?payments?|paid\s+twice|double\s+payments?)\b", combined_text, re.IGNORECASE):
-            factor_type = CostFactorType.DUPLICATE_PAYMENT.value
-            missing_inputs, evidence_req = get_default_missing_evidence(factor_type, combined_text)
-            
-            # Check for refund / recovery in text
-            refund_matches = []
-            for m in re.finditer(r"(?:refund(?:ed|s)?|recover(?:ed|y)?|credit(?:ed)?|revers(?:ed|al)?|returned)\s*(?:of\s*)?(?P<prefix>₹|\$|€|£|Rs\.?|INR|USD|EUR)?\s*(?P<amt>\d+(?:,\d+)*(?:\.\d+)?)", combined_text, re.IGNORECASE):
+        # Check for refund / recovery in text across all financial types
+        refund_matches = []
+        _refund_verb = r"(?:refund(?:ed|s)?|recover(?:ed|y)?|credit(?:ed)?|revers(?:ed|al)?|returned|recalled)"
+        _refund_amt = (
+            rf"(?P<prefix>₹|\$|€|£|Rs\.?|INR|USD|EUR|GBP)?\s*(?P<amt>\d+(?:,\d+)*(?:\.\d+)?)\s*"
+            rf"(?P<magnitude>{_INDIAN_MAGNITUDE_RE})?"
+        )
+        for pattern in (
+            rf"{_refund_verb}\s*(?:of\s*)?{_refund_amt}",
+            rf"{_refund_amt}\s*(?:has\s+been\s+|have\s+been\s+|was\s+|were\s+)?{_refund_verb}",
+            rf"(?:recall|recalled|recall\s+of)\s*(?:of\s*)?{_refund_amt}",
+            rf"{_refund_amt}\s*(?:through\s+recall|via\s+recall)",
+        ):
+            for m in re.finditer(pattern, combined_text, re.IGNORECASE):
                 try:
-                    refund_matches.append(float(m.group("amt").replace(",", "")))
+                    val = float(m.group("amt").replace(",", ""))
+                    magnitude = (m.group("magnitude") or "").lower()
+                    if magnitude:
+                        val *= _INDIAN_MAGNITUDE_MULTIPLIERS[magnitude]
+                    refund_matches.append(val)
                 except ValueError:
                     pass
+
+        # -------------------------------------------------------------------
+        _is_duplicate_payment_pattern = bool(re.search(
+            r"\b(?:duplicate\s+(?:supplier\s+|vendor\s+|invoice\s+)?payments?|paid\s+twice|double\s+payments?)\b",
+            combined_text, re.IGNORECASE,
+        ))
+        _is_transaction_pattern = bool(re.search(
+            r"\b(?:duplicate\s+(?:supplier\s+|vendor\s+|invoice\s+)?payments?|paid\s+twice|double\s+payments?|overpayment|overpaid|wire\s+transfer|disbursement|invoice|billing|voucher|purchase\s+requisition)\b",
+            combined_text, re.IGNORECASE,
+        ))
+        if factor_type in (
+            CostFactorType.DUPLICATE_PAYMENT.value, CostFactorType.OVERPAYMENT.value, CostFactorType.UNAUTHORIZED_PAYMENT.value,
+        ) or _is_transaction_pattern or refund_matches:
+            if _is_duplicate_payment_pattern:
+                factor_type = CostFactorType.DUPLICATE_PAYMENT.value
+            _factor_label = {
+                CostFactorType.DUPLICATE_PAYMENT.value: "Duplicate payment",
+                CostFactorType.OVERPAYMENT.value: "Supplier overpayment",
+                CostFactorType.UNAUTHORIZED_PAYMENT.value: "Unauthorized payment",
+            }.get(factor_type, "Financial transaction exposure")
+            missing_inputs, evidence_req = get_default_missing_evidence(factor_type, combined_text)
 
             is_irrecoverable = bool(_IRRECOVERABLE_RE.search(combined_text))
             fin_amt = FinancialAmount(
@@ -483,7 +643,7 @@ def analyze_cost_and_financial_impact(
                     evidence_required=["Dispute resolution log", "Write-off authorization documentation"],
                     evidence_ids=matched_cids,
                     confidence="HIGH",
-                    narrative=f"Duplicate payment of {formatted_amount_str} was identified and confirmed as irrecoverably lost.",
+                    narrative=f"{_factor_label} of {formatted_amount_str} was identified and confirmed as irrecoverably lost.",
                 )
             elif refund_matches:
                 recovered_amt = refund_matches[0]
@@ -516,18 +676,29 @@ def analyze_cost_and_financial_impact(
                         actual_loss_confidence="HIGH",
                         cost_components=[],
                         cost_drivers=[],
-                        calculation_basis=f"Duplicate payment: {formatted_amount_str} - Confirmed refund: {rec_formatted} = Actual loss: {format_currency_amount(0.0, curr)}",
+                        calculation_basis=f"{_factor_label}: {formatted_amount_str} - Confirmed refund: {rec_formatted} = Actual loss: {format_currency_amount(0.0, curr)}",
                         assumptions=[],
                         missing_cost_inputs=[],
                         evidence_required=["Bank reconciliation statement confirming credit receipt"],
                         evidence_ids=matched_cids,
                         confidence="HIGH",
-                        narrative=f"Duplicate payment of {formatted_amount_str} was identified; full recovery of {rec_formatted} has been confirmed (actual financial loss: {format_currency_amount(0.0, curr)}).",
+                        narrative=f"{_factor_label} of {formatted_amount_str} was identified; full recovery of {rec_formatted} has been confirmed (actual financial loss: {format_currency_amount(0.0, curr)}).",
                     )
                 else:
                     # Partial recovery
                     unrecovered = amount - recovered_amt
                     unrec_formatted = format_currency_amount(unrecovered, curr)
+                    _remaining_under_review = bool(_REMAINING_UNDER_REVIEW_RE.search(combined_text))
+                    _actual_loss = None if _remaining_under_review else unrecovered
+                    _actual_loss_status = "NOT_ESTABLISHED" if _remaining_under_review else "POTENTIAL_UNRECOVERED"
+                    _narrative = (
+                        f"{_factor_label} of {formatted_amount_str} was identified; partial refund of {rec_formatted} "
+                        f"confirmed, leaving {unrec_formatted} outstanding and under review. The final financial loss "
+                        "and recoverability of the remaining balance require verification."
+                        if _remaining_under_review else
+                        f"{_factor_label} of {formatted_amount_str} was identified; partial refund of {rec_formatted} "
+                        f"confirmed, leaving unrecovered financial exposure of {unrec_formatted}."
+                    )
                     return CostImpact(
                         cost_factor_detected=True,
                         cost_factor_type=factor_type,
@@ -541,8 +712,8 @@ def analyze_cost_and_financial_impact(
                         net_exposure=unrecovered,
                         potential_exposure=amount,
                         potential_cost_exposure=formatted_amount_str,
-                        actual_loss=unrecovered,
-                        actual_loss_status="POTENTIAL_UNRECOVERED",
+                        actual_loss=_actual_loss,
+                        actual_loss_status=_actual_loss_status,
                         recoverable_amount=amount,
                         recovered_amount=recovered_amt,
                         unrecovered_amount=unrecovered,
@@ -554,13 +725,13 @@ def analyze_cost_and_financial_impact(
                         actual_loss_confidence="MEDIUM",
                         cost_components=[],
                         cost_drivers=[],
-                        calculation_basis=f"Duplicate payment: {formatted_amount_str} - Confirmed refund: {rec_formatted} = Unrecovered exposure: {unrec_formatted}",
+                        calculation_basis=f"{_factor_label}: {formatted_amount_str} - Confirmed refund: {rec_formatted} = Unrecovered exposure: {unrec_formatted}",
                         assumptions=["Remaining balance requires recovery tracking."],
                         missing_cost_inputs=["Remaining balance recovery timeline"],
                         evidence_required=["Supplier credit note for remaining balance", "Collection follow-up log"],
                         evidence_ids=matched_cids,
                         confidence="HIGH",
-                        narrative=f"Duplicate payment of {formatted_amount_str} was identified; partial refund of {rec_formatted} confirmed, leaving unrecovered financial exposure of {unrec_formatted}.",
+                        narrative=_narrative,
                     )
             else:
                 # Standard unconfirmed duplicate payment
@@ -593,7 +764,7 @@ def analyze_cost_and_financial_impact(
                     evidence_required=evidence_req,
                     evidence_ids=matched_cids,
                     confidence="HIGH",
-                    narrative=f"Duplicate payment of {formatted_amount_str} to a supplier was identified (verified transaction). Potential financial exposure is {formatted_amount_str}; actual financial loss is not established pending verification of recovery or supplier credit.",
+                    narrative=f"{_factor_label} of {formatted_amount_str} to a supplier was identified (verified transaction). Potential financial exposure is {formatted_amount_str}; actual financial loss is not established pending verification of recovery or supplier credit.",
                 )
 
         # -------------------------------------------------------------------

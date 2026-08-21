@@ -15,6 +15,7 @@ from pydantic import BaseModel
 class ObservationQualityStatus(str, Enum):
     SUFFICIENT = "SUFFICIENT"
     INSUFFICIENT = "INSUFFICIENT"
+    NOT_ACTIONABLE = "NOT_ACTIONABLE"
 
 
 class ConfidenceLevel(str, Enum):

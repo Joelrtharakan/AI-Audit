@@ -114,6 +114,10 @@ def _compute_confidence_scores(state: AgentState) -> tuple[str, str, str]:
 
 
 def _compute_investigation_required(state: AgentState) -> str:
+    canonical = state.get("canonical_finding_state")
+    if canonical and not getattr(canonical, "is_actionable", True):
+        return "NO"
+
     root_cause = state.get("root_cause")
     capa = state.get("capa_analysis")
 
@@ -127,6 +131,10 @@ def _compute_investigation_required(state: AgentState) -> str:
 
 
 def _compute_final_state(state: AgentState) -> AgentFinalState:
+    canonical = state.get("canonical_finding_state")
+    if canonical and not getattr(canonical, "is_actionable", True):
+        return AgentFinalState.READY_FOR_HUMAN_REVIEW
+
     iteration_count = state.get("iteration_count", 0)
     max_iter = 10  # from settings but accessed statically here
     if iteration_count >= max_iter:
@@ -205,6 +213,44 @@ async def generate_report_node(state: AgentState) -> AgentState:
     from app.models.agent import InvestigationMode
     investigation_mode = getattr(canonical, "investigation_mode", InvestigationMode.NORMAL) if canonical else InvestigationMode.NORMAL
 
+    semantic_graph = getattr(canonical, "semantic_graph", None)
+    if not semantic_graph:
+        from app.models.agent import SemanticGraph
+        semantic_graph = SemanticGraph()
+
+    # Build SemanticTraceabilityMatrix linking report fields to source propositions/claims
+    from app.models.agent import (
+        SemanticTraceabilityEntry,
+        SemanticTraceabilityMatrix,
+    )
+    trace_entries: list[SemanticTraceabilityEntry] = []
+    if root_cause and getattr(root_cause, "statement", None):
+        lead_hyps = getattr(root_cause, "candidate_hypotheses", []) or []
+        lead_claim_ids = lead_hyps[0].supporting_claim_ids if lead_hyps else []
+        trace_entries.append(SemanticTraceabilityEntry(
+            field_name="root_cause.statement",
+            concept=root_cause.statement,
+            source_proposition_ids=lead_claim_ids,
+            epistemic_status=getattr(root_cause, "evidence_status", "UNKNOWN"),
+            provenance="INFERRED" if getattr(root_cause.status, "value", root_cause.status) != "VERIFIED" else "OBJECTIVE_RECORD",
+            derivation_type="CAUSAL_PROGRESSION",
+        ))
+
+    if impact and getattr(impact, "affected_object", None):
+        trace_entries.append(SemanticTraceabilityEntry(
+            field_name="impact_assessment.affected_object",
+            concept=impact.affected_object,
+            source_proposition_ids=[p.id for p in propositions if p.subject and p.subject.lower() in (impact.affected_object or "").lower()],
+            epistemic_status="VERIFIED",
+            provenance="AUDIT_OBSERVATION",
+        ))
+
+    semantic_traceability = SemanticTraceabilityMatrix(
+        entries=trace_entries,
+        is_valid=True,
+        untraced_concepts=[],
+    )
+
     report = InvestigationReport(
         observation_quality=observation_quality,  # type: ignore[arg-type]
         observation_confidence=obs_conf,  # type: ignore[arg-type]
@@ -226,6 +272,8 @@ async def generate_report_node(state: AgentState) -> AgentState:
         evidence_claims=evidence_claims,
         evidence_conflicts=evidence_conflicts,
         referenced_documents=referenced_documents,
+        semantic_graph=semantic_graph,
+        semantic_traceability=semantic_traceability,
         human_review_required=True,  # always
         analysis_mode=state.get("analysis_mode", "LLM"),  # type: ignore[arg-type]
         analysis_engine=state.get("analysis_engine", "LLM"),  # type: ignore[arg-type]

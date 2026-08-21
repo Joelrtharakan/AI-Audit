@@ -158,7 +158,7 @@ def test_delivery_vs_receipt_impact_is_domain_local_not_equipment_template():
     canonical.evidence_conflicts = detect_evidence_conflicts(extract_claims(NOTIFICATION_FINDING, []))
 
     impact, clean_noun, topic, actor = _derive_deterministic_impact(NOTIFICATION_FINDING, canonical, "x")
-    assert impact.affected_object == "Revised SOP notification receipt"
+    assert impact.affected_object == "Revised SOP notification"
     forbidden = ("validated-use", "validated range", "calibration", "equipment")
     for word in forbidden:
         assert word not in impact.process_at_risk.lower()

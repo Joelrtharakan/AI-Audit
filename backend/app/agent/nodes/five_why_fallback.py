@@ -17,6 +17,7 @@ def build_deterministic_five_why(
     finding_text: str,
     evidence_ledger: list[EvidenceItem],
     canonical_subject: str | None = None,
+    canonical_state: Any = None,
 ) -> FiveWhyAnalysis:
     """Build a deterministic, evidence-bound 5-Why chain from the case model.
 
@@ -66,6 +67,23 @@ def build_deterministic_five_why(
     conflicts = detect_evidence_conflicts(claims)
     mechanism = extract_immediate_mechanism(reported_claims, fact_claims)
 
+    # A "mechanism" that is really just the OBSERVATION restated (fact_claims[0]
+    # is, by this codebase's convention, the deviation itself) produces a
+    # circular Why#1 ("Why was X incomplete?" -> "X was incomplete") --
+    # extract_immediate_mechanism has no notion of "which fact is the
+    # observation," so it can pick fact_claims[0] merely because its verb
+    # shape happens to match a recognized polarity (e.g. "was not
+    # performed" matches non_performance just as readily as a genuinely
+    # deeper "was never assigned" fact would). When a second, textually
+    # DIFFERENT verified fact exists, prefer whichever mechanism comes from
+    # excluding the observation fact -- never let the observation explain
+    # itself.
+    if fact_claims and mechanism.statement and repeats_previous_why_answer(fact_claims[0], mechanism.statement):
+        if len(fact_claims) > 1:
+            _alt_mechanism = extract_immediate_mechanism(reported_claims, fact_claims[1:])
+            if _alt_mechanism.statement:
+                mechanism = _alt_mechanism
+
     # 0. Document referenced but unavailable — underlying event is not objectively verified
     import re
     has_unavail_ref_doc = bool(re.search(r"\b(?:referenced|attached|cited)\b.*?\b(?:not\s+available|unavailable|missing|could\s+not\s+be\s+located)\b", finding_text, re.IGNORECASE))
@@ -81,6 +99,139 @@ def build_deterministic_five_why(
             steps=steps,
             is_complete=False,
             status_note="EVIDENCE BOUNDARY — Underlying event requires objective verification before causal mechanism can be established.",
+        )
+
+    # 0a1. Recurrence + prior corrective action (Section 8/9): the 5-Why
+    # must never turn "a prior corrective action exists" into "the prior
+    # action was ineffective" -- that requires objective evidence, not the
+    # mere co-occurrence of recurrence and a prior action. Only asks the
+    # "recur after prior action" question when BOTH recurrence AND a prior
+    # action are structurally established; otherwise falls through to the
+    # generic branches below. Generalizes across any domain (manufacturing,
+    # finance, document control, ...) via detect_recurrence's own
+    # structural detection, not a keyword list for this specific finding.
+    from app.agent.recurrence_guard import detect_recurrence as _detect_recurrence_for_5why
+    _recurrence_info = _detect_recurrence_for_5why(finding_text)
+    if _recurrence_info.is_recurring and _recurrence_info.has_previous_capa_reference:
+        _rec_subject = resolved.subject or noun_sub
+        why_q = f"Why did the {_rec_subject} recur after the prior corrective action?"
+        why_answer = (
+            f"The evidence confirms recurrence of the {_rec_subject} and documents a prior corrective "
+            "action, but does not establish whether the prior action failed to remain effective, was "
+            "incompletely implemented, fell outside its scope, or was unrelated to the current mechanism."
+        )
+        steps.append(FiveWhyStep(
+            question=why_q,
+            answer=why_answer,
+            status="UNKNOWN",
+        ))
+        return FiveWhyAnalysis(
+            steps=steps,
+            is_complete=False,
+            status_note="EVIDENCE BOUNDARY — Recurrence and prior corrective action are verified; the relationship between them requires investigation.",
+        )
+
+    # 0a-1. Requirement-uncertain finding (Section 12): 5-Why is gated by
+    # CAUSAL READINESS -- if the applicable requirement (and therefore
+    # whether a deviation even exists) has not been established, the
+    # engine must not invent a causal question that presupposes a
+    # confirmed deviation. Defer instead of asking "why" at all.
+    # Generalizes across any requirement type (specification, procedure,
+    # standard, instruction, limit, ...), not one specific domain.
+    if (
+        resolved.semantic_type == "REQUIREMENT_UNCERTAIN"
+        or (resolved.requirement_status == "UNKNOWN" and getattr(resolved, "semantic_type", None) in ("REQUIREMENT_UNCERTAIN", "OBSERVATION_VERIFICATION"))
+    ):
+        steps.append(FiveWhyStep(
+            question="Why-chain deferred pending requirement resolution",
+            answer=(
+                "Why-chain deferred because the applicable requirement/deviation status has not yet been established."
+            ),
+            status="UNKNOWN",
+        ))
+        return FiveWhyAnalysis(
+            steps=steps,
+            is_complete=False,
+            status_note="EVIDENCE BOUNDARY — Applicable requirement is unresolved; causal analysis deferred until compliance status is established.",
+        )
+
+
+
+    # 0a0. Event-sequence / control-point finding (Section 13): a
+    # controlled TRANSITION whose required justification/authorization is
+    # missing must ask about the TRANSITION itself, never the generic
+    # subject/condition template, and must never speculate about WHY the
+    # justification is missing (bypass/misunderstanding/omission are all
+    # equally unverified). Generalizes across any transition type
+    # (invalidation, override, exception, waiver, ...) via the canonical
+    # transition_type field, not domain-specific wording.
+    if resolved.semantic_type == "EVENT_SEQUENCE_CONTROL" and resolved.transition_type:
+        _transition_label = resolved.transition_type.replace("_", " ").lower()
+        if noun_sub and noun_sub.lower() != _transition_label:
+            why_q = f"Why was the {noun_sub} {_transition_label} performed without the required justification/evidence?"
+            why_answer = (
+                f"The available evidence confirms that the {noun_sub} {_transition_label} occurred and that the required "
+                "justification is not documented, but does not establish whether the control was bypassed, "
+                f"misunderstood, omitted, or otherwise not executed."
+            )
+        else:
+            why_q = f"Why did the {_transition_label} occur without the required justification/evidence?"
+            why_answer = (
+                f"The available evidence confirms that the {_transition_label} occurred and that the required "
+                "justification is not documented, but does not establish whether the control was bypassed, "
+                f"misunderstood, omitted, or otherwise not executed."
+            )
+        downstream_clause = (
+            " A downstream action is also reported in the finding; this does not establish that the "
+            "downstream action depended on or was improperly affected by the transition."
+            if resolved.downstream_action_present else ""
+        )
+        why_answer = f"{why_answer}{downstream_clause}"
+        steps.append(FiveWhyStep(
+            question=why_q,
+            answer=why_answer,
+            status="UNKNOWN",
+        ))
+        return FiveWhyAnalysis(
+            steps=steps,
+            is_complete=False,
+            status_note="EVIDENCE BOUNDARY — Transition and missing justification are verified; the control mechanism requires investigation.",
+        )
+
+    # 0a2. Missing-record / missing-documentation finding (Section 1/2/9):
+    # the 5-Why must consume the canonical MISSING_RECORD event (activity/
+    # context/downstream) rather than routing through the generic
+    # mechanism-status branches below, which would otherwise restate the
+    # observation as a "VERIFIED" Why#1 step and then pad a second,
+    # near-duplicate step to reach a target chain length. A missing record
+    # answers exactly ONE evidence-bound question: is the activity's
+    # PERFORMANCE established -- and it is not, by the missing record
+    # alone. Generalizes across any domain (inspection, review, approval,
+    # verification, calibration check, ...), not specific to any one
+    # activity type.
+    if resolved.semantic_type == "MISSING_RECORD" and resolved.missing_record_activity:
+        activity = resolved.missing_record_activity
+        _condition_word = resolved.condition or "not documented"
+        why_q = f"Why was the {activity} {_condition_word}?"
+        downstream_clause = (
+            " A subsequent action is also reported in the finding, but the missing record does not by "
+            "itself establish whether that action was appropriately supported."
+            if resolved.downstream_action_present else ""
+        )
+        why_answer = (
+            f"The evidence confirms that the required record for the {activity} is missing, but does not "
+            "establish whether the underlying activity was performed or why the record is absent."
+            f"{downstream_clause}"
+        )
+        steps.append(FiveWhyStep(
+            question=why_q,
+            answer=why_answer,
+            status="UNKNOWN",
+        ))
+        return FiveWhyAnalysis(
+            steps=steps,
+            is_complete=False,
+            status_note="EVIDENCE BOUNDARY — Missing record is verified; underlying activity performance and cause require investigation.",
         )
 
     # 0b. Duplicate Payment / Transaction Finding (Section 6 Hardening)
@@ -106,6 +257,53 @@ def build_deterministic_five_why(
             status_note="INCOMPLETE — EVIDENCE BOUNDARY",
         )
 
+    # 0c. Comparison/mismatch finding (Section 1/2/9): the 5-Why for a
+    # verified comparison ("recorded X did not match calculated Y") must be
+    # built from the canonical comparison event (comparison_type/left/
+    # right/measurement), not from a generic subject/condition template --
+    # generalizes across any comparison domain (yield, temperature,
+    # invoice amount, ...), not specific to any one finding.
+    if resolved.semantic_type == "COMPARISON" and resolved.comparison_type and resolved.comparison_left and resolved.comparison_right:
+        from app.services.semantic_subject import format_comparison_why_question
+        _qualified_left = (
+            f"{resolved.comparison_left_qualifier} {resolved.comparison_left}"
+            if resolved.comparison_left_qualifier else resolved.comparison_left
+        )
+        why_q = format_comparison_why_question(
+            resolved.comparison_type, resolved.comparison_left, resolved.comparison_right,
+            left_qualifier=resolved.comparison_left_qualifier,
+        ) or format_deviation_why_question(
+            resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+        )
+        if resolved.measurement_value is not None:
+            qual = f"{resolved.measurement_qualifier} " if resolved.measurement_qualifier else ""
+            magnitude_phrase = f"{qual}{resolved.measurement_value}{resolved.measurement_unit or ''} discrepancy"
+        else:
+            magnitude_phrase = "discrepancy"
+        from app.services.semantic_subject import (
+            COMPARISON_SUBTYPE_MECHANISM_CATEGORIES,
+            _DEFAULT_COMPARISON_MECHANISM_CATEGORIES,
+        )
+        _mechanism_categories = COMPARISON_SUBTYPE_MECHANISM_CATEGORIES.get(
+            resolved.comparison_subtype or "", _DEFAULT_COMPARISON_MECHANISM_CATEGORIES
+        )
+        why_answer = (
+            f"The available evidence confirms {'an' if magnitude_phrase[:1].lower() in 'aeiou' else 'a'} "
+            f"{magnitude_phrase} between the {_qualified_left} and the {resolved.comparison_right}, "
+            f"but does not establish whether the difference resulted from {_mechanism_categories}, "
+            "or another mechanism."
+        )
+        steps.append(FiveWhyStep(
+            question=why_q,
+            answer=why_answer,
+            status="UNKNOWN",
+        ))
+        return FiveWhyAnalysis(
+            steps=steps,
+            is_complete=False,
+            status_note="EVIDENCE BOUNDARY — Comparison discrepancy is verified; underlying mechanism requires investigation.",
+        )
+
     # 1. Multiple Competing Reported Explanations Case (e.g. training vs workload vs discipline)
     reported_claims_list = [c for c in claims if getattr(c, "status", None) == EvidenceStatus.REPORTED]
     if not conflicts and len(reported_claims_list) >= 2:
@@ -119,7 +317,13 @@ def build_deterministic_five_why(
         why1_q = format_deviation_why_question(
             resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
         )
-        why1_ans = f"Audit observation confirms that {deviation_clause} was identified during inspection."
+        # deviation_clause is always already a full clause with its own verb
+        # (it comes from a verified fact/sentence, e.g. "the required
+        # inspection was not completed") -- appending another verb phrase
+        # like "was identified during inspection" produces a double-verb
+        # grammar defect ("was not completed was identified during
+        # inspection"). State it directly instead.
+        why1_ans = f"Audit observation confirms that {deviation_clause}."
         steps.append(FiveWhyStep(
             question=why1_q,
             answer=why1_ans,
@@ -161,7 +365,7 @@ def build_deterministic_five_why(
         ))
 
         # Step 3: Which mechanism caused it? -> Evidence boundary
-        why3_q = "Which of these mechanisms caused the non-completion?" if "checklist" in noun_sub.lower() or "complete" in finding_text.lower() else "Which of these mechanisms caused the nonconformity?"
+        why3_q = f"Which of these mechanisms caused the deviation in {target_obj_name}?"
         why3_ans = "The operative causal mechanism is not established from available evidence — objective records are required to distinguish the competing explanations."
         steps.append(FiveWhyStep(
             question=why3_q,
@@ -292,7 +496,11 @@ def build_deterministic_five_why(
         why1_question = format_deviation_why_question(
             resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
         )
-        why1_answer = f"Audit observation confirms that {deviation_clause} occurred during inspection."
+        # See the identical fix/comment in the reported-explanations branch
+        # above: deviation_clause already contains its own verb, so
+        # appending "occurred during inspection" produces a double-verb
+        # grammar defect.
+        why1_answer = f"Audit observation confirms that {deviation_clause}."
         steps.append(FiveWhyStep(
             question=why1_question,
             answer=why1_answer,

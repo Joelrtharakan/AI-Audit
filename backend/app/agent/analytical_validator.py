@@ -542,10 +542,42 @@ _TARGET_ID_ASPECT_MAP: list[tuple[str, str]] = [
     ("DELIVERY", "delivery"),
     ("RECEIPT", "receipt"),
     ("ACK", "acknowledgement"),
+    ("SCOPE", "scope"),
+    ("IMPACT", "scope"),
     ("ACTION", "activity"),
     ("MECHANISM", "mechanism"),
     ("GOV", "requirement"),
     ("REQ", "requirement"),
+    # Comparison/PARAMETER_MISMATCH decision-tree aspects (Section 4/5) --
+    # each investigation STEP (discrepancy confirmation, entry-source,
+    # applicable revision, actual execution, review control, downstream
+    # impact) is its own distinct investigation domain and must never be
+    # merged with a neighboring step merely because both mention shared
+    # vocabulary like "records"/"batch".
+    ("DISCREPANCY", "discrepancy"),
+    ("ENTRY_SOURCE", "data_entry_source"),
+    ("REVISION", "applicable_revision"),
+    ("ACTUAL_EXECUTION", "actual_execution"),
+    ("REVIEW_CONTROL", "review_control"),
+    ("DOWNSTREAM_IMPACT", "downstream_impact"),
+    # MISSING_RECORD decision-tree aspects (Section 5/6) -- each STEP is a
+    # distinct investigation domain (confirm the missing evidence itself,
+    # verify the underlying activity, then independently assess any
+    # downstream action's precondition/review/authorization).
+    ("MISSING_EVIDENCE", "missing_evidence"),
+    ("ACTIVITY_PERFORMANCE", "activity_performance"),
+    ("DOWNSTREAM_PRECONDITION", "downstream_precondition"),
+    ("DOWNSTREAM_REVIEW", "downstream_review"),
+    ("DOWNSTREAM_AUTHORIZATION", "downstream_authorization"),
+    # EVENT_SEQUENCE_CONTROL decision-tree aspects (Section 9/10).
+    ("TRANSITION_CONFIRMED", "transition_confirmed"),
+    ("CONTROL_IDENTIFIED", "control_identified"),
+    ("CONTROL_EXECUTED", "control_executed"),
+    ("DOWNSTREAM_DEPENDENCY", "downstream_dependency"),
+    # REQUIREMENT_RESOLUTION decision-tree aspects (Section 4/9).
+    ("REQUIREMENT_UNCERTAIN", "requirement_uncertain"),
+    ("COMPLIANCE_DETERMINATION", "compliance_determination"),
+    ("DEVIATION_CONFIRMED", "deviation_confirmed"),
 ]
 
 
@@ -1147,14 +1179,42 @@ def validate_root_cause_state(root_cause, mechanism: MechanismInfo | None) -> li
 # ---------------------------------------------------------------------------
 
 
-def five_why_skips_available_mechanism(five_why_steps: list, mechanism: MechanismInfo) -> bool:
+def five_why_skips_available_mechanism(
+    five_why_steps: list, mechanism: MechanismInfo, observed_deviation: str | None = None
+) -> bool:
     """True if the finding/evidence establishes an immediate mechanism
     (VERIFIED or REPORTED) but NONE of the 5-Why steps' answers actually
     reflect it -- i.e. the chain stopped (or never engaged) before an
     explicitly available causal fact, which the finding itself already
-    resolves."""
+    resolves.
+
+    Section 1 (INV-5WHY-CAUSAL-003): if `mechanism.statement` is itself
+    just the finding's own OBSERVATION restated (extract_immediate_
+    mechanism can mis-detect a plain "X was not documented"-shaped
+    observation as though it were a distinct mechanism-level fact), there
+    is nothing genuinely deeper to backfill -- inserting it as an
+    "additional step" would only pad the chain with a second copy of the
+    same observation the boundary step already acknowledged. This check is
+    generalized (word-overlap against the observation), not tied to any
+    one finding's wording."""
     if not mechanism or mechanism.status not in ("VERIFIED", "REPORTED") or not mechanism.statement:
         return False
+    if observed_deviation:
+        from app.agent.causal_guard import restates_observation
+        # `mechanism.statement` is often the FULL raw finding sentence
+        # (extract_immediate_mechanism can mis-detect a plain observation
+        # as though it were a mechanism-level fact), so it may be much
+        # LONGER than the canonical observed_deviation and still add
+        # nothing new -- restates_observation alone (ratio relative to the
+        # mechanism text's own length) under-fires in that direction.
+        # Checked both ways: either the mechanism restates the observation
+        # outright, or the observation's own vocabulary is almost entirely
+        # already contained within the mechanism text (nothing distinct).
+        obs_words = significant_words(observed_deviation)
+        mech_words = significant_words(mechanism.statement)
+        contained = bool(obs_words) and bool(mech_words) and len(obs_words & mech_words) / len(obs_words) >= 0.7
+        if restates_observation(mechanism.statement, observed_deviation) or contained:
+            return False
     if not five_why_steps:
         return True
     mechanism_words = significant_words(mechanism.statement)
@@ -1200,10 +1260,17 @@ def repair_five_why_with_mechanism(five_why_steps: list, mechanism: MechanismInf
     else:
         question_text = "Why did the observed condition occur?"
 
+    # F4c — Monotonic chain progression guard (INV-WHY-011):
+    # If the chain already has an UNKNOWN/NOT_ESTABLISHED step preceding
+    # the insertion point, a VERIFIED step cannot follow it without
+    # violating monotonicity. Cap at REPORTED or align status accordingly.
+    has_prior_unknown = any(s.status in ("UNKNOWN", "NOT_ESTABLISHED") for s in (five_why_steps[:1] if five_why_steps else []))
+    step_status = "REPORTED" if (mechanism.status == "REPORTED" or has_prior_unknown) else "VERIFIED"
+
     mechanism_step = FiveWhyStep(
         question=question_text,
         answer=mechanism.statement,
-        status="REPORTED" if mechanism.status == "REPORTED" else "VERIFIED",
+        status=step_status,
     )
 
     if not five_why_steps:
@@ -1295,6 +1362,47 @@ def sync_five_why_status_with_causal_state(
         else:
             new_steps.append(step)
 
+    return new_steps if changed else five_why_steps
+
+
+_RESTATEMENT_BOUNDARY_ANSWER = "The available evidence establishes the deviation but does not establish why."
+
+
+def repair_five_why_restatement(five_why_steps: list) -> list:
+    """Deterministic generalized restatement guard (Section 2): a Why-step
+    answer that merely repeats its own question's proposition (same
+    subject + predicate, no new causal mechanism introduced -- e.g. Q:
+    "Why was the inspection not completed?" A: "The inspection was not
+    completed.") is never causal reasoning, regardless of which node
+    produced it (LLM or deterministic fallback). Reuses
+    is_circular_why_answer, the same vocabulary-overlap detector already
+    used elsewhere in this pipeline (core_synthesis.py, rca.py, and
+    INV-5WHY-001), so "circular" is defined identically everywhere. A step
+    already honestly marked UNKNOWN/NOT_ESTABLISHED is exempt -- restating
+    the deviation while explicitly declining to explain it is the correct
+    evidence-boundary behavior, not the defect this guards against."""
+    from app.agent.causal_guard import is_circular_why_answer
+
+    changed = False
+    new_steps = []
+    for step in five_why_steps:
+        if step.status in ("UNKNOWN", "NOT_ESTABLISHED"):
+            new_steps.append(step)
+            continue
+        if is_circular_why_answer(step.question, step.answer):
+            new_steps.append(step.model_copy(update={
+                "answer": _RESTATEMENT_BOUNDARY_ANSWER,
+                "status": "UNKNOWN",
+            }))
+            changed = True
+            # Every later step in this deterministic chain was built
+            # assuming THIS step's (now-discredited) content was a valid
+            # causal answer to chain from -- once we've hit "we don't
+            # actually know" here, nothing after it can be trusted either.
+            # Section 6 rule 2: "if no causal evidence exists, stop
+            # immediately" -- never pad a chain past a repaired boundary.
+            break
+        new_steps.append(step)
     return new_steps if changed else five_why_steps
 
 
