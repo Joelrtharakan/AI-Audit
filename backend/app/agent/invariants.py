@@ -2793,6 +2793,40 @@ def _check_evidence_artifacts_are_context_grounded(state: dict[str, Any]) -> tup
                 f"ConditionalCapaAction cites root_cause_hypothesis_id={hid!r}, which does not "
                 f"exist in root_cause.candidate_hypotheses"
             )
+
+    # Claim-ID grounding: CandidateHypothesis.supporting_claim_ids/
+    # contradicting_claim_ids and ConditionalCapaAction.supporting_claim_ids
+    # must resolve to a real EvidenceClaim.claim_id in this run's own claim
+    # registry (canonical_finding_state.evidence_claims — the actual
+    # populated registry; state["evidence_claims"] is a separate, usually-
+    # empty top-level key and is deliberately not used here). Skipped
+    # entirely when no claim registry exists yet, same "nothing to ground
+    # against" rule as the hypothesis-ID checks above.
+    canonical = state.get("canonical_finding_state")
+    known_claim_ids = {
+        c.claim_id for c in (getattr(canonical, "evidence_claims", None) or []) if getattr(c, "claim_id", None)
+    }
+    if known_claim_ids:
+        for h in rc.candidate_hypotheses:
+            for cid in getattr(h, "supporting_claim_ids", None) or []:
+                if cid and cid not in known_claim_ids:
+                    return False, (
+                        f"CandidateHypothesis {h.id!r} cites supporting_claim_ids={cid!r}, which "
+                        f"does not exist in the evidence claim registry"
+                    )
+            for cid in getattr(h, "contradicting_claim_ids", None) or []:
+                if cid and cid not in known_claim_ids:
+                    return False, (
+                        f"CandidateHypothesis {h.id!r} cites contradicting_claim_ids={cid!r}, "
+                        f"which does not exist in the evidence claim registry"
+                    )
+        for action in getattr(capa, "conditional_actions", None) or []:
+            for cid in getattr(action, "supporting_claim_ids", None) or []:
+                if cid and cid not in known_claim_ids:
+                    return False, (
+                        f"ConditionalCapaAction cites supporting_claim_ids={cid!r}, which does "
+                        f"not exist in the evidence claim registry"
+                    )
     return True, None
 
 
@@ -3088,7 +3122,7 @@ INVARIANT_REGISTRY: list[InvariantRule] = [
         inv_id="INV-REPORT-003",
         category=InvariantCategory.CAUSAL,
         severity=InvariantSeverity.BLOCKER,
-        description="EVERY_EVIDENCE_ARTIFACT_MUST_BE_CONTEXT_GROUNDED: hypothesis-ID references made by InvestigationQuestion.target_hypothesis_ids, EvidenceRequest.hypothesis_ids, and ConditionalCapaAction.root_cause_hypothesis_id must resolve to a real hypothesis in root_cause.candidate_hypotheses -- no dangling/fabricated hypothesis references.",
+        description="EVERY_EVIDENCE_ARTIFACT_MUST_BE_CONTEXT_GROUNDED: hypothesis-ID references (InvestigationQuestion.target_hypothesis_ids, EvidenceRequest.hypothesis_ids, ConditionalCapaAction.root_cause_hypothesis_id) and claim-ID references (CandidateHypothesis.supporting_claim_ids/contradicting_claim_ids, ConditionalCapaAction.supporting_claim_ids) must resolve to a real hypothesis/claim -- no dangling/fabricated references.",
         validate=_check_evidence_artifacts_are_context_grounded,
     ),
     InvariantRule(

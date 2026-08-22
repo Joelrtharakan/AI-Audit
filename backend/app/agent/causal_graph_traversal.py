@@ -204,7 +204,26 @@ def _graph_node_why_question(node: Any) -> str:
         )
         if question:
             return question
-    return f"Why did the following occur: {node.label}?"
+    # Reuses the SAME grammatical-repair logic already used for the
+    # mechanism-insertion path (analytical_validator.repair_five_why_with_
+    # mechanism): a node.label is either the canonical dash-joined
+    # "<subject> — <condition>" deviation form (understanding_node's
+    # field), in which case naive interpolation into "Why did the
+    # following occur: X?" renders the internal " — " separator directly
+    # into auditor-facing text, or a plain declarative sentence (a
+    # hypothesis's own statement/name), which the "Why did the following
+    # occur:" wrapper renders as stilted, non-auditor-grade prose. Neither
+    # is fabricated content -- format_deviation_why_question/
+    # declarative_to_why_question only restructure the SAME words into a
+    # natural question, never inventing new ones.
+    from app.services.semantic_subject import declarative_to_why_question, format_deviation_why_question
+    label = node.label or ""
+    if " — " in label:
+        subj, _, cond = label.partition(" — ")
+        return format_deviation_why_question(subj, cond)
+    if label:
+        return declarative_to_why_question(label)
+    return "Why did this occur?"
 
 
 def build_graph_grounded_five_why(causal_graph: Any) -> Any | None:
@@ -384,9 +403,5 @@ def build_graph_grounded_five_why(causal_graph: Any) -> Any | None:
     return FiveWhyAnalysis(
         steps=steps,
         is_complete=False,
-        status_note=(
-            "Graph-grounded sequential traversal: each step follows one licensed causal-graph "
-            "edge to the next node on a single path. Traversal stopped where no further edge "
-            "is licensed from the current node — this is an evidence boundary, not an omission."
-        ),
+        status_note="EVIDENCE_BOUNDARY",
     )

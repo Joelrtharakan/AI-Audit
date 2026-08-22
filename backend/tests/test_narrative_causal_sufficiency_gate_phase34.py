@@ -111,3 +111,52 @@ def test_established_root_cause_narrative_unchanged_when_root_cause_actually_lic
     # Real established case: narrative was never touched by the new
     # mechanism-only-downgrade branch (must not contain the fallback text).
     assert "does not establish the underlying root cause" not in rc.narrative
+
+
+async def _build_stated_unverified_with_overclaiming_narrative():
+    """FINAL RELEASE HARDENING (Stage 1/2): the narrative-safety gate
+    previously branched only on rc.status == NOT_ESTABLISHED (evidence-
+    boundary text) or rc.status == ESTABLISHED (mechanism-only downgrade,
+    added in the prior turn) -- every OTHER RootCauseStatus value
+    (SUPPORTED, STATED_UNVERIFIED, INFERRED, CONTRADICTED, CONFLICTED,
+    INSUFFICIENT_EVIDENCE) fell through both branches entirely and left
+    an "established root cause" narrative completely unguarded. Reproduced
+    directly: a hand-built STATED_UNVERIFIED state with mechanism-level-
+    only evidence and an "established as X" narrative passed through this
+    node with the narrative untouched before this fix."""
+    req = InvestigateRequest(finding_text=_FOUR_EMPLOYEES_FINDING)
+    state = {
+        "request": req, "evidence_ledger": [], "iteration_count": 0, "tool_call_count": 0,
+        "critic_iteration": 0, "trace": [], "errors": [],
+    }
+    with patch("app.agent.nodes.understanding.get_llm_client", return_value=None), \
+         patch("app.agent.nodes.investigation_planner.get_llm_client", return_value=None), \
+         patch("app.agent.nodes.core_synthesis.get_llm_client", return_value=None):
+        state = await understand_finding_node(state)
+        state = await plan_investigation_node(state)
+        state = await core_synthesis_node(state)
+        state = await generate_report_node(state)
+
+    rc = state.get("root_cause")
+    assert rc is not None and rc.candidate_hypotheses
+    hyp = rc.candidate_hypotheses[0]
+    hyp.causal_level = CausalLevel.L3_IMMEDIATE_MECHANISM
+    hyp.status = "SUPPORTED"
+    hyp.evidence_strength = "SUPPORTED"
+    hyp.status_locked = True
+    rc.leading_hypothesis = hyp.id
+    rc.leading_hypothesis_status = "SELECTED"
+    rc.narrative = "The root cause of the deviation has been established as insufficient training."
+    rc.root_cause_basis = "The root cause of the deviation has been established as insufficient training."
+    return state
+
+
+def test_stated_unverified_narrative_downgraded_when_only_mechanism_licensed():
+    state = asyncio.run(_build_stated_unverified_with_overclaiming_narrative())
+    final_state = asyncio.run(final_evidence_verification_node(state))
+    rc = final_state.get("root_cause")
+    assert "established as" not in rc.narrative.lower(), (
+        f"narrative still overclaims an established root cause under status={rc.status!r}, "
+        f"which is not NOT_ESTABLISHED but was never gated before this fix: {rc.narrative!r}"
+    )
+    assert "mechanism" in rc.narrative.lower()

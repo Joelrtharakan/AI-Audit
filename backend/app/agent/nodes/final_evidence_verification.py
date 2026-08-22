@@ -1405,17 +1405,27 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     setattr(rc, _field, _EVIDENCE_BOUNDARY_WHY)
 
         # Final output hardening: causal_sufficiency must control the
-        # narrative even when rc.status == ESTABLISHED (Part 2/4 -- a
-        # supported MECHANISM must never be narrated as an established
-        # ROOT CAUSE). Builds a preliminary causal graph here via the SAME
-        # pure, deterministic function used for the official graph later
-        # in this node (cheap, no LLM call, safe to call twice) so this
-        # narrative check has the SAME authoritative depth signal
+        # narrative for EVERY status other than NOT_ESTABLISHED (handled
+        # above), not only ESTABLISHED -- a supported MECHANISM must never
+        # be narrated as an established ROOT CAUSE regardless of whether
+        # the aggregate rc.status happens to read SUPPORTED,
+        # STATED_UNVERIFIED, INFERRED, CONTRADICTED, CONFLICTED, or
+        # INSUFFICIENT_EVIDENCE -- none of those represent a genuinely
+        # established root cause either, and narrative prose asserting
+        # "established" language under any of them is exactly as unsafe as
+        # under ESTABLISHED itself (reproduced directly: a hand-built
+        # STATED_UNVERIFIED state with an "established as X" narrative
+        # passed through this node completely unguarded before this fix,
+        # since the old `elif ... ESTABLISHED` branch never matched it).
+        # Builds a preliminary causal graph here via the SAME pure,
+        # deterministic function used for the official graph later in this
+        # node (cheap, no LLM call, safe to call twice) so this narrative
+        # check has the SAME authoritative depth signal
         # INV-CAUSAL-005/INV-REPORT-002 already license, rather than
         # trusting rc.status alone -- closing the exact gap disclosed in
         # the prior session turn ("causal_sufficiency is populated but
         # never consulted by narrative generation").
-        elif rc.status in (RootCauseStatus.ESTABLISHED, "ESTABLISHED"):
+        else:
             from app.agent.causal_graph import build_causal_graph, derive_causal_sufficiency
             _prelim_graph = build_causal_graph(canonical, rc, evidence_ledger or [])
             _prelim_sufficiency = derive_causal_sufficiency(_prelim_graph)

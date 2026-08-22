@@ -12,8 +12,11 @@ from __future__ import annotations
 from app.agent.invariants import evaluate_all_invariants
 from app.models.agent import (
     CandidateHypothesis,
+    CanonicalFindingState,
     CapaAnalysis,
     ConditionalCapaAction,
+    EvidenceClaim,
+    EvidenceStatus,
     InvestigationPlan,
     InvestigationQuestion,
     RootCauseAnalysis,
@@ -100,4 +103,79 @@ def test_ambiguous_untargeted_question_does_not_false_positive():
     q = InvestigationQuestion(question="What is the general context?")
     plan = InvestigationPlan(questions=[q], status="QUESTIONS_GENERATED")
     state = {"root_cause": rc, "investigation_plan": plan, "evidence_requests": []}
+    assert _violations(state) == []
+
+
+# ---------------------------------------------------------------------------
+# Claim-ID grounding (CandidateHypothesis.supporting_claim_ids/
+# contradicting_claim_ids, ConditionalCapaAction.supporting_claim_ids).
+# ---------------------------------------------------------------------------
+
+def _canonical_with_one_claim():
+    claim = EvidenceClaim(claim_id="C1", text="s", source="finding", status=EvidenceStatus.REPORTED)
+    return CanonicalFindingState(raw_finding="f", observed_deviation="d", evidence_claims=[claim])
+
+
+def test_valid_supporting_claim_id_passes():
+    hyp = CandidateHypothesis(
+        id="H1", name="X", statement="s", evidence_needed="e", status="POSSIBLE", supporting_claim_ids=["C1"],
+    )
+    rc = RootCauseAnalysis(status=RootCauseStatus.NOT_ESTABLISHED, candidate_hypotheses=[hyp])
+    state = {"root_cause": rc, "investigation_plan": None, "evidence_requests": [],
+             "canonical_finding_state": _canonical_with_one_claim()}
+    assert _violations(state) == []
+
+
+def test_dangling_supporting_claim_id_rejected():
+    hyp = CandidateHypothesis(
+        id="H1", name="X", statement="s", evidence_needed="e", status="POSSIBLE",
+        supporting_claim_ids=["C99_FABRICATED"],
+    )
+    rc = RootCauseAnalysis(status=RootCauseStatus.NOT_ESTABLISHED, candidate_hypotheses=[hyp])
+    state = {"root_cause": rc, "investigation_plan": None, "evidence_requests": [],
+             "canonical_finding_state": _canonical_with_one_claim()}
+    violations = _violations(state)
+    assert len(violations) == 1
+    assert "C99_FABRICATED" in violations[0]
+
+
+def test_dangling_contradicting_claim_id_rejected():
+    hyp = CandidateHypothesis(
+        id="H1", name="X", statement="s", evidence_needed="e", status="POSSIBLE",
+        contradicting_claim_ids=["C_GHOST"],
+    )
+    rc = RootCauseAnalysis(status=RootCauseStatus.NOT_ESTABLISHED, candidate_hypotheses=[hyp])
+    state = {"root_cause": rc, "investigation_plan": None, "evidence_requests": [],
+             "canonical_finding_state": _canonical_with_one_claim()}
+    violations = _violations(state)
+    assert len(violations) == 1
+    assert "C_GHOST" in violations[0]
+
+
+def test_dangling_capa_supporting_claim_id_rejected():
+    hyp = CandidateHypothesis(id="H1", name="X", statement="s", evidence_needed="e", status="POSSIBLE")
+    rc = RootCauseAnalysis(status=RootCauseStatus.NOT_ESTABLISHED, candidate_hypotheses=[hyp])
+    capa = CapaAnalysis(status="CAPA_DRAFT_POSSIBLE", conditional_actions=[
+        ConditionalCapaAction(
+            if_cause_confirmed="If H1 is confirmed", recommended_action="Do X",
+            supporting_claim_ids=["C_NEVER_EXTRACTED"],
+        )
+    ])
+    state = {"root_cause": rc, "investigation_plan": None, "capa": capa, "evidence_requests": [],
+             "canonical_finding_state": _canonical_with_one_claim()}
+    violations = _violations(state)
+    assert len(violations) == 1
+    assert "C_NEVER_EXTRACTED" in violations[0]
+
+
+def test_no_claim_registry_yet_does_not_false_positive():
+    """No canonical_finding_state/evidence_claims populated yet (e.g. state
+    built by hand, or an early pipeline stage) -- nothing to ground claim
+    references against, so this must not fire."""
+    hyp = CandidateHypothesis(
+        id="H1", name="X", statement="s", evidence_needed="e", status="POSSIBLE",
+        supporting_claim_ids=["C1"],
+    )
+    rc = RootCauseAnalysis(status=RootCauseStatus.NOT_ESTABLISHED, candidate_hypotheses=[hyp])
+    state = {"root_cause": rc, "investigation_plan": None, "evidence_requests": []}
     assert _violations(state) == []

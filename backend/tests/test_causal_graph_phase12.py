@@ -209,9 +209,20 @@ class TestComparisonAwareQuestion:
         assert q == "Why did the recorded quantity A differ from the reference value?"
 
     def test_no_comparison_data_falls_back_to_generic_question(self):
+        # FINAL OUTPUT-QUALITY HARDENING (Part 6/7): _graph_node_why_question's
+        # fallback used to interpolate the raw node label into a stiff
+        # "Why did the following occur: X?" template verbatim -- reproduced
+        # as a real auditor-facing defect (a live-Ollama transcript
+        # rendered "Why did the following occur: journal entry reversing a
+        # Q3 revenue accrual — was posted by...", leaking the internal
+        # dash-joined subject/condition separator into the question). Fixed
+        # by reusing the SAME declarative_to_why_question/
+        # format_deviation_why_question machinery already used by
+        # analytical_validator.repair_five_why_with_mechanism for this
+        # exact problem, instead of a second parallel template.
         node = CausalGraphNode(node_id="A", node_type=CausalGraphNodeType.OBSERVED_DEVIATION, label="X occurred")
         q = _graph_node_why_question(node)
-        assert q == "Why did the following occur: X occurred?"
+        assert q == "Why X occurred?"
 
     def test_unrecognized_comparison_type_falls_back_to_generic_question(self):
         node = CausalGraphNode(
@@ -219,7 +230,7 @@ class TestComparisonAwareQuestion:
             comparison_type="NEVER_SEEN_TYPE", comparison_left="quantity A", comparison_right="reference value",
         )
         q = _graph_node_why_question(node)
-        assert q == "Why did the following occur: X occurred?"
+        assert q == "Why X occurred?"
 
     @pytest.mark.parametrize("comparison_type", [
         "MISMATCH", "EXCEEDED", "BELOW", "INCONSISTENT", "RECONCILIATION_FAILURE", "MISSING", "DUPLICATE",

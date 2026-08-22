@@ -164,6 +164,24 @@ _DECLARATIVE_PAST_VERB_RE = re.compile(
 )
 
 
+def _lower_leading_word(text: str) -> str:
+    """Lowercase a sentence-initial capital only when it's an ordinary
+    word being moved mid-question -- never a short all-caps token (an
+    acronym or a bare single-letter identifier like "X"/"H1"), where
+    lowercasing would corrupt it rather than just de-capitalizing a
+    sentence-start artifact. "A"/"I" are excluded from that protection --
+    as single letters they're indistinguishable from an acronym by case
+    alone, but as English words they are always the article/pronoun, never
+    an identifier, so they must still lowercase."""
+    if not text:
+        return text
+    m = re.match(r"^\S+", text)
+    first_word = m.group(0) if m else ""
+    if first_word.isupper() and first_word.lower() not in ("a", "i"):
+        return text
+    return text[0].lower() + text[1:]
+
+
 def declarative_to_why_question(text: str) -> str:
     """Turn a declarative VERIFIED claim (e.g. "temperature monitoring
     records for refrigerator QC-REF-02 were incomplete for three
@@ -178,14 +196,14 @@ def declarative_to_why_question(text: str) -> str:
         subject = m.group("subject").strip()
         aux = m.group("aux")
         rest = m.group("rest").strip()
-        subject_lc = subject[0].lower() + subject[1:] if subject else subject
+        subject_lc = _lower_leading_word(subject) if subject else subject
         return f"Why {aux} {subject_lc} {rest}?"
     m_past = _DECLARATIVE_PAST_VERB_RE.match(clause)
     if m_past:
         subject = m_past.group("subject").strip()
         verb = m_past.group("verb").lower()
         rest = m_past.group("rest").strip()
-        subject_lc = subject[0].lower() + subject[1:] if subject else subject
+        subject_lc = _lower_leading_word(subject) if subject else subject
         # Convert past tense verb to base form if simple rule applies
         base_verb = verb[:-1] if verb.endswith("ed") and not verb.endswith("eed") else verb
         if verb.endswith("ied"):
@@ -204,7 +222,7 @@ def declarative_to_why_question(text: str) -> str:
         }
         infinitive = _IRREG_OR_STD.get(verb, base_verb)
         return f"Why did {subject_lc} {infinitive} {rest}?"
-    return f"Why {clause[0].lower()}{clause[1:]}?"
+    return f"Why {_lower_leading_word(clause)}?"
 
 
 _PLURAL_SUBJECT_TAIL_RE = re.compile(
