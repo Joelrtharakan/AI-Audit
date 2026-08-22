@@ -505,8 +505,8 @@ def _check_five_why_reported_not_promoted(state: dict[str, Any]) -> tuple[bool, 
     if not fw or not getattr(fw, "steps", None):
         return True, None
     evidence_ledger = state.get("evidence_ledger", [])
-    reported_facts = [getattr(e, "claim", getattr(e, "text", "")) for e in evidence_ledger if str(getattr(e, "status", "")).endswith("REPORTED")]
-    verified_facts = [getattr(e, "claim", getattr(e, "text", "")) for e in evidence_ledger if str(getattr(e, "status", "")).endswith("VERIFIED")]
+    reported_facts = [getattr(e, "claim", getattr(e, "text", "")) for e in evidence_ledger if getattr(e, "status", None) == "REPORTED"]
+    verified_facts = [getattr(e, "claim", getattr(e, "text", "")) for e in evidence_ledger if getattr(e, "status", None) == "VERIFIED"]
     from app.agent.causal_guard import answer_asserts_verified_but_is_reported
     for i, step in enumerate(fw.steps):
         if answer_asserts_verified_but_is_reported(step.answer, step.status, reported_facts, verified_facts):
@@ -754,7 +754,7 @@ def _check_missing_evidence_not_non_performance(state: dict[str, Any]) -> tuple[
     canonical = state.get("canonical_finding_state")
     if not canonical or getattr(canonical, "semantic_type", None) != "MISSING_RECORD":
         return True, None
-    verified_facts = [e.claim for e in state.get("evidence_ledger", []) if str(getattr(e, "status", "")).endswith("VERIFIED")]
+    verified_facts = [e.claim for e in state.get("evidence_ledger", []) if getattr(e, "status", None) == "VERIFIED"]
     has_verified_non_performance = any(_NON_PERFORMANCE_ASSERTION_RE.search(f) for f in verified_facts)
     if has_verified_non_performance:
         return True, None
@@ -800,7 +800,7 @@ def _check_downstream_action_not_control_failure(state: dict[str, Any]) -> tuple
     canonical = state.get("canonical_finding_state")
     if not canonical or not getattr(canonical, "downstream_action_present", False):
         return True, None
-    verified_facts = [e.claim for e in state.get("evidence_ledger", []) if str(getattr(e, "status", "")).endswith("VERIFIED")]
+    verified_facts = [e.claim for e in state.get("evidence_ledger", []) if getattr(e, "status", None) == "VERIFIED"]
     if any(_CONTROL_FAILURE_ASSERTION_RE.search(f) for f in verified_facts):
         return True, None
     impact = state.get("impact_assessment")
@@ -1019,6 +1019,351 @@ def _check_investigation_plan_has_evidence(state: dict[str, Any]) -> tuple[bool,
     for q in inv.questions:
         if not (getattr(q, "evidence", None) or getattr(q, "evidence_required", None)):
             return False, f"Investigation question {q.question!r} has no evidence to examine"
+    return True, None
+
+
+def _check_investigation_question_traceability(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-012 (Phase 14 Section 18): a graph-grounded investigation
+    question's target_node_id/target_edge_id/source_node_id must refer to a
+    real node/edge that actually exists in this run's causal-uncertainty
+    graph or causal graph -- never a dangling or fabricated reference. Only
+    applies to questions that actually populate these fields (the honest
+    "came from the causal-graph path" signal documented on
+    InvestigationQuestion); a question with none of them set is not held to
+    this bar, it is simply not claiming graph grounding."""
+    inv = state.get("investigation_plan")
+    if not inv or not getattr(inv, "questions", None):
+        return True, None
+
+    node_ids: set[str] = set()
+    edge_ids: set[str] = set()
+    for graph in (state.get("causal_uncertainty_graph"), state.get("causal_graph")):
+        if graph is None:
+            continue
+        node_ids.update(n.node_id for n in getattr(graph, "nodes", None) or [])
+        edge_ids.update(e.edge_id for e in getattr(graph, "edges", None) or [])
+
+    for q in inv.questions:
+        claims_graph_grounding = bool(
+            getattr(q, "target_node_id", None) or getattr(q, "target_edge_id", None) or getattr(q, "source_node_id", None)
+        )
+        if not claims_graph_grounding:
+            continue
+        if not node_ids and not edge_ids:
+            # This run never built any causal-uncertainty/causal graph at
+            # all, yet a question claims a graph-grounded reference -- the
+            # reference cannot be real.
+            return False, (
+                f"Investigation question {q.question!r} claims causal-graph grounding "
+                "(target_node_id/target_edge_id/source_node_id set) but no causal graph exists in this run"
+            )
+        for field_name in ("target_node_id", "source_node_id"):
+            ref = getattr(q, field_name, None)
+            if ref and ref not in node_ids:
+                return False, (
+                    f"Investigation question {q.question!r} has {field_name}={ref!r}, "
+                    "which does not exist in this run's causal graph — dangling reference"
+                )
+        ref = getattr(q, "target_edge_id", None)
+        if ref and ref not in edge_ids:
+            return False, (
+                f"Investigation question {q.question!r} has target_edge_id={ref!r}, "
+                "which does not exist in this run's causal graph — dangling reference"
+            )
+    return True, None
+
+
+def _check_investigation_plan_status_consistency(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-013 (Phase 15 Section 9): InvestigationPlan.status is a
+    machine-readable claim about the plan's contents -- NO_ACTIONABLE_
+    UNCERTAINTY asserts there is nothing to investigate, which is only true
+    if the plan genuinely carries no questions. A status/content mismatch
+    (in either direction) means the claim cannot be trusted and must fail
+    closed rather than let a caller believe an unverified claim."""
+    inv = state.get("investigation_plan")
+    if not inv:
+        return True, None
+    status = getattr(inv, "status", "QUESTIONS_GENERATED")
+    has_questions = bool(getattr(inv, "questions", None))
+    # Only the direction this phase actually produces is enforced: a plan
+    # that explicitly CLAIMS no actionable uncertainty must not also carry
+    # questions. The converse (QUESTIONS_GENERATED with zero questions) is
+    # deliberately NOT flagged here -- "QUESTIONS_GENERATED" is this field's
+    # default value, and countless existing unit tests across this suite
+    # manually construct a bare InvestigationPlan() for unrelated
+    # assertions; treating that default as an affirmative claim would turn
+    # this into a blanket "every hand-built fixture must populate
+    # questions" rule, which is not what this invariant is for.
+    if status == "NO_ACTIONABLE_UNCERTAINTY" and has_questions:
+        return False, "InvestigationPlan.status=NO_ACTIONABLE_UNCERTAINTY but questions were generated"
+    return True, None
+
+
+def _check_no_actionable_uncertainty_matches_graph(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-019 (Phase 16 Section 27): a plan claiming
+    NO_ACTIONABLE_UNCERTAINTY must actually be consistent with this run's
+    causal_uncertainty_graph -- if the graph itself still carries an
+    UNRESOLVED node, the claim that there is nothing left to investigate is
+    false and must fail closed rather than be trusted."""
+    inv = state.get("investigation_plan")
+    if not inv:
+        return True, None
+    is_no_actionable = getattr(inv, "status", None) == "NO_ACTIONABLE_UNCERTAINTY" or getattr(inv, "planner_mode", None) == "NO_ACTIONABLE_UNCERTAINTY"
+    if not is_no_actionable:
+        return True, None
+    ug = state.get("causal_uncertainty_graph")
+    if ug is None:
+        return True, None
+    unresolved = [n for n in getattr(ug, "nodes", None) or [] if str(getattr(n.node_type, "value", n.node_type)) == "UNRESOLVED"]
+    if unresolved:
+        return False, (
+            f"InvestigationPlan claims NO_ACTIONABLE_UNCERTAINTY but the causal_uncertainty_graph "
+            f"still carries {len(unresolved)} unresolved node(s): {[n.node_id for n in unresolved]}"
+        )
+    return True, None
+
+
+def _check_stage_b_question_has_target(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-021 (Phase 17): every Stage-B question must resolve to a
+    real causal/semantic target -- target_node_id or target_hypothesis_ids
+    must be populated (Stage B never emits a generic question with
+    neither)."""
+    plan = state.get("causal_investigation_plan")
+    if not plan or not getattr(plan, "questions", None):
+        return True, None
+    for q in plan.questions:
+        if getattr(q, "planner_stage", None) != "STAGE_B":
+            continue
+        if not (getattr(q, "target_node_id", None) or getattr(q, "target_hypothesis_ids", None)):
+            return False, f"Stage-B question {q.question!r} has no causal/semantic target"
+    return True, None
+
+
+def _check_stage_b_question_has_evidence_target(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-022 (Phase 17): every Stage-B question must declare what
+    evidence would resolve it."""
+    plan = state.get("causal_investigation_plan")
+    if not plan or not getattr(plan, "questions", None):
+        return True, None
+    for q in plan.questions:
+        if getattr(q, "planner_stage", None) != "STAGE_B":
+            continue
+        if not (getattr(q, "evidence", None) or getattr(q, "evidence_required", None)):
+            return False, f"Stage-B question {q.question!r} has no evidence-resolution target"
+    return True, None
+
+
+def _check_stage_b_preserves_competing_hypotheses(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-023 (Phase 17): when root_cause carries 2+ hypotheses
+    that are neither SUPPORTED nor REFUTED (live, unresolved), Stage B's
+    plan must not silently drop any of them from its questions' combined
+    target_hypothesis_ids -- either they are all represented, or the plan
+    is empty (a genuine NO_ACTIONABLE_UNCERTAINTY judgment), never a
+    partial subset standing in as "the" answer."""
+    plan = state.get("causal_investigation_plan")
+    rc = state.get("root_cause")
+    if not plan or not rc:
+        return True, None
+    if getattr(plan, "planner_stage", None) != "STAGE_B":
+        return True, None
+    live_ids = {
+        str(getattr(h, "id", ""))
+        for h in getattr(rc, "candidate_hypotheses", None) or []
+        if str(getattr(h, "status", "")) not in ("SUPPORTED", "REFUTED")
+    }
+    if len(live_ids) < 2:
+        return True, None
+    if not plan.questions:
+        # A genuine "nothing actionable" judgment is legitimate even with
+        # live hypotheses only if planner_mode says so explicitly.
+        if getattr(plan, "planner_mode", None) == "NO_ACTIONABLE_UNCERTAINTY":
+            return True, None
+        return False, f"Stage B has {len(live_ids)} live competing hypotheses but produced zero questions"
+    covered: set[str] = set()
+    for q in plan.questions:
+        covered.update(str(x) for x in (getattr(q, "target_hypothesis_ids", None) or []))
+    missing = live_ids - covered
+    if missing:
+        return False, f"Stage B silently dropped competing hypothesis id(s) {sorted(missing)} from its questions"
+    return True, None
+
+
+def _check_investigation_history_monotonic(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-024 (Phase 18 Section 6/29): causal_graph_version and
+    iteration_id in investigation_history must be strictly monotonically
+    non-decreasing -- a version going backwards means graph provenance was
+    lost or the history was corrupted, and must fail closed."""
+    history = state.get("investigation_history")
+    if not history:
+        return True, None
+    prev_version = -1
+    prev_iter = -1
+    for rec in history:
+        version = getattr(rec, "causal_graph_version", None)
+        it = getattr(rec, "iteration_id", None)
+        if version is None or it is None:
+            return False, "investigation_history record missing causal_graph_version/iteration_id"
+        if version <= prev_version:
+            return False, f"causal_graph_version did not increase (iteration {it}: {version} <= {prev_version})"
+        if it < prev_iter:
+            return False, f"investigation iteration_id went backwards ({it} < {prev_iter})"
+        prev_version, prev_iter = version, it
+    return True, None
+
+
+def _check_no_actionable_uncertainty_consistent_with_history(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-025 (Phase 18 Section 16/29): NO_ACTIONABLE_UNCERTAINTY
+    must not be emitted by Stage B while its own iteration record still
+    lists unresolved targets -- the two fields on the SAME structural
+    output must agree, or the claim is untrustworthy."""
+    plan = state.get("causal_investigation_plan")
+    history = state.get("investigation_history")
+    if not plan or not history:
+        return True, None
+    if getattr(plan, "planner_mode", None) != "NO_ACTIONABLE_UNCERTAINTY":
+        return True, None
+    last = history[-1]
+    unresolved_after = getattr(last, "unresolved_targets_after", None) or []
+    if unresolved_after:
+        return False, (
+            f"Stage B emitted NO_ACTIONABLE_UNCERTAINTY but its own iteration record still lists "
+            f"unresolved targets: {unresolved_after}"
+        )
+    return True, None
+
+
+def _check_evidence_has_provenance(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-026 (Phase 19 Section 28): any EvidenceItem acquired
+    through the Phase 19 adaptive loop (identified by having an
+    evidence_id set at all -- pre-Phase-19 evidence never populates that
+    field) must carry a request_id linking it back to the EvidenceRequest
+    that produced it. An evidence item with an id but no request
+    provenance is untraceable and must fail closed."""
+    ledger = state.get("evidence_ledger")
+    if not ledger:
+        return True, None
+    for item in ledger:
+        evidence_id = getattr(item, "evidence_id", None)
+        if not evidence_id:
+            continue  # not a Phase-19-acquired item; not held to this bar
+        if not getattr(item, "request_id", None):
+            return False, f"EvidenceItem {evidence_id!r} has no request_id — missing acquisition provenance"
+    return True, None
+
+
+def _check_hypothesis_history_references_real_evidence(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-027 (Phase 19 Section 28): every evidence_id a
+    HypothesisStatusChange cites as having caused the transition must
+    actually exist in the evidence_ledger — a status change cannot be
+    justified by a reference to evidence that isn't there."""
+    history = state.get("hypothesis_history")
+    if not history:
+        return True, None
+    ledger_ids = {getattr(e, "evidence_id", None) for e in (state.get("evidence_ledger") or [])}
+    ledger_ids.discard(None)
+    for change in history:
+        for eid in getattr(change, "changed_by_evidence_ids", None) or []:
+            if eid not in ledger_ids:
+                return False, (
+                    f"HypothesisStatusChange for {change.hypothesis_id} cites evidence_id {eid!r}, "
+                    "which does not exist in evidence_ledger"
+                )
+    return True, None
+
+
+def _check_single_epistemic_authority(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-028 (Phase 20 Part B/C): a hypothesis's CURRENT status
+    must match the LAST status the authoritative evidence-reconciliation
+    evaluator (app.agent.nodes.evidence_acquisition.
+    reconcile_hypothesis_from_evidence, recorded in hypothesis_history)
+    actually decided for it, whenever both exist. A mismatch means some
+    OTHER code path silently overwrote the authoritative decision after
+    the fact -- exactly the "second epistemic authority" defect this
+    invariant exists to catch."""
+    history = state.get("hypothesis_history")
+    rc = state.get("root_cause")
+    if not history or not rc:
+        return True, None
+    last_by_id: dict[str, str] = {}
+    for change in history:
+        last_by_id[change.hypothesis_id] = change.new_status
+    for h in getattr(rc, "candidate_hypotheses", None) or []:
+        hid = str(getattr(h, "id", ""))
+        expected = last_by_id.get(hid)
+        if expected is not None and str(getattr(h, "status", "")) != expected:
+            return False, (
+                f"Hypothesis {hid} status is {getattr(h, 'status', None)!r} but the authoritative evaluator "
+                f"last decided {expected!r} — a second writer silently overrode the epistemic authority"
+            )
+    return True, None
+
+
+def _check_evidence_claims_have_provenance(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-INVEST-029 (Phase 21 Part C/Z): every EvidenceClaim in
+    evidence_claims must cite at least one real evidence_ledger entry — a
+    claim with no provenance, or a dangling evidence_id, must never reach
+    runtime state (app.agent.evidence_interpreter fails closed and drops
+    such claims before they are appended; this invariant is the checkable
+    guarantee that no other code path can reintroduce one)."""
+    claims = state.get("evidence_claims")
+    if not claims:
+        return True, None
+    ledger_ids = {getattr(e, "evidence_id", None) for e in (state.get("evidence_ledger") or [])}
+    ledger_ids.discard(None)
+    for claim in claims:
+        evidence_ids = getattr(claim, "evidence_ids", None) or []
+        if not evidence_ids:
+            return False, f"EvidenceClaim {getattr(claim, 'claim_id', None)!r} has no evidence_ids — missing provenance"
+        for eid in evidence_ids:
+            if eid not in ledger_ids:
+                return False, (
+                    f"EvidenceClaim {getattr(claim, 'claim_id', None)!r} cites evidence_id {eid!r}, "
+                    "which does not exist in evidence_ledger"
+                )
+    return True, None
+
+
+def _check_impact_never_verified_without_verified_evidence(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-IMPACT-002 (Phase 22 Part I): ImpactAssessment.status ==
+    IMPACT_VERIFIED must never appear unless at least one VERIFIED item
+    exists in the evidence ledger to ground it -- a forward-looking guard
+    against any future code path asserting impact is proven merely because
+    a hypothesis exists or an LLM narrative says so (this codebase
+    currently never assigns IMPACT_VERIFIED at all; this invariant keeps
+    it that way unless real objective evidence backs it)."""
+    impact = state.get("impact_assessment")
+    if not impact or getattr(impact, "status", None) != "IMPACT_VERIFIED":
+        return True, None
+    evidence_ledger = state.get("evidence_ledger") or []
+    # Phase 24: exact equality, not `str(x).endswith("VERIFIED")` -- that
+    # substring check also matches "EvidenceStatus.UNVERIFIED"
+    # ("UNVERIFIED".endswith("VERIFIED") is True in Python), which would
+    # have let UNVERIFIED evidence satisfy this "has real proof" check.
+    has_verified = any(getattr(e, "status", None) == "VERIFIED" for e in evidence_ledger)
+    if not has_verified:
+        return False, "ImpactAssessment.status is IMPACT_VERIFIED but no VERIFIED evidence exists to ground it"
+    return True, None
+
+
+def _check_capa_excludes_refuted_hypotheses(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAPA-001 (Phase 22 Part G): a CAPA conditional action must never
+    be conditioned on ("IF ... is confirmed") a hypothesis the authoritative
+    evaluator has already REFUTED -- that question is already closed, not
+    still open for confirmation."""
+    capa = state.get("capa_analysis")
+    rc = state.get("root_cause")
+    if not capa or not rc:
+        return True, None
+    refuted_ids = {
+        str(getattr(h, "id", "")) for h in (getattr(rc, "candidate_hypotheses", None) or [])
+        if str(getattr(h, "status", "")) == "REFUTED"
+    }
+    if not refuted_ids:
+        return True, None
+    for action in getattr(capa, "conditional_actions", None) or []:
+        hid = getattr(action, "root_cause_hypothesis_id", None)
+        if hid and hid in refuted_ids:
+            return False, f"CAPA conditional action is conditioned on {hid!r}, which is REFUTED"
     return True, None
 
 
@@ -1284,6 +1629,16 @@ def _check_causal_status_not_unknown_downstream(state: dict[str, Any]) -> tuple[
     if not leading or not leading.statement:
         return True, None
     for step in fw.steps:
+        # Phase 13: a graph-derived EVIDENCE_BOUNDARY marker step legitimately
+        # names the already-established mechanism it is asking "why" about
+        # (there is no deeper node to reference instead) -- that is the
+        # correct question for "what caused the established mechanism
+        # itself", not a restatement of the mechanism's own status. Only a
+        # step with no such structural boundary marking can be the real
+        # defect this invariant exists to catch (a prose-generated step that
+        # actually mislabels the SAME proposition as UNKNOWN).
+        if getattr(step, "boundary_status", None) == "EVIDENCE_BOUNDARY":
+            continue
         if step.status == "UNKNOWN" and _five_why_step_matches_statement(step, leading.statement):
             return False, (
                 f"Root cause is {getattr(rc.status, 'value', rc.status)} via hypothesis {leading.id}, "
@@ -1304,6 +1659,12 @@ def _check_causal_five_why_consistency(state: dict[str, Any]) -> tuple[bool, str
         if getattr(h, "status", "") not in ("SUPPORTED", "ESTABLISHED") or not h.statement:
             continue
         for step in fw.steps:
+            # Phase 13: see the matching comment in
+            # _check_causal_status_not_unknown_downstream -- a graph-derived
+            # EVIDENCE_BOUNDARY marker step naming an established mechanism
+            # is asking about a deeper cause, not restating the mechanism.
+            if getattr(step, "boundary_status", None) == "EVIDENCE_BOUNDARY":
+                continue
             if step.status == "UNKNOWN" and _five_why_step_matches_statement(step, h.statement):
                 return False, (
                     f"Hypothesis {h.id} is {h.status} but 5-Why step {step.question!r} "
@@ -1870,7 +2231,7 @@ def _check_causal_level_consistency(state: dict[str, Any]) -> tuple[bool, str | 
     verified_claims = {
         getattr(e, "claim", getattr(e, "text", "")).strip().lower()
         for e in evidence_ledger
-        if str(getattr(e, "status", "")).endswith("VERIFIED")
+        if getattr(e, "status", None) == "VERIFIED"
     }
 
     # 1. Check that a genuine verified immediate mechanism (distinct from the primary observation) is preserved
@@ -1878,8 +2239,22 @@ def _check_causal_level_consistency(state: dict[str, Any]) -> tuple[bool, str | 
     observed_dev = (getattr(canonical, "observed_deviation", "") or getattr(canonical, "deviation", "") or "").strip().lower()
     if not has_conflicts and getattr(canonical, "immediate_mechanism_status", None) == "VERIFIED" and getattr(canonical, "immediate_mechanism", None):
         mech_stmt = canonical.immediate_mechanism.strip().lower()
+        # Phase 13: "distinct from observation" means substantively distinct,
+        # not merely a different string -- `observed_deviation` is a
+        # semantic-subject-normalized label (e.g. "Inspection execution —
+        # missed") while `immediate_mechanism` is the raw stated-mechanism
+        # sentence (e.g. "Technician missed the inspection."); these
+        # routinely restate the exact same fact in different phrasing. Uses
+        # the same majority-word-overlap equivalence test as
+        # app.agent.causal_graph.is_graph_authoritative_for_five_why's
+        # matching check, so both modules agree on what counts as "the same
+        # fact" restated versus genuinely new mechanism-level information.
+        from app.services.text_grounding import significant_words
+        mech_words = significant_words(mech_stmt)
+        dev_words = significant_words(observed_dev)
+        is_distinct_mechanism = not (mech_words and dev_words and len(mech_words & dev_words) >= max(2, len(mech_words) // 2))
         # Only enforce when mechanism is distinct from observation (multi-level causal depth)
-        if observed_dev and mech_stmt != observed_dev and len(evidence_ledger) > 1:
+        if observed_dev and is_distinct_mechanism and len(evidence_ledger) > 1:
             if fw and getattr(fw, "steps", None) and len(fw.steps) >= 1:
                 step_statuses = [str(getattr(s, "status", "")) for s in fw.steps]
                 if "VERIFIED" not in step_statuses and "SUPPORTED" not in step_statuses:
@@ -1902,7 +2277,7 @@ def _check_causal_level_consistency(state: dict[str, Any]) -> tuple[bool, str | 
         if sem_graph and getattr(sem_graph, "nodes", None):
             known_reqs = [
                 n.label.lower() for n in sem_graph.nodes
-                if getattr(n, "node_type", None) == "REQUIREMENT" and str(getattr(n, "epistemic_status", "")).endswith("VERIFIED")
+                if getattr(n, "node_type", None) == "REQUIREMENT" and getattr(n, "epistemic_status", None) == "VERIFIED"
             ]
             if known_reqs:
                 for q in inv.questions:
@@ -1918,7 +2293,8 @@ def _check_normative_compliance_separation(state: dict[str, Any]) -> tuple[bool,
 
     Enforces that:
       1. A verified normative compliance violation does not automatically assert root cause.
-      2. Compliance relations (e.g. VIOLATES, OUTSIDE_REQUIREMENT) are not conflated with causal relations (e.g. EXPLAINS, RESULTS_IN).
+      2. Compliance relations (VIOLATES/SATISFIES/OUTSIDE_REQUIREMENT) are NOT used as
+         causal edges in CausalRelationship objects — normative and causal graphs are separate.
       3. Attributes are not promoted to entities.
       4. Known requirements are preserved and not investigated again.
     """
@@ -1926,14 +2302,662 @@ def _check_normative_compliance_separation(state: dict[str, Any]) -> tuple[bool,
     if not canonical:
         return True, None
 
-    sem_graph = getattr(canonical, "semantic_graph", None)
-    if sem_graph and getattr(sem_graph, "edges", None):
-        for e in sem_graph.edges:
-            rel = str(getattr(e, "relation_type", ""))
-            # Compliance relations must connect to REQUIREMENT or ATTRIBUTE nodes
-            if rel in ("VIOLATES", "SATISFIES", "REQUIRES_ATTRIBUTE", "LACKS_REQUIRED_ATTRIBUTE"):
-                pass
+    from app.models.agent import SemanticRelationType
+    normative_types = SemanticRelationType.normative_relation_types()
 
+    # CHECK 1: causal relationships must not use normative relation types
+    causal_rels = state.get("causal_relationships") or []
+    for cr in causal_rels:
+        cr_type = str(getattr(cr, "relation_type", ""))
+        if cr_type in normative_types:
+            return False, (
+                f"CausalRelationship uses normative relation type {cr_type!r}; "
+                "normative relations are never causal"
+            )
+
+    return True, None
+
+
+
+# ============================================================
+# INV-ROLE-002 through INV-ROLE-010: Semantic Role Invariants
+# ============================================================
+
+
+def _check_requirement_not_affected_object(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-ROLE-002: A SemanticNodeType.REQUIREMENT node must never appear as the
+    value of affected_object or finding_subject. Requirements are normative
+    constructs; the affected_object must be the entity, record, or process that
+    instantiated the requirement violation — not the requirement itself."""
+    canonical = state.get("canonical_finding_state")
+    if not canonical:
+        return True, None
+    sem_graph = getattr(canonical, "semantic_graph", None)
+    if not sem_graph:
+        return True, None
+    req_labels = {
+        n.label.strip().lower()
+        for n in (getattr(sem_graph, "nodes", None) or [])
+        if str(getattr(n, "node_type", "")) == "REQUIREMENT"
+    }
+    for field in ("affected_object", "finding_subject"):
+        val = (getattr(canonical, field, None) or "").strip().lower()
+        if val and val in req_labels:
+            return False, (
+                f"canonical.{field}={val!r} is a REQUIREMENT node label, not an entity. "
+                "Requirements govern entities; they are not the entity itself."
+            )
+    impact = state.get("impact_assessment")
+    if impact:
+        val = (getattr(impact, "affected_object", None) or "").strip().lower()
+        if val and val in req_labels:
+            return False, (
+                f"impact.affected_object={val!r} is a REQUIREMENT node label, not an entity."
+            )
+    return True, None
+
+
+def _check_attribute_not_affected_object(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-ROLE-003: A SemanticNodeType.ATTRIBUTE node must never appear as the
+    value of affected_object or finding_subject. Attributes describe properties
+    of entities; they are not the entity being investigated."""
+    canonical = state.get("canonical_finding_state")
+    if not canonical:
+        return True, None
+    sem_graph = getattr(canonical, "semantic_graph", None)
+    if not sem_graph:
+        return True, None
+    attr_labels = {
+        n.label.strip().lower()
+        for n in (getattr(sem_graph, "nodes", None) or [])
+        if str(getattr(n, "node_type", "")) == "ATTRIBUTE"
+    }
+    for field in ("affected_object", "finding_subject"):
+        val = (getattr(canonical, field, None) or "").strip().lower()
+        if val and val in attr_labels:
+            return False, (
+                f"canonical.{field}={val!r} is an ATTRIBUTE node label, not an entity. "
+                "Attributes describe properties; they are not the investigated entity."
+            )
+    return True, None
+
+
+def _check_normative_relations_not_used_as_causal(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-ROLE-004: No SemanticRelationType in the normative set
+    {VIOLATES, SATISFIES, REQUIRES, GOVERNED_BY, SUBJECT_TO, CONFORMS_TO, GOVERNS,
+    REQUIRES_ATTRIBUTE, LACKS_REQUIRED_ATTRIBUTE, NOT_PERFORMED_AS_REQUIRED,
+    NOT_DEMONSTRATED, INCONSISTENT_WITH, WITHIN_REQUIREMENT, OUTSIDE_REQUIREMENT}
+    may appear as the relation_type of a CausalRelationship. Normative and causal
+    graphs are structurally separate — no cross-contamination is permitted."""
+    from app.models.agent import SemanticRelationType
+    normative_types = SemanticRelationType.normative_relation_types()
+    causal_rels = state.get("causal_relationships") or []
+    for cr in causal_rels:
+        cr_type = str(getattr(cr, "relation_type", ""))
+        if cr_type in normative_types:
+            return False, (
+                f"CausalRelationship has normative relation_type {cr_type!r}; "
+                "causal relationships must use causal edge types only"
+            )
+    # Also check root_cause narrative for overt normative-used-as-causal language
+    rc = state.get("root_cause")
+    if rc:
+        narrative = getattr(rc, "narrative", "") or ""
+        # Pattern: "the violation of X caused Y" — normative event presented as causal agent
+        if re.search(r"\bthe\s+(?:violation|breach|noncompliance|non-compliance)\s+of\s+\S+.{0,40}?\b(?:caused?|led\s+to|resulted\s+in|triggered)\b", narrative, re.IGNORECASE):
+            return False, (
+                "Root cause narrative presents a normative violation as a causal agent "
+                "(e.g. 'the violation of X caused Y'); normative facts constrain the investigation, "
+                "they are not causal mechanisms"
+            )
+    return True, None
+
+
+# Structural pattern that identifies synthetic process names constructed from
+# topic_word + generic suffix. These are created by semantic_subject.py pattern
+# branches and must not appear in affected_process unless a PROCESS node
+# corroborates them in the semantic graph.
+_SYNTHETIC_PROCESS_SUFFIX_RE = re.compile(
+    r"\b(?:operational\s+control|scheduling\s+and\s+deadline\s+control|"
+    r"execution\s+control|change\s+control|administration\s+control|"
+    r"management\s+control|compliance\s+control|review\s+control|"
+    r"monitoring\s+control|oversight\s+control)s?\b",
+    re.IGNORECASE,
+)
+
+
+def _check_affected_process_not_synthetic(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-ROLE-005: affected_process must not be a synthetic process label without a corroborating node."""
+    canonical = state.get("canonical_finding_state")
+    if not canonical:
+        return True, None
+    proc = getattr(canonical, "affected_process", None) or ""
+    if proc in ("", "UNKNOWN", "NOT_ESTABLISHED", "UNRESOLVED", "Operational process"):
+        return True, None
+    if not _SYNTHETIC_PROCESS_SUFFIX_RE.search(proc):
+        return True, None
+    sem_graph = getattr(canonical, "semantic_graph", None)
+    if sem_graph:
+        process_labels = {
+            n.label.strip().lower()
+            for n in (getattr(sem_graph, "nodes", None) or [])
+            if str(getattr(n, "node_type", "")) in ("PROCESS", "CONTROL", "SemanticNodeType.PROCESS", "SemanticNodeType.CONTROL")
+        }
+        if proc.strip().lower() in process_labels:
+            return True, None
+    return False, f"affected_process={proc!r} is a synthetic process label with no corroborating PROCESS/CONTROL node in the semantic graph"
+
+
+def _check_immediate_action_grounding(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-ROLE-006: Immediate actions must not introduce operational context
+    (equipment, roles, systems, periods, locations) that is absent from the
+    canonical finding state's verified evidence."""
+    canonical = state.get("canonical_finding_state")
+    if not canonical:
+        return True, None
+    capa = state.get("capa_analysis")
+    if not capa:
+        return True, None
+    from app.agent.grounding_guard import build_source_text, ungrounded_entities
+    evidence_ledger = state.get("evidence_ledger", [])
+    source_text = build_source_text(
+        getattr(canonical, "raw_finding", ""),
+        evidence_ledger,
+        [],
+    )
+    immediate_actions = getattr(capa, "immediate_actions", None) or []
+    for action in immediate_actions:
+        text = getattr(action, "action", None) or getattr(action, "description", None) or ""
+        violations = ungrounded_entities(text, source_text)
+        if violations:
+            return False, (
+                f"Immediate action introduces ungrounded operational context {violations!r}: {text!r}"
+            )
+    return True, None
+
+
+def _check_verified_req_not_reinvestigated(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-ROLE-007: A requirement verified in the semantic graph must not be re-investigated."""
+    canonical = state.get("canonical_finding_state")
+    if not canonical:
+        return True, None
+    sem_graph = getattr(canonical, "semantic_graph", None)
+    if not sem_graph:
+        return True, None
+    inv = state.get("investigation_plan")
+    if not inv or not getattr(inv, "questions", None):
+        return True, None
+    verified_req_labels = [
+        n.label.strip().lower()
+        for n in (getattr(sem_graph, "nodes", None) or [])
+        if str(getattr(n, "node_type", "")) == "REQUIREMENT"
+        and getattr(n, "epistemic_status", None) == "VERIFIED"
+    ]
+    for req_label in verified_req_labels:
+        req_words = {w for w in req_label.split() if len(w) > 3}
+        if len(req_words) < 2:
+            continue
+        for q in inv.questions:
+            q_text = (getattr(q, "question", "") or "").lower()
+            if f"which approved procedure and specific requirement were applicable to {req_label}" in q_text:
+                return False, f"Investigation question re-asks for verified requirement {req_label!r}"
+    return True, None
+
+
+def _check_affected_object_admissible_node_type(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-ROLE-009: affected_object must reference an admissible node type."""
+    canonical = state.get("canonical_finding_state")
+    if not canonical:
+        return True, None
+    val = (getattr(canonical, "affected_object", None) or "").strip()
+    if not val or val.upper().startswith(("UNKNOWN", "UNRESOLVED")):
+        return True, None
+    sem_graph = getattr(canonical, "semantic_graph", None)
+    if not sem_graph:
+        return True, None
+    _ADMISSIBLE = {"ENTITY", "RECORD", "ACTOR", "CONTROL", "PROCESS", "MEASUREMENT", "EVENT", "STATE", "OBSERVATION", "ROLE", "EVIDENCE"}
+    node_map = {}
+    for n in (getattr(sem_graph, "nodes", None) or []):
+        nt = getattr(n, "node_type", None)
+        nt_val = getattr(nt, "value", str(nt)).split(".")[-1]
+        node_map[n.label.strip().lower()] = nt_val
+    val_lower = val.strip().lower()
+    if val_lower in node_map:
+        node_type = node_map[val_lower]
+        if node_type not in _ADMISSIBLE:
+            return False, (
+                f"affected_object={val!r} maps to SemanticNodeType.{node_type} which is not "
+                f"admissible for affected_object"
+            )
+    return True, None
+
+
+def _check_all_report_concepts_traced(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-ROLE-010: Traceability completeness for primary output fields."""
+    report = state.get("report")
+    if not report:
+        return True, None
+    matrix = getattr(report, "semantic_traceability", None)
+    if not matrix:
+        return True, None
+    if getattr(matrix, "untraced_concepts", None):
+        return False, f"Untraced concepts in report output: {matrix.untraced_concepts}"
+    return True, None
+
+
+# ============================================================
+# INV-CAUSAL-001 through INV-CAUSAL-004: Real Runtime CausalGraph Invariants
+# (Phase 3 — checks the ACTUAL state["causal_graph"] populated by
+# app.agent.causal_graph.build_causal_graph, not the always-empty
+# state["causal_relationships"] key INV-ROLE-004/_score_causal_validity
+# check — see Remaining Limitations in the Phase 2 report for that gap.)
+# ============================================================
+
+
+def _check_causal_edge_evidence_licensing(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-001: A VERIFIED causal graph edge must carry non-empty
+    evidence_ids OR reference a hypothesis with objective provenance —
+    an edge cannot claim VERIFIED status while citing zero evidence."""
+    from app.models.agent import CausalGraphEdgeStatus, EpistemicSource
+    cg = state.get("causal_graph")
+    if not cg or not getattr(cg, "edges", None):
+        return True, None
+    for e in cg.edges:
+        if e.status == CausalGraphEdgeStatus.VERIFIED:
+            if not e.evidence_ids and e.provenance != EpistemicSource.OBJECTIVE_RECORD:
+                return False, (
+                    f"CausalGraphEdge {e.edge_id} claims VERIFIED status with no evidence_ids "
+                    f"and provenance={e.provenance!r} (not OBJECTIVE_RECORD)"
+                )
+    return True, None
+
+
+def _check_causal_edge_no_self_loop(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-002: A causal edge's source and target must be distinct nodes —
+    a self-loop is never a valid causal transition (Section 14: source != target)."""
+    cg = state.get("causal_graph")
+    if not cg or not getattr(cg, "edges", None):
+        return True, None
+    for e in cg.edges:
+        if e.source_node_id == e.target_node_id:
+            return False, f"CausalGraphEdge {e.edge_id} is a self-loop ({e.source_node_id})"
+    return True, None
+
+
+def _check_causal_graph_acyclic(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CGRAPH-008 (Phase 5 Section 3): the causal graph must be a DAG.
+    A causal loop (X causes Y causes X) is never domain-independently valid —
+    detected via a plain graph traversal (DFS cycle detection), not by
+    string comparison or domain knowledge."""
+    cg = state.get("causal_graph")
+    if not cg or not getattr(cg, "edges", None):
+        return True, None
+    adjacency: dict[str, list[str]] = {}
+    for e in cg.edges:
+        adjacency.setdefault(e.source_node_id, []).append(e.target_node_id)
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {n.node_id: WHITE for n in cg.nodes}
+
+    def _dfs(node_id: str, path: list[str]) -> str | None:
+        color[node_id] = GRAY
+        for neighbor in adjacency.get(node_id, []):
+            if color.get(neighbor, WHITE) == GRAY:
+                return " -> ".join(path + [neighbor])
+            if color.get(neighbor, WHITE) == WHITE:
+                cycle = _dfs(neighbor, path + [neighbor])
+                if cycle:
+                    return cycle
+        color[node_id] = BLACK
+        return None
+
+    for node in cg.nodes:
+        if color[node.node_id] == WHITE:
+            cycle = _dfs(node.node_id, [node.node_id])
+            if cycle:
+                return False, f"Causal graph contains a cycle: {cycle}"
+    return True, None
+
+
+def _check_causal_edge_not_normative(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-003: A CausalGraphEdge's relation_type must never be one of
+    the normative CausalEdgeType-adjacent relations — the graph builder only
+    ever emits RESULTS_IN, but this guards against any future regression
+    that starts deriving causal edges from normative semantic relations."""
+    cg = state.get("causal_graph")
+    if not cg or not getattr(cg, "edges", None):
+        return True, None
+    _NON_CAUSAL_EDGE_TYPES = {"REQUIRES", "ASSOCIATED_WITH"}
+    for e in cg.edges:
+        rel = str(getattr(e.relation_type, "value", e.relation_type))
+        if rel in _NON_CAUSAL_EDGE_TYPES:
+            return False, (
+                f"CausalGraphEdge {e.edge_id} uses non-causal relation_type {rel!r}; "
+                "only genuine causal edge types (e.g. RESULTS_IN) may appear in the causal graph"
+            )
+    return True, None
+
+
+def _check_five_why_causal_edge_exists(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-004: If a FiveWhyStep declares a causal_edge_id, that edge
+    must actually exist in state["causal_graph"] — a step must never
+    reference a fabricated or stale edge ID."""
+    fw = state.get("five_why")
+    cg = state.get("causal_graph")
+    if not fw or not getattr(fw, "steps", None):
+        return True, None
+    valid_edge_ids = {e.edge_id for e in (cg.edges if cg else [])}
+    for step in fw.steps:
+        edge_id = getattr(step, "causal_edge_id", None)
+        if edge_id and edge_id not in valid_edge_ids:
+            return False, (
+                f"FiveWhyStep declares causal_edge_id={edge_id!r} which does not exist "
+                "in the current causal graph"
+            )
+        source_id = getattr(step, "source_node_id", None)
+        target_id = getattr(step, "target_node_id", None)
+        if source_id and target_id and source_id == target_id:
+            return False, (
+                f"FiveWhyStep source_node_id == target_node_id ({source_id!r}) — "
+                "a Why step must represent an actual causal transition, not a restatement"
+            )
+    return True, None
+
+
+def _check_five_why_step_matches_its_own_edge(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-008 (Phase 26 Rule 5/7): a FiveWhyStep that declares a
+    causal_edge_id must describe the SAME transition that edge actually
+    licenses — step.source_node_id/target_node_id must equal the edge's
+    own source_node_id/target_node_id. INV-CAUSAL-004 already proves the
+    edge exists; this closes the remaining gap where a step could cite a
+    real, valid edge ID while claiming it connects different nodes than it
+    actually does (a graph traversal that is structurally valid in
+    isolation but semantically disconnected from the edge it cites —
+    exactly the class of defect Phase 26 targets)."""
+    fw = state.get("five_why")
+    cg = state.get("causal_graph")
+    if not fw or not getattr(fw, "steps", None) or not cg:
+        return True, None
+    edges_by_id = {e.edge_id: e for e in (cg.edges or [])}
+    for step in fw.steps:
+        edge_id = getattr(step, "causal_edge_id", None)
+        if not edge_id:
+            continue
+        edge = edges_by_id.get(edge_id)
+        if edge is None:
+            continue  # already caught by INV-CAUSAL-004
+        step_source = getattr(step, "source_node_id", None)
+        step_target = getattr(step, "target_node_id", None)
+        if step_source and step_source != edge.source_node_id:
+            return False, (
+                f"FiveWhyStep cites causal_edge_id={edge_id!r} but its own source_node_id "
+                f"{step_source!r} does not match the edge's actual source {edge.source_node_id!r}"
+            )
+        if step_target and step_target != edge.target_node_id:
+            return False, (
+                f"FiveWhyStep cites causal_edge_id={edge_id!r} but its own target_node_id "
+                f"{step_target!r} does not match the edge's actual target {edge.target_node_id!r}"
+            )
+    return True, None
+
+
+def _check_five_why_evidence_ids_resolve(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-TRACE-001 (Phase 26 Section 3: DOWNSTREAM_EPISTEMIC_STATUS_MUST_
+    MATCH_AUTHORITATIVE_SOURCE, evidence-ledger half). Every FiveWhyStep.
+    evidence_ids entry must resolve to a real evidence_ledger item (never a
+    dangling/fabricated reference), AND a step whose own status is VERIFIED
+    must cite at least one evidence item that is ITSELF VERIFIED in the
+    ledger -- a downstream 5-Why renderer must not independently relabel a
+    REPORTED/UNKNOWN ledger fact as VERIFIED just by attaching that status
+    word to the step. This is the SAME authoritative evidence_ledger status
+    every other layer (reconcile_hypothesis_from_evidence, CAPA, Impact)
+    already treats as ground truth -- never re-derived here, only compared."""
+    fw = state.get("five_why")
+    if not fw or not getattr(fw, "steps", None):
+        return True, None
+    evidence_ledger = state.get("evidence_ledger") or []
+    ledger_by_id = {getattr(e, "evidence_id", None): e for e in evidence_ledger}
+    ledger_by_id.pop(None, None)
+    if not ledger_by_id:
+        # No evidence_id-addressable ledger this run (e.g. Phase pre-19
+        # finding-text-only claims have no evidence_id) -- nothing to
+        # cross-check against; not this invariant's concern.
+        return True, None
+    for step in fw.steps:
+        evidence_ids = [eid for eid in (getattr(step, "evidence_ids", None) or []) if eid]
+        if not evidence_ids:
+            continue
+        resolved = []
+        for eid in evidence_ids:
+            item = ledger_by_id.get(eid)
+            if item is None:
+                return False, f"FiveWhyStep cites evidence_id {eid!r}, which does not exist in evidence_ledger"
+            resolved.append(item)
+        if getattr(step, "status", None) == "VERIFIED":
+            has_verified_source = any(getattr(item, "status", None) == "VERIFIED" for item in resolved)
+            if not has_verified_source:
+                return False, (
+                    f"FiveWhyStep.status is VERIFIED but none of its cited evidence_ids "
+                    f"{evidence_ids} are VERIFIED in the evidence_ledger — a downstream "
+                    "renderer must not independently upgrade evidentiary status"
+                )
+    return True, None
+
+
+def _check_evidence_artifacts_are_context_grounded(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-REPORT-003 (EVERY_EVIDENCE_ARTIFACT_MUST_BE_CONTEXT_GROUNDED).
+    Every hypothesis-ID reference an investigation artifact makes -- an
+    InvestigationQuestion's target_hypothesis_ids, an EvidenceRequest's
+    hypothesis_ids, a CAPA ConditionalCapaAction's root_cause_hypothesis_id
+    -- must resolve to a real CandidateHypothesis actually present in
+    root_cause.candidate_hypotheses. A dangling reference means a
+    downstream renderer (report, CAPA branch, evidence request) is citing
+    a hypothesis that does not exist in this run's own analysis, which
+    would surface as a fabricated or orphaned artifact in the final
+    auditor-facing report. This is deliberately an ID-resolution check
+    only (the same structural pattern as INV-TRACE-001's evidence_id
+    check) -- never a vocabulary/word-overlap check against artifact text,
+    since evidence artifacts are legitimately prospective (they name
+    evidence not yet collected) and a text-similarity check would
+    false-positive against the wording of a real, working request."""
+    rc = state.get("root_cause")
+    if not rc or not getattr(rc, "candidate_hypotheses", None):
+        return True, None
+    known_ids = {h.id for h in rc.candidate_hypotheses if getattr(h, "id", None)}
+    if not known_ids:
+        return True, None
+
+    plan = state.get("investigation_plan")
+    for q in getattr(plan, "questions", None) or []:
+        for hid in getattr(q, "target_hypothesis_ids", None) or []:
+            if hid and hid not in known_ids:
+                return False, (
+                    f"InvestigationQuestion {getattr(q, 'question_id', None) or getattr(q, 'id', None)!r} "
+                    f"cites target_hypothesis_ids={hid!r}, which does not exist in "
+                    f"root_cause.candidate_hypotheses"
+                )
+
+    for req in state.get("evidence_requests") or []:
+        for hid in getattr(req, "hypothesis_ids", None) or []:
+            if hid and hid not in known_ids:
+                return False, (
+                    f"EvidenceRequest {getattr(req, 'request_id', None)!r} cites hypothesis_ids="
+                    f"{hid!r}, which does not exist in root_cause.candidate_hypotheses"
+                )
+
+    capa = state.get("capa")
+    for action in getattr(capa, "conditional_actions", None) or []:
+        hid = getattr(action, "root_cause_hypothesis_id", None)
+        if hid and hid not in known_ids:
+            return False, (
+                f"ConditionalCapaAction cites root_cause_hypothesis_id={hid!r}, which does not "
+                f"exist in root_cause.candidate_hypotheses"
+            )
+    return True, None
+
+
+# ============================================================
+# INV-CAUSAL-005 through INV-CAUSAL-007: Phase 4 graph-consuming invariants
+# ============================================================
+
+
+def _check_established_root_cause_has_verified_causal_path(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-005 (Section 14): root_cause.status may only be ESTABLISHED
+    when the real causal graph contains a VERIFIED edge reaching a node at
+    UNDERLYING_CAUSE or SYSTEMIC_ROOT_CAUSE depth. A narrative or an LLM's
+    confidence is never sufficient on its own — the graph must back it."""
+    rc = state.get("root_cause")
+    if not rc or str(getattr(rc, "status", "")).rsplit(".", 1)[-1] != "ESTABLISHED":
+        return True, None
+    cg = state.get("causal_graph")
+    if not cg or not cg.edges:
+        return False, "root_cause.status=ESTABLISHED but no causal graph edges exist to support it"
+    from app.models.agent import CausalGraphEdgeStatus, CausalGraphNodeType
+    node_by_id = {n.node_id: n for n in cg.nodes}
+    for e in cg.edges:
+        if e.status != CausalGraphEdgeStatus.VERIFIED:
+            continue
+        target = node_by_id.get(e.target_node_id)
+        if target and target.node_type in (CausalGraphNodeType.UNDERLYING_CAUSE, CausalGraphNodeType.SYSTEMIC_ROOT_CAUSE):
+            return True, None
+    return False, (
+        "root_cause.status=ESTABLISHED but no VERIFIED causal graph edge reaches an "
+        "UNDERLYING_CAUSE or SYSTEMIC_ROOT_CAUSE node"
+    )
+
+
+def _check_established_root_cause_consistent_with_five_why(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-REPORT-001 (final output consistency firewall): root_cause.status
+    ESTABLISHED/SUPPORTED must not coexist with a 5-Why chain that itself
+    reports no causal mechanism established (every step UNKNOWN/
+    NOT_ESTABLISHED/REQUIRES_EVIDENCE). Two sections of the SAME report
+    disagreeing about whether a mechanism was found is a genuine cross-
+    section inconsistency INV-CAUSAL-005 (which only checks the causal
+    GRAPH) does not catch on its own -- the graph can be correctly
+    licensed while the rendered 5-Why narrative independently says "we
+    don't know why", which is exactly the auditor-facing contradiction
+    this invariant exists to reject."""
+    rc = state.get("root_cause")
+    if not rc or str(getattr(rc, "status", "")).rsplit(".", 1)[-1] not in ("ESTABLISHED", "SUPPORTED"):
+        return True, None
+    fw = state.get("five_why")
+    steps = getattr(fw, "steps", None) if fw else None
+    if not steps:
+        # No 5-Why rendered at all is a separate concern (not this
+        # invariant's) -- nothing to contradict.
+        return True, None
+    _NO_MECHANISM_STATUSES = ("UNKNOWN", "NOT_ESTABLISHED", "REQUIRES_EVIDENCE")
+    if all(str(getattr(s, "status", "")) in _NO_MECHANISM_STATUSES for s in steps):
+        return False, (
+            f"root_cause.status={rc.status!r} but every 5-Why step reports no causal mechanism "
+            "established (all UNKNOWN/NOT_ESTABLISHED/REQUIRES_EVIDENCE) -- the report's own "
+            "sections disagree about whether a mechanism was found"
+        )
+    return True, None
+
+
+def _check_established_root_cause_not_merely_mechanism(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-REPORT-002 (final output quality pass, Section 2/3: mechanism
+    != root cause): when root_cause.causal_sufficiency is populated (see
+    app.agent.causal_graph.derive_causal_sufficiency, wired in by
+    final_evidence_verification_node), root_cause.status == ESTABLISHED
+    must correspond to root_cause_sufficiency == ESTABLISHED, not merely
+    mechanism_sufficiency == ESTABLISHED with the deeper root-cause tier
+    unreached. This is the SAME depth requirement INV-CAUSAL-005 already
+    enforces directly against the causal graph; this cross-checks the
+    derived, report-facing field against that same authoritative source,
+    catching drift if causal_sufficiency is ever populated by a different
+    path than the one that also sets root_cause.status."""
+    rc = state.get("root_cause")
+    if not rc or str(getattr(rc, "status", "")).rsplit(".", 1)[-1] != "ESTABLISHED":
+        return True, None
+    suff = getattr(rc, "causal_sufficiency", None)
+    if suff is None:
+        return True, None  # not populated this run -- INV-CAUSAL-005 is the authority
+    root_suff = str(getattr(suff, "root_cause_sufficiency", "")).rsplit(".", 1)[-1]
+    if root_suff != "ESTABLISHED":
+        mech_suff = str(getattr(suff, "mechanism_sufficiency", "")).rsplit(".", 1)[-1]
+        return False, (
+            f"root_cause.status=ESTABLISHED but causal_sufficiency.root_cause_sufficiency={root_suff!r} "
+            f"(mechanism_sufficiency={mech_suff!r}) -- an established immediate mechanism must never be "
+            "rendered as an established root cause"
+        )
+    return True, None
+
+
+def _is_unconditional_capa_action(action: Any) -> bool:
+    """An action is genuinely unconditional (a definitive claim, not a
+    branch) only if its `if_cause_confirmed` field carries no real gating
+    condition.
+
+    CORRECTED in Phase 5 after source inspection: `ConditionalCapaAction`
+    has NO `conditional`/`pending_investigation` boolean fields at all — an
+    earlier version of this check (Phase 4) tested those non-existent
+    fields via getattr-with-default, which silently always evaluated to
+    False, misclassifying every hypothesis-gated action ("IF H1 is
+    confirmed...") as unconditional and breaking real regression tests.
+    The actual conditionality signal is the mandatory `if_cause_confirmed`
+    string itself — verified against real pipeline output before fixing.
+    """
+    condition = (getattr(action, "if_cause_confirmed", "") or "").strip().lower()
+    if not condition or condition in ("n/a", "none", "not applicable", "unconditional"):
+        return True
+    return not any(kw in condition for kw in ("if ", "when ", "pending", "confirmed", "upon"))
+
+
+def _check_capa_definitive_action_requires_verified_causal_root(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CGRAPH-006 (Section 14): a CAPA corrective/systemic action that
+    carries NO real hypothesis-confirmation gate (see
+    `_is_unconditional_capa_action`) must be backed by a VERIFIED causal
+    graph edge — CONTAINMENT/IMMEDIATE_CORRECTION actions are exempt since
+    Section 14 explicitly allows them to be justified by the verified
+    deviation alone, independent of root cause."""
+    capa = state.get("capa_analysis")
+    if not capa:
+        return True, None
+    definitive_actions = [
+        a for a in (getattr(capa, "conditional_actions", None) or [])
+        if getattr(a, "action_type", "") in ("CORRECTIVE_ACTION", "SYSTEMIC_ACTION")
+        and _is_unconditional_capa_action(a)
+    ]
+    if not definitive_actions:
+        return True, None
+    cg = state.get("causal_graph")
+    from app.models.agent import CausalGraphEdgeStatus
+    has_verified_edge = bool(cg and any(e.status == CausalGraphEdgeStatus.VERIFIED for e in cg.edges))
+    if not has_verified_edge:
+        return False, (
+            f"{len(definitive_actions)} unconditional root-cause CAPA action(s) exist "
+            f"({[a.recommended_action[:40] for a in definitive_actions]}) but the causal "
+            "graph has no VERIFIED edge to justify them"
+        )
+    return True, None
+
+
+def _check_investigation_question_graph_grounding_ratio(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """INV-CAUSAL-007 (Section 4): when a causal_uncertainty_graph with
+    unresolved edges exists, at least one investigation question must be
+    graph-grounded (target_node_id set) — a plan consisting entirely of
+    ungrounded generic questions while real structural uncertainty exists
+    is exactly the "generic five-question checklist" Section 4 prohibits.
+    CRITICAL, not BLOCKER: the LLM-authored planning path does not yet
+    populate these fields (Phase 4 known limitation), so this cannot fail
+    closed without blocking that entire path — it surfaces the gap instead.
+    """
+    ug = state.get("causal_uncertainty_graph")
+    inv = state.get("investigation_plan")
+    if not ug or not ug.edges or not inv or not inv.questions:
+        return True, None
+    from app.models.agent import CausalGraphEdgeStatus
+    unresolved = [e for e in ug.edges if e.status == CausalGraphEdgeStatus.UNKNOWN]
+    if not unresolved:
+        return True, None
+    grounded = [q for q in inv.questions if getattr(q, "target_node_id", None)]
+    if not grounded:
+        return False, (
+            f"{len(unresolved)} unresolved causal-uncertainty edge(s) exist but zero "
+            "investigation questions are graph-grounded (target_node_id set)"
+        )
     return True, None
 
 
@@ -1952,6 +2976,169 @@ INVARIANT_REGISTRY: list[InvariantRule] = [
         description="Actor/entity must not be corrupted into an activity/event in hypotheses or investigation questions.",
         validate=_check_semantic_role_preservation,
     ),
+    InvariantRule(
+        inv_id="INV-ROLE-002",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="REQUIREMENT nodes must not appear as affected_object or finding_subject.",
+        validate=_check_requirement_not_affected_object,
+    ),
+    InvariantRule(
+        inv_id="INV-ROLE-003",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="ATTRIBUTE nodes must not appear as affected_object or finding_subject.",
+        validate=_check_attribute_not_affected_object,
+    ),
+    InvariantRule(
+        inv_id="INV-ROLE-004",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="Normative relation types must never be used as causal edge types in CausalRelationship objects.",
+        validate=_check_normative_relations_not_used_as_causal,
+    ),
+    InvariantRule(
+        inv_id="INV-ROLE-005",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="affected_process must not be a synthetic process label without a corroborating PROCESS node in the semantic graph.",
+        validate=_check_affected_process_not_synthetic,
+    ),
+    InvariantRule(
+        inv_id="INV-ROLE-006",
+        category=InvariantCategory.CAPA,
+        severity=InvariantSeverity.CRITICAL,
+        description="Immediate actions must not introduce operational context absent from canonical evidence.",
+        validate=_check_immediate_action_grounding,
+    ),
+    InvariantRule(
+        inv_id="INV-ROLE-007",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.CRITICAL,
+        description="Investigation questions must not re-investigate requirements verified in the semantic graph.",
+        validate=_check_verified_req_not_reinvestigated,
+    ),
+    InvariantRule(
+        inv_id="INV-ROLE-009",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="affected_object must reference a node of type ENTITY/RECORD/ACTOR/CONTROL/PROCESS or be UNKNOWN.",
+        validate=_check_affected_object_admissible_node_type,
+    ),
+    InvariantRule(
+        inv_id="INV-ROLE-010",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="Every asserted output concept must trace to at least one source claim in the evidence ledger.",
+        validate=_check_all_report_concepts_traced,
+    ),
+    InvariantRule(
+        # NOTE: namespaced INV-CGRAPH- rather than INV-CAUSAL- deliberately.
+        # Source inspection during Phase 4 found the pre-existing registry
+        # already used INV-CAUSAL-001 through INV-CAUSAL-006 for unrelated,
+        # older invariants — this file's four Phase-3-added rules had
+        # collided with those IDs since Phase 3, which silently broke the
+        # BLOCKER-severity lookup in final_evidence_verification.py (a
+        # dict-comprehension keyed by inv_id took the LAST-registered
+        # entry's severity, so these were being read as WARNING/BLOCKER
+        # from the wrong rule). Renamed to a namespace no other rule in
+        # this file uses, verified by grep before assignment.
+        inv_id="INV-CGRAPH-001",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="A VERIFIED causal graph edge must carry evidence_ids or objective-record provenance.",
+        validate=_check_causal_edge_evidence_licensing,
+    ),
+    InvariantRule(
+        inv_id="INV-CGRAPH-002",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="A causal graph edge's source and target nodes must be distinct (no self-loops).",
+        validate=_check_causal_edge_no_self_loop,
+    ),
+    InvariantRule(
+        inv_id="INV-CGRAPH-003",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Causal graph edges must use genuine causal relation types, never normative-adjacent ones.",
+        validate=_check_causal_edge_not_normative,
+    ),
+    InvariantRule(
+        inv_id="INV-CGRAPH-004",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="A FiveWhyStep's causal_edge_id must reference a real edge in the current causal graph; source_node_id must differ from target_node_id.",
+        validate=_check_five_why_causal_edge_exists,
+    ),
+    InvariantRule(
+        inv_id="INV-CAUSAL-008",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="A FiveWhyStep's source_node_id/target_node_id must match the actual source/target of the causal_edge_id it cites -- a step must not be semantically disconnected from the edge it references.",
+        validate=_check_five_why_step_matches_its_own_edge,
+    ),
+    InvariantRule(
+        inv_id="INV-TRACE-001",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="FiveWhyStep.evidence_ids must resolve to real evidence_ledger entries, and a VERIFIED step must cite at least one VERIFIED ledger item -- downstream rendering must not independently upgrade evidentiary status.",
+        validate=_check_five_why_evidence_ids_resolve,
+    ),
+    InvariantRule(
+        inv_id="INV-REPORT-003",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="EVERY_EVIDENCE_ARTIFACT_MUST_BE_CONTEXT_GROUNDED: hypothesis-ID references made by InvestigationQuestion.target_hypothesis_ids, EvidenceRequest.hypothesis_ids, and ConditionalCapaAction.root_cause_hypothesis_id must resolve to a real hypothesis in root_cause.candidate_hypotheses -- no dangling/fabricated hypothesis references.",
+        validate=_check_evidence_artifacts_are_context_grounded,
+    ),
+    InvariantRule(
+        inv_id="INV-CGRAPH-005",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="root_cause.status=ESTABLISHED requires a VERIFIED causal graph edge reaching an UNDERLYING_CAUSE/SYSTEMIC_ROOT_CAUSE node.",
+        validate=_check_established_root_cause_has_verified_causal_path,
+    ),
+    InvariantRule(
+        inv_id="INV-REPORT-001",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="root_cause.status=ESTABLISHED/SUPPORTED must not coexist with a 5-Why chain whose every step reports no causal mechanism established.",
+        validate=_check_established_root_cause_consistent_with_five_why,
+    ),
+    InvariantRule(
+        inv_id="INV-REPORT-002",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="root_cause.status=ESTABLISHED requires causal_sufficiency.root_cause_sufficiency=ESTABLISHED, not merely an established immediate mechanism.",
+        validate=_check_established_root_cause_not_merely_mechanism,
+    ),
+    InvariantRule(
+        # RE-PROMOTED in Phase 5. Phase 4 prototyped this, found it broke
+        # regression tests, and demoted it to a scorer-only signal — but
+        # root-caused the failure to a bug in the CHECK itself (it tested
+        # `conditional`/`pending_investigation` boolean fields that don't
+        # exist on ConditionalCapaAction, so every hypothesis-gated action
+        # was misclassified as unconditional). Verified against real
+        # pipeline output (`if_cause_confirmed` values) before fixing; see
+        # `_is_unconditional_capa_action`. Now BLOCKER again.
+        inv_id="INV-CGRAPH-006",
+        category=InvariantCategory.CAPA,
+        severity=InvariantSeverity.BLOCKER,
+        description="A CAPA action with no real hypothesis-confirmation gate must be backed by a VERIFIED causal graph edge.",
+        validate=_check_capa_definitive_action_requires_verified_causal_root,
+    ),
+    InvariantRule(
+        inv_id="INV-CGRAPH-008",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="The causal graph must be acyclic.",
+        validate=_check_causal_graph_acyclic,
+    ),
+    # NOTE: the question-graph-grounding-ratio check remains demoted —
+    # unlike the CAPA check above, its Phase 4 failures were NOT due to a
+    # bug in the check itself; the LLM-authored planning path genuinely
+    # does not populate target_node_id yet (see Phase 4/5 reports). Exposed
+    # as non-blocking quality-gate signal (D13) until that path is closed.
     InvariantRule(
         inv_id="INV-ACTIONABLE-001",
         category=InvariantCategory.CAUSAL,
@@ -2509,6 +3696,20 @@ INVARIANT_REGISTRY: list[InvariantRule] = [
         validate=_check_impact_fields_normalized,
     ),
     InvariantRule(
+        inv_id="INV-IMPACT-002",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="ImpactAssessment.status must never be IMPACT_VERIFIED without VERIFIED evidence grounding it.",
+        validate=_check_impact_never_verified_without_verified_evidence,
+    ),
+    InvariantRule(
+        inv_id="INV-CAPA-001",
+        category=InvariantCategory.SEMANTIC,
+        severity=InvariantSeverity.BLOCKER,
+        description="A CAPA conditional action must never be conditioned on a REFUTED hypothesis.",
+        validate=_check_capa_excludes_refuted_hypotheses,
+    ),
+    InvariantRule(
         inv_id="INV-WHY-006",
         category=InvariantCategory.FIVE_WHY,
         severity=InvariantSeverity.BLOCKER,
@@ -2556,6 +3757,90 @@ INVARIANT_REGISTRY: list[InvariantRule] = [
         severity=InvariantSeverity.WARNING,
         description="Investigation questions must not repeat already-established facts.",
         validate=_check_investigation_targets_unresolved,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-012",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.WARNING,
+        description="A graph-grounded investigation question's target/source node or edge id must resolve to a real object in this run's causal graph, never a dangling reference.",
+        validate=_check_investigation_question_traceability,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-013",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="InvestigationPlan.status=NO_ACTIONABLE_UNCERTAINTY must not co-occur with populated questions.",
+        validate=_check_investigation_plan_status_consistency,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-019",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="NO_ACTIONABLE_UNCERTAINTY cannot coexist with an unresolved node in this run's causal_uncertainty_graph.",
+        validate=_check_no_actionable_uncertainty_matches_graph,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-021",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Every Stage-B question must resolve to a causal/semantic target.",
+        validate=_check_stage_b_question_has_target,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-022",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Every Stage-B question must have an evidence-resolution target.",
+        validate=_check_stage_b_question_has_evidence_target,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-023",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Stage B cannot silently collapse competing, unresolved hypotheses.",
+        validate=_check_stage_b_preserves_competing_hypotheses,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-024",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="investigation_history's causal_graph_version/iteration_id must be strictly monotonic.",
+        validate=_check_investigation_history_monotonic,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-025",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="NO_ACTIONABLE_UNCERTAINTY cannot be emitted while Stage B's own iteration record lists unresolved targets.",
+        validate=_check_no_actionable_uncertainty_consistent_with_history,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-026",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Evidence acquired through the adaptive loop must carry request provenance.",
+        validate=_check_evidence_has_provenance,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-027",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="HypothesisStatusChange evidence references must resolve to real evidence_ledger entries.",
+        validate=_check_hypothesis_history_references_real_evidence,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-028",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="A hypothesis's current status must match the authoritative evidence-reconciliation evaluator's last decision -- no second epistemic authority may silently override it.",
+        validate=_check_single_epistemic_authority,
+    ),
+    InvariantRule(
+        inv_id="INV-INVEST-029",
+        category=InvariantCategory.CAUSAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Every EvidenceClaim must cite real evidence_ledger provenance -- a dangling or claim without evidence_ids must never reach runtime state.",
+        validate=_check_evidence_claims_have_provenance,
     ),
     InvariantRule(
         inv_id="INV-OUTPUT-001",

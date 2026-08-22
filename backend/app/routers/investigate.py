@@ -257,6 +257,27 @@ async def investigate_finding(
     pipeline_ms = int((time.monotonic() - pipeline_t0) * 1000)
     _log_performance_summary(final_state_dict.get("trace", []), pipeline_ms, final_state_dict.get("analysis_mode"))
 
+    # Section 20/23 fail-closed enforcement: final_evidence_verification_node
+    # sets validation_failure when a BLOCKER invariant fired or the
+    # structural quality gate graded FAIL. Previously this flag was written
+    # to AgentState and never read anywhere outside app/agent/ — a failed
+    # gate had zero effect on the HTTP response, which was serialized
+    # exactly as if validation had passed. This was audited and confirmed
+    # by source inspection (validation_failure had zero references outside
+    # app/agent/ before this fix), not assumed.
+    _validation_failure = final_state_dict.get("validation_failure")
+    if _validation_failure:
+        logger.error("Investigation failed structural validation gate: %s", _validation_failure)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "status": "validation_failed",
+                "investigation_completed": False,
+                "reason": "structural_quality_gate_failed",
+                "message": _validation_failure,
+            },
+        )
+
     model_name = (
         settings.ollama_model
         if settings.llm_provider == "ollama"

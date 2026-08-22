@@ -158,7 +158,8 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # deterministically from those hypotheses or fallback plan now rather than shipping a
     # report with real candidate causes and an empty investigation plan.
     rc_for_questions = state.get("root_cause")
-    if inv is not None and not inv.questions:
+    _inv_is_intentionally_empty_early = inv is not None and getattr(inv, "status", None) == "NO_ACTIONABLE_UNCERTAINTY"
+    if inv is not None and not inv.questions and not _inv_is_intentionally_empty_early:
         if rc_for_questions and rc_for_questions.candidate_hypotheses:
             from app.agent.analytical_validator import derive_investigation_questions
             inv.questions = derive_investigation_questions(rc_for_questions.candidate_hypotheses)
@@ -602,7 +603,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 sem_graph = canonical.semantic_graph
                 if getattr(sem_graph, "nodes", None):
                     has_known_req = any(
-                        getattr(n, "node_type", None) == "REQUIREMENT" and str(getattr(n, "epistemic_status", "")).endswith("VERIFIED")
+                        getattr(n, "node_type", None) == "REQUIREMENT" and getattr(n, "epistemic_status", None) == "VERIFIED"
                         for n in sem_graph.nodes
                     )
             if has_known_req:
@@ -704,22 +705,56 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         from app.services import llm_metrics as _llm_metrics
         _referenced_docs = canonical.referenced_documents if canonical else None
         filtered_final_hyps = []
+        _had_authoritatively_refuted_hyp = False
         for h in rc.candidate_hypotheses:
             if h.status == "REFUTED":
+                if getattr(h, "status_locked", False):
+                    # Phase 20 Part C: this hypothesis was legitimately
+                    # REFUTED by real evidence (the authoritative
+                    # evaluator), not merely an invalid LLM proposal --
+                    # removing it from the active list is correct, but the
+                    # backfill below must NOT then manufacture a fresh,
+                    # speculative replacement as if nothing had been
+                    # determined about this finding at all.
+                    _had_authoritatively_refuted_hyp = True
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} because status was REFUTED"
                 ))
                 _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
                 continue
+            # Release-gate fix: a hypothesis whose status was already
+            # authoritatively decided by real evidence (app.agent.nodes.
+            # evidence_acquisition.reconcile_hypothesis_from_evidence --
+            # any locked status, not just REFUTED, which is handled above)
+            # must never be REMOVED by the prose-pattern checks below.
+            # Those checks examine h.statement as ORIGINALLY proposed by
+            # core_synthesis, before any evidence was ever attached -- e.g.
+            # a hedged "X happened because Y" proposal that later became
+            # genuinely VERIFIED-evidence-SUPPORTED still contains
+            # "because" and would otherwise be deleted by
+            # hypothesis_statement_asserts_unsupported_causation and
+            # similar checks below, silently discarding an evidence-
+            # grounded conclusion (a real, live-reproduced defect: the
+            # authoritative reconciliation promoted a hypothesis to
+            # SUPPORTED on genuinely VERIFIED evidence, and this loop then
+            # deleted it anyway). status_locked is the SAME single-
+            # epistemic-authority contract INV-INVEST-028 already enforces
+            # for status writes -- this closes the matching gap for
+            # outright removal from the hypothesis list, which no existing
+            # invariant could catch (removal isn't a status mismatch; the
+            # hypothesis is just gone). Locked hypotheses still flow
+            # through the rest of this loop (dedup, CAPA linkage, etc.) --
+            # only the destructive prose-pattern REMOVAL checks are skipped.
+            _hyp_locked = getattr(h, "status_locked", False)
             from app.agent.causal_guard import is_evidence_state_not_hypothesis
-            if is_evidence_state_not_hypothesis(h.statement, h.name):
+            if not _hyp_locked and is_evidence_state_not_hypothesis(h.statement, h.name):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — describes an evidence state "
                     "or investigation uncertainty rather than proposing a concrete causal mechanism"
                 ))
                 _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
                 continue
-            if hypothesis_asserts_referenced_document_content(h.statement, _referenced_docs):
+            if not _hyp_locked and hypothesis_asserts_referenced_document_content(h.statement, _referenced_docs):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — asserts content of a "
                     "document the finding only referenced/cited but which was unavailable for inspection "
@@ -728,7 +763,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 ))
                 _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
-            if hypothesis_asserts_self_referential_evidence(h.statement):
+            if not _hyp_locked and hypothesis_asserts_self_referential_evidence(h.statement):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — statement narrates its own "
                     "'supporting evidence' inline (e.g. 'records show...') instead of being grounded in "
@@ -736,7 +771,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 ))
                 _llm_metrics.record_validation_rejection(reason="invalid_provenance", node="final_evidence_verification")
                 continue
-            if hypothesis_asserts_systemic_cause_without_process_evidence(h.statement, finding_text):
+            if not _hyp_locked and hypothesis_asserts_systemic_cause_without_process_evidence(h.statement, finding_text):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — escalates to a systemic "
                     "process/system/control-level claim without the finding citing any review, audit, "
@@ -744,7 +779,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 ))
                 _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
-            if hypothesis_statement_is_generic_causal_bucket(h.statement):
+            if not _hyp_locked and hypothesis_statement_is_generic_causal_bucket(h.statement):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — statement names only a "
                     "generic causal category (execution/task-control/process/etc. factors) rather than "
@@ -768,14 +803,14 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     f"({h.name!r}) — renamed to {new_name!r} derived from its own statement"
                 ))
                 h.name = new_name
-            if hypothesis_attacks_statement_credibility(h.statement):
+            if not _hyp_locked and hypothesis_attacks_statement_credibility(h.statement):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — attacks the credibility of "
                     "a reported statement instead of reasoning about the underlying proposition"
                 ))
                 _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
                 continue
-            if mechanism and mechanism.statement:
+            if not _hyp_locked and mechanism and mechanism.statement:
                 if hypothesis_contradicts_mechanism(h.statement, mechanism):
                     trace.append(AgentTraceStep.warn(
                         f"Final Evidence Verification: removed hypothesis {h.id} — contradicts mechanism"
@@ -788,7 +823,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     ))
                     _llm_metrics.record_validation_rejection(reason="invalid_hypothesis", node="final_evidence_verification")
                     continue
-            if hypothesis_contradicts_verified_completion(h.statement, verified_facts):
+            if not _hyp_locked and hypothesis_contradicts_verified_completion(h.statement, verified_facts):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — contradicts a VERIFIED "
                     "fact that the thing it claims is deficient was actually completed"
@@ -796,13 +831,13 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 _llm_metrics.record_validation_rejection(reason="unsupported_causation", node="final_evidence_verification")
                 continue
             is_unsupported, reason = detect_unsupported_causal_specificity(h.statement, finding_text)
-            if is_unsupported:
+            if not _hyp_locked and is_unsupported:
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — {reason}"
                 ))
                 _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
-            if hypothesis_asserts_unhedged_unverified_completion(h.statement):
+            if not _hyp_locked and hypothesis_asserts_unhedged_unverified_completion(h.statement):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — asserts an unverified "
                     "activity as settled fact ('was conducted/completed but not documented') instead of "
@@ -810,7 +845,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 ))
                 _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
-            if hypothesis_asserts_unhedged_notification_failure(h.statement, finding_text):
+            if not _hyp_locked and hypothesis_asserts_unhedged_notification_failure(h.statement, finding_text):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — asserts a notification/"
                     "communication/distribution/acknowledgement event did NOT occur as settled fact "
@@ -819,7 +854,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 ))
                 _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
-            if hypothesis_asserts_unlicensed_change_event_defect(h.statement, finding_text):
+            if not _hyp_locked and hypothesis_asserts_unlicensed_change_event_defect(h.statement, finding_text):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — asserts the change event "
                     "itself (revision/amendment/procedure change) was handled defectively as settled fact "
@@ -828,7 +863,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 ))
                 _llm_metrics.record_validation_rejection(reason="unsupported_causal_specificity", node="final_evidence_verification")
                 continue
-            if hypothesis_statement_asserts_unsupported_causation(h.statement, verified_facts):
+            if not _hyp_locked and hypothesis_statement_asserts_unsupported_causation(h.statement, verified_facts):
                 trace.append(AgentTraceStep.warn(
                     f"Final Evidence Verification: removed hypothesis {h.id} — statement asserts causation "
                     "('because'/'due to'/'caused by'/etc.) not grounded in a VERIFIED fact"
@@ -867,7 +902,16 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             # coincidental wording overlap with one VERIFIED claim promote
             # it toward SUPPORTED on pattern evidence alone -- exactly the
             # premature-causality risk this hypothesis type must never take.
-            if h.name == "SHARED_SYSTEM_COMMON_FACTOR":
+            if getattr(h, "status_locked", False):
+                # Phase 20 Part C: this hypothesis's status was already
+                # authoritatively decided by the evidence-reconciliation
+                # evaluator (app.agent.nodes.evidence_acquisition) —
+                # the single epistemic authority. Re-deriving it here from
+                # verified_facts/reported_claims would be a second,
+                # potentially-disagreeing status writer, exactly the
+                # production correctness problem Phase 20 exists to close.
+                pass
+            elif h.name == "SHARED_SYSTEM_COMMON_FACTOR":
                 pass
             else:
                 det_status, det_strength = determine_hypothesis_status(
@@ -888,7 +932,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             # a safety net, downgrades to POSSIBLE if none can actually be
             # cited (should never trigger given the status logic above, but
             # traceability must never be silently assumed).
-            if h.status == "SUPPORTED":
+            if h.status == "SUPPORTED" and not getattr(h, "status_locked", False):
                 from app.services.text_grounding import significant_words
                 hyp_words = significant_words(h.statement)
                 citing_facts = [
@@ -959,7 +1003,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # reuses the one canonical generator). LOW-specificity findings are
         # correctly exempt: there genuinely isn't enough to hypothesize
         # about (handled by the LOW-specificity gate above).
-        if not rc.candidate_hypotheses and specificity != "LOW":
+        if not rc.candidate_hypotheses and specificity != "LOW" and not _had_authoritatively_refuted_hyp:
             from app.agent.nodes.plan_investigation_fallback import (
                 build_conditional_capa_actions,
                 build_deterministic_investigation_plan,
@@ -1033,6 +1077,15 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             for q in inv.questions:
                 if getattr(q, "hypothesis_tested", None) and q.hypothesis_tested not in valid_hyp_ids:
                     q.hypothesis_tested = None
+                # INV-REPORT-003 (EVERY_EVIDENCE_ARTIFACT_MUST_BE_CONTEXT_
+                # GROUNDED): the plural target_hypothesis_ids/hypotheses_tested
+                # fields carry the same dangling-reference risk as the legacy
+                # singular field above and must be scrubbed the same way —
+                # the question and its target_proposition_id still survive.
+                if getattr(q, "target_hypothesis_ids", None):
+                    q.target_hypothesis_ids = [hid for hid in q.target_hypothesis_ids if hid in valid_hyp_ids]
+                if getattr(q, "hypotheses_tested", None):
+                    q.hypotheses_tested = [hid for hid in q.hypotheses_tested if hid in valid_hyp_ids]
         if capa is not None and capa.conditional_actions:
             _hyp_id_re = re.compile(r"\bH\d+\b")
             kept_actions = []
@@ -1044,6 +1097,8 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                         f"{m.group(0)!r} — absent from the final hypothesis set (hypothesis-ID drift)"
                     ))
                     continue
+                if a.root_cause_hypothesis_id and a.root_cause_hypothesis_id not in valid_hyp_ids:
+                    a.root_cause_hypothesis_id = None
                 kept_actions.append(a)
             capa.conditional_actions = kept_actions
 
@@ -1113,6 +1168,13 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         _demoted_ids = set()
         _new_areas = []
         for h in rc.candidate_hypotheses:
+            if getattr(h, "status_locked", False):
+                # Phase 20 Part C: already authoritatively evaluated by the
+                # evidence-reconciliation evaluator -- never demote it back
+                # to an "investigation area" based on this independent,
+                # topical-overlap eligibility re-scoring.
+                _eligible_hyps.append(h)
+                continue
             prop = build_causal_proposition(h, _claims, finding_text, subject_words=_subj_words)
             if prop.eligibility == HypothesisEligibility.ELIGIBLE:
                 _eligible_hyps.append(h)
@@ -1145,6 +1207,14 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     for q in inv.questions:
                         if getattr(q, "hypothesis_tested", None) in _demoted_ids:
                             q.hypothesis_tested = None
+                        if getattr(q, "target_hypothesis_ids", None):
+                            q.target_hypothesis_ids = [
+                                hid for hid in q.target_hypothesis_ids if hid not in _demoted_ids
+                            ]
+                        if getattr(q, "hypotheses_tested", None):
+                            q.hypotheses_tested = [
+                                hid for hid in q.hypotheses_tested if hid not in _demoted_ids
+                            ]
             if capa is not None and capa.conditional_actions:
                 _demoted_re = re.compile(r"\bH\d+\b")
                 _kept_actions = []
@@ -1152,6 +1222,8 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     m = _demoted_re.search(a.if_cause_confirmed or "")
                     if m and m.group(0) in _demoted_ids:
                         continue
+                    if a.root_cause_hypothesis_id and a.root_cause_hypothesis_id in _demoted_ids:
+                        a.root_cause_hypothesis_id = None
                     _kept_actions.append(a)
                 capa.conditional_actions = _kept_actions
             if not rc.candidate_hypotheses:
@@ -1213,8 +1285,16 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 rc.status = RootCauseStatus.NOT_ESTABLISHED
 
         # Authoritative promotion check: if any candidate hypothesis is proven by verified evidence, promote it; otherwise enforce POSSIBLE
+        # Phase 20 Part C: skips status_locked hypotheses -- this loop has
+        # no REFUTED case at all (only SUPPORTED/POSSIBLE), so without this
+        # guard it would silently resurrect a hypothesis the authoritative
+        # evidence-reconciliation evaluator already REFUTED back to
+        # POSSIBLE. This was a real, demonstrated bug (see the Phase 19
+        # report's disclosed limitation), not a hypothetical one.
         from app.agent.causal_graph import evaluate_root_cause_eligibility, select_authoritative_leading_hypothesis
         for h in rc.candidate_hypotheses:
+            if getattr(h, "status_locked", False):
+                continue
             el, supp, _, _, c_lvl, promo = evaluate_root_cause_eligibility(
                 h,
                 evidence_items=evidence_ledger,
@@ -1323,6 +1403,39 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                             "root cause is NOT_ESTABLISHED — replaced with an evidence-boundary statement"
                         ))
                     setattr(rc, _field, _EVIDENCE_BOUNDARY_WHY)
+
+        # Final output hardening: causal_sufficiency must control the
+        # narrative even when rc.status == ESTABLISHED (Part 2/4 -- a
+        # supported MECHANISM must never be narrated as an established
+        # ROOT CAUSE). Builds a preliminary causal graph here via the SAME
+        # pure, deterministic function used for the official graph later
+        # in this node (cheap, no LLM call, safe to call twice) so this
+        # narrative check has the SAME authoritative depth signal
+        # INV-CAUSAL-005/INV-REPORT-002 already license, rather than
+        # trusting rc.status alone -- closing the exact gap disclosed in
+        # the prior session turn ("causal_sufficiency is populated but
+        # never consulted by narrative generation").
+        elif rc.status in (RootCauseStatus.ESTABLISHED, "ESTABLISHED"):
+            from app.agent.causal_graph import build_causal_graph, derive_causal_sufficiency
+            _prelim_graph = build_causal_graph(canonical, rc, evidence_ledger or [])
+            _prelim_sufficiency = derive_causal_sufficiency(_prelim_graph)
+            if _prelim_sufficiency.root_cause_sufficiency != "ESTABLISHED":
+                _MECHANISM_ONLY_WHY = (
+                    "The available evidence supports the immediate causal mechanism, but does not "
+                    "establish the underlying root cause. Further evidence is required to confirm why "
+                    "this mechanism occurred."
+                )
+                for _field in ("narrative", "root_cause_basis"):
+                    _text = getattr(rc, _field, None)
+                    if _text != _MECHANISM_ONLY_WHY:
+                        if _text:
+                            trace.append(AgentTraceStep.warn(
+                                f"Final Evidence Verification: rc.{_field} claimed established root cause but "
+                                f"causal_sufficiency.root_cause_sufficiency="
+                                f"{_prelim_sufficiency.root_cause_sufficiency!r} (mechanism-level only) — "
+                                "downgraded to a mechanism-scoped statement"
+                            ))
+                        setattr(rc, _field, _MECHANISM_ONLY_WHY)
 
         # If root cause is not established, root cause confidence must be LOW (Requirement 5 & 20)
         if rc.status in (RootCauseStatus.NOT_ESTABLISHED, "NOT_ESTABLISHED"):
@@ -1695,7 +1808,13 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # If root_cause.status == NOT_ESTABLISHED and material unresolved propositions exist,
     # investigation_plan.questions MUST NOT be empty.
     from app.agent.causal_guard import should_generate_investigation_plan
-    if should_generate_investigation_plan(evidence_ledger, getattr(rc, "propositions", None), rc, state["request"].finding_text):
+    # Phase 17: an explicit, structurally-grounded NO_ACTIONABLE_UNCERTAINTY
+    # judgment (app.agent.nodes.graph_investigation_planner /
+    # causal_investigation_planner) means zero questions is the CORRECT
+    # outcome, not an omission this completeness backfill should silently
+    # override with unrelated legacy-template content.
+    _inv_is_intentionally_empty = inv is not None and getattr(inv, "status", None) == "NO_ACTIONABLE_UNCERTAINTY"
+    if not _inv_is_intentionally_empty and should_generate_investigation_plan(evidence_ledger, getattr(rc, "propositions", None), rc, state["request"].finding_text):
         if inv is None or not inv.questions:
             from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
             _, fallback_plan = build_deterministic_investigation_plan(
@@ -1905,6 +2024,8 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 if report is not None:
                     if getattr(_canonical, "semantic_graph", None) and not getattr(report, "semantic_graph", None):
                         report.semantic_graph = _canonical.semantic_graph
+                    if getattr(_canonical, "semantic_traceability", None) and not getattr(report, "semantic_traceability", None):
+                        report.semantic_traceability = _canonical.semantic_traceability
 
             if impact is not None and getattr(impact, "affected_object", None):
                 if is_generic_placeholder_entity(impact.affected_object):
@@ -1915,6 +2036,24 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     ))
     except Exception as _repair_err:  # never let a repair break the pipeline
         errors.append(f"Evidence-semantics repair skipped: {_repair_err}")
+
+    # Phase 17: defense in depth for INV-INVEST-013 -- several independent,
+    # pre-existing backfill paths (core_synthesis.py's recovery/fallback
+    # branches, this function's own completeness backfill above) can each
+    # legitimately populate inv.questions from scratch. Rather than track
+    # every such site individually, normalize status here as the single
+    # source of truth: if questions ended up non-empty by this point,
+    # status/planner_mode must say so, regardless of which upstream branch
+    # last touched them. This can only ever correct a genuinely stale
+    # NO_ACTIONABLE_UNCERTAINTY label to match real content -- it never
+    # erases or fabricates questions.
+    if inv is not None and inv.questions and getattr(inv, "status", None) == "NO_ACTIONABLE_UNCERTAINTY":
+        inv.status = "QUESTIONS_GENERATED"
+        if getattr(inv, "planner_mode", None) == "NO_ACTIONABLE_UNCERTAINTY":
+            inv.planner_mode = "LEGACY_FALLBACK"
+            inv.fallback_reason = (
+                "questions were backfilled downstream of the original NO_ACTIONABLE_UNCERTAINTY judgment"
+            )
 
     final_check_state = {
         **state,
@@ -1928,11 +2067,20 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         "cost_impact": cost_impact,
         "report": report,
     }
-    from app.agent.invariants import evaluate_all_invariants
+    from app.agent.invariants import INVARIANT_REGISTRY, InvariantSeverity, evaluate_all_invariants
     _final_valid, _final_violations = evaluate_all_invariants(final_check_state)
+    # Section 20/21: a BLOCKER-severity invariant violation must fail closed
+    # regardless of how the weighted quality score nets out — previously,
+    # a single BLOCKER violation could be outweighed by other high-scoring
+    # dimensions and never surface as a validation failure at all.
+    _severity_by_inv_id = {r.inv_id: r.severity for r in INVARIANT_REGISTRY}
+    _blocker_violations: list[str] = []
     if not _final_valid:
         for _v in _final_violations:
             trace.append(AgentTraceStep.warn(f"Final Output Validation: {_v}"))
+            _inv_id = _v.split("]", 1)[0].lstrip("[")
+            if _severity_by_inv_id.get(_inv_id) == InvariantSeverity.BLOCKER:
+                _blocker_violations.append(_v)
         if rc and rc.status in (RootCauseStatus.SUPPORTED, RootCauseStatus.ESTABLISHED) and any(
             "[INV-CAUS" in v or "[INV-WHY" in v for v in _final_violations
         ):
@@ -1946,6 +2094,174 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 report.root_cause = rc
 
     trace.append(AgentTraceStep.ok("Final evidence verification and consistency validation completed"))
+
+    # -----------------------------------------------------------------------
+    # Section 21 & 22: Structural Quality Scoring + Fail-Closed Production Gate
+    #
+    # This runs AFTER all existing repairs and invariant checks so the score
+    # reflects the final repaired state. A score < 60 (grade=FAIL) means the
+    # structural integrity of the output is insufficient to emit a credible
+    # investigation report — the validation_failure flag is set and the
+    # renderer must return a structured error, never a misleading report.
+    # -----------------------------------------------------------------------
+
+    # -----------------------------------------------------------------------
+    # Phase 3: real runtime CausalGraph construction.
+    #
+    # Built strictly from the already-finalized, already-epistemically-
+    # disciplined `rc` (root_cause) + `_ledger_in` — never from raw LLM
+    # prose, never from SemanticGraph normative edges. This is the actual
+    # populated graph AgentState carries forward; it feeds the quality gate
+    # below and 5-Why graph-grounding enrichment.
+    # -----------------------------------------------------------------------
+    _causal_graph = None
+    try:
+        from app.agent.causal_graph import build_causal_graph
+        _causal_graph = build_causal_graph(_canonical, rc, _ledger_in)
+        trace.append(AgentTraceStep.ok(
+            f"Causal graph constructed: {len(_causal_graph.nodes)} node(s), {len(_causal_graph.edges)} edge(s)"
+        ))
+        # Final-output-quality pass: populate the existing (previously
+        # dead) CausalSufficiencyAssessment field with the deepest causal
+        # level the licensed graph actually supports, keeping mechanism/
+        # root-cause/systemic-cause distinct (Section 2/3: mechanism
+        # ESTABLISHED must never be conflated with root cause ESTABLISHED).
+        from app.agent.causal_graph import derive_causal_sufficiency
+        rc.causal_sufficiency = derive_causal_sufficiency(_causal_graph)
+        if fw and getattr(fw, "steps", None) and _causal_graph.edges:
+            from app.agent.causal_graph_traversal import ground_five_why_steps
+            ground_five_why_steps(fw, _causal_graph)
+
+        # Phase 10 attempted widening this gate to fire on ANY licensed
+        # edge and measured 44 regressions, all INV-5WHY-CAUSAL-001/002
+        # (unhedged modal language leaking from the raw hypothesis
+        # statement into the rendered answer). Phase 11 fixed that root
+        # cause — render_causal_transition_answer() now renders non-
+        # VERIFIED edges from CausalGraphNode.concept_ref (a mechanically-
+        # derived, hedge-free identifier) inside a domain-neutral boundary
+        # template — and re-attempted the same widening. That resolved
+        # ALL epistemic-invariant failures, but surfaced a SECOND, genuine
+        # gap: for measurement/comparison-type findings, the deterministic
+        # prose generator (build_causal_boundary_answer) embeds actual
+        # quantitative data (e.g. "4.2%" discrepancy) that the generic
+        # graph template did not yet have access to (test_causal_boundary_
+        # hardening_regression.py::test_11_exact_five_why_text_matches_
+        # spec). Phase 12 closed THAT specific gap: CausalGraphNode now
+        # carries the same comparison/measurement fields
+        # CanonicalFindingState already extracts (causal_graph.py), and
+        # both render_causal_transition_answer() and the per-hop question
+        # template (causal_graph_traversal.py) reuse them via the SAME
+        # domain-general, comparison-subtype-keyed renderer the prose
+        # generator uses — verified precision-complete against
+        # test_11_exact_five_why_text_matches_spec and the full
+        # multi-hop-gated suite (1435 passed, zero regressions).
+        #
+        # Phase 12 Step 10 then re-attempted widening to include DIRECT
+        # (single-hop) edges — i.e. making graph traversal authoritative
+        # for essentially every finding, not just explicit/evidence-
+        # correlated multi-hop chains. That surfaced a THIRD, different,
+        # and much larger-blast-radius gap: 60 regressions, dominated by
+        # INV-WHY-007 ("5-Why chain hit the evidence boundary ... but was
+        # padded ... instead of stopping") plus broad failures across
+        # common-factor, financial-recovery, and parameter-mismatch suites
+        # that have nothing to do with measurement precision. The graph-
+        # grounded traversal's boundary-stopping and hypothesis-ranking
+        # behavior diverges from the existing deterministic/LLM-assisted
+        # generator in ways this phase did not model or fix. Widening to
+        # single-hop is NOT information-preservation-complete — reverted.
+        # The gate stays multi-hop-only (proven zero-regression across
+        # four independent full-suite runs, Phases 8/9/11/12).
+        from app.agent.causal_graph import is_graph_authoritative_for_five_why
+        _graph_authoritative, _graph_authority_reason = is_graph_authoritative_for_five_why(_causal_graph, _canonical)
+        trace.append(AgentTraceStep.ok(f"5-Why graph authority gate: {_graph_authoritative} ({_graph_authority_reason})"))
+        if _graph_authoritative:
+            from app.agent.causal_graph_traversal import build_graph_grounded_five_why
+            _graph_fw = build_graph_grounded_five_why(_causal_graph)
+            if _graph_fw is not None and _graph_fw.steps:
+                fw = _graph_fw
+                if report is not None:
+                    report.five_why = fw
+                trace.append(AgentTraceStep.ok(
+                    f"5-Why: graph traversal is authoritative for this run ({len(fw.steps)} "
+                    "step(s)) — prose generator superseded"
+                ))
+        _rca_projection = None
+        try:
+            from app.agent.causal_graph import build_rca_from_causal_graph
+            _rca_projection = build_rca_from_causal_graph(_causal_graph)
+        except Exception as _rca_err:
+            logger.warning("RCA graph projection failed (non-fatal): %s", _rca_err)
+        _impact_projection = None
+        try:
+            from app.agent.causal_graph import build_impact_from_graph
+            _impact_projection = build_impact_from_graph(_canonical, _causal_graph)
+        except Exception as _impact_err:
+            logger.warning("Impact graph projection failed (non-fatal): %s", _impact_err)
+        _causal_paths: list = []
+        try:
+            from app.agent.causal_graph import build_causal_paths
+            _causal_paths = build_causal_paths(_causal_graph)
+            # Stamp each hypothesis with its own independent path id —
+            # competing hypotheses never share one (Phase 9 Step 5/6).
+            _path_by_hyp_id = {p.hypothesis_id: p for p in _causal_paths if p.hypothesis_id}
+            for _h in getattr(rc, "candidate_hypotheses", None) or []:
+                _p = _path_by_hyp_id.get(getattr(_h, "id", None))
+                if _p is not None and hasattr(_h, "causal_path_id"):
+                    _h.causal_path_id = _p.path_id
+        except Exception as _path_err:
+            logger.warning("Causal path construction failed (non-fatal): %s", _path_err)
+        if report is not None:
+            report.causal_graph = _causal_graph
+            report.rca_projection = _rca_projection
+            report.impact_graph_projection = _impact_projection
+            report.causal_paths = _causal_paths
+    except Exception as _cg_err:
+        logger.warning("Causal graph construction failed (non-fatal): %s", _cg_err)
+        trace.append(AgentTraceStep.warn(f"Causal graph construction skipped (error): {_cg_err}"))
+
+    _quality_state = {
+        **state,
+        "evidence_ledger": _ledger_in,
+        "canonical_finding_state": _canonical,
+        "root_cause": rc,
+        "five_why": fw,
+        "investigation_plan": inv,
+        "capa_analysis": capa if capa else ca,
+        "impact_assessment": impact,
+        "causal_graph": _causal_graph,
+        "causal_paths": _causal_paths,
+    }
+    _validation_failure: str | None = state.get("validation_failure")
+    if _blocker_violations:
+        _validation_failure = (
+            f"BLOCKER invariant violation(s): {_blocker_violations}. "
+            "The investigation report cannot be emitted — a structural contract was violated."
+        )
+        trace.append(AgentTraceStep.warn(f"[BLOCKER] {_validation_failure}"))
+    try:
+        from app.agent.output_quality_scorer import compute_output_quality_score
+        _quality_score = compute_output_quality_score(_quality_state)
+        if _quality_score.grade == "FAIL":
+            _fail_msg = (
+                f"Structural output quality score {_quality_score.total_score}/100 (FAIL < 60). "
+                f"Blocker violations: {_quality_score.blocker_violations}. "
+                "The investigation report cannot be emitted with sufficient structural integrity. "
+                "Review the finding and evidence for completeness."
+            )
+            trace.append(AgentTraceStep.warn(f"[QUALITY-GATE FAIL] {_fail_msg}"))
+            _validation_failure = f"{_validation_failure} | {_fail_msg}" if _validation_failure else _fail_msg
+        elif _quality_score.grade == "WARNING":
+            trace.append(AgentTraceStep.warn(
+                f"[QUALITY-GATE WARNING] Structural quality score {_quality_score.total_score}/100 — "
+                f"critical issues: {_quality_score.critical_violations}"
+            ))
+        else:
+            trace.append(AgentTraceStep.ok(
+                f"[QUALITY-GATE PASS] Structural quality score {_quality_score.total_score}/100"
+            ))
+    except Exception as _qs_err:
+        logger.warning("Quality scorer error (non-fatal): %s", _qs_err)
+        trace.append(AgentTraceStep.warn(f"Quality scorer skipped (error): {_qs_err}"))
 
     return {
         **state,
@@ -1965,4 +2281,8 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         "report": report,
         "trace": trace,
         "errors": errors,
+        "validation_failure": _validation_failure,
+        "causal_graph": _causal_graph,
+        "causal_paths": _causal_paths,
     }
+

@@ -26,6 +26,53 @@ from app.models.agent import (
     SupportLevel,
 )
 
+# ---------------------------------------------------------------------------
+# Generic structural event-clause extraction (domain-vocabulary-independent).
+#
+# This is grammatical infrastructure, not a domain dictionary: English past
+# participle morphology (regular -ed/-en/-t suffixes) plus the small CLOSED
+# class of irregular participles is a fixed feature of the language, equally
+# applicable to every domain. It is used only to LOCATE a clause boundary —
+# it never determines relation *type*, which stays generic (RELATES_TO /
+# EXECUTED_BY) rather than being guessed from the specific verb's meaning.
+# ---------------------------------------------------------------------------
+_IRREGULAR_PAST_PARTICIPLES = frozenset({
+    "done", "made", "given", "taken", "shown", "known", "written", "spoken",
+    "broken", "chosen", "stolen", "driven", "seen", "found", "held", "told",
+    "sold", "bought", "brought", "caught", "taught", "thought", "paid", "said",
+    "run", "sent", "spent", "lent", "bent", "kept", "left", "felt", "dealt",
+    "built", "meant", "put", "set", "cut", "hit", "read", "cost", "let",
+    "borne", "worn", "torn", "sworn", "drawn", "flown", "grown", "thrown",
+    "begun", "sung", "swum", "gone", "come", "become", "lost", "burnt", "burned",
+})
+
+
+def _is_participle(word: str) -> bool:
+    """True if `word` is a past-participle form by English morphology alone
+    (regular suffix OR membership in the closed irregular-participle class).
+    No lexeme here is domain-specific — this recognizes verb FORM, not verb
+    MEANING, so it generalizes to any unseen domain vocabulary."""
+    w = word.lower().strip(".,;:")
+    if len(w) < 3:
+        return False
+    if w in _IRREGULAR_PAST_PARTICIPLES:
+        return True
+    return bool(re.match(r"^[a-z]{2,}(?:ed|en)$", w))
+
+
+# Matches: "<Subject> was|were|is|are|has been|had been [not] <participle> [by <Actor>]"
+# The verb slot is an open class (any participle-shaped word) — nothing here
+# names a specific domain action. This is the generic fallback that fires
+# only when no narrower, already-registered relation pattern has matched.
+_GENERIC_EVENT_CLAUSE_RE = re.compile(
+    r"(?P<subject>\b[A-Z][\w][\w\s\-/]{0,60}?)\s+"
+    r"(?:was|were|is|are|has\s+been|had\s+been)\s+"
+    r"(?P<neg>not\s+)?"
+    r"(?P<verb>[a-z]+)\b"
+    r"(?:\s+by\s+(?P<actor>[A-Za-z][\w\s\-]{1,40}?))?"
+    r"(?=[.,;]|\s+(?:as|per|in|on|during|for|and|which|that|before|after|to|from|by)\b|$)",
+)
+
 
 def classify_investigation_mode(
     finding_text: str,
@@ -244,12 +291,20 @@ def build_semantic_graph(
         source_type: EpistemicSource = EpistemicSource.AUDIT_OBSERVATION,
         claim_id: str | None = None,
     ) -> str:
+        """Register or retrieve a node, upgrading its type if the new type is more specific.
+
+        Uses SemanticNodeType.specificity_rank() so that a node initially created as ENTITY
+        can be promoted to REQUIREMENT, ACTOR, PROCESS, CONTROL, RECORD, or ATTRIBUTE
+        whenever a higher-specificity type is established by a later claim — without any
+        type being able to demote a previously established higher-specificity type.
+        """
         nonlocal n_idx
         clean_lbl = label.strip()
         key = clean_lbl.lower()
         if key in nodes_by_label:
             node = nodes_by_label[key]
-            if node.node_type == SemanticNodeType.ENTITY and node_type != SemanticNodeType.ENTITY:
+            # Priority-ordered upgrade: only promote to a more specific type, never demote.
+            if SemanticNodeType.specificity_rank(node_type) > SemanticNodeType.specificity_rank(node.node_type):
                 node.node_type = node_type
             if claim_id and claim_id not in node.source_claim_ids:
                 node.source_claim_ids.append(claim_id)
@@ -267,12 +322,20 @@ def build_semantic_graph(
         nodes_by_label[key] = node
         return node_id
 
-    # 1. Base entities and actors from finding
+    # 1. Base entities, actors, and activities from finding
     for act in extract_actors(finding_text):
         _get_or_create_node(act, SemanticNodeType.ACTOR, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
 
     for ent in extract_entities(finding_text):
         _get_or_create_node(ent, SemanticNodeType.ENTITY, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
+
+    from app.services.semantic_subject import resolve_deviation
+    _dev_res = resolve_deviation(finding_text)
+    if _dev_res and _dev_res.matched:
+        if _dev_res.affected_process and _dev_res.affected_process not in ("UNKNOWN", "NOT_ESTABLISHED", "UNRESOLVED", "Operational process"):
+            _get_or_create_node(_dev_res.affected_process, SemanticNodeType.PROCESS, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
+        if _dev_res.affected_activity and _dev_res.affected_activity not in ("UNKNOWN", "NOT_ESTABLISHED", "UNRESOLVED", "Operational process"):
+            _get_or_create_node(_dev_res.affected_activity, SemanticNodeType.EVENT, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
 
     # 1b. Base nodes from claim subjects & speaker
     for claim in evidence_claims:
@@ -285,12 +348,22 @@ def build_semantic_graph(
         if spkr and len(spkr.strip()) >= 3:
             _get_or_create_node(spkr, SemanticNodeType.ACTOR, c_status, EpistemicSource.AUDIT_OBSERVATION, c_id)
 
-    # 2. Add nodes and edges per claim / proposition
+    # 2. Add nodes and edges per claim / proposition.
+    #
+    # ARCHITECTURE NOTE: Independent parallel checks (not exclusive elif).
+    # A single claim can legitimately encode multiple orthogonal semantic
+    # relations — e.g. "The monthly review was not completed in July as
+    # required by Procedure SEC-012" encodes BOTH a normative violation
+    # (process VIOLATES requirement) AND a missing-activity relation
+    # (process LACKS_REQUIRED_ATTRIBUTE completion evidence). Exclusive
+    # elif collapsed that to one edge. Each check below tests independently
+    # and appends edges without consuming the claim from further checks.
     for claim in evidence_claims:
         c_text = getattr(claim, "claim", getattr(claim, "text", str(claim)))
         c_id = getattr(claim, "claim_id", None)
         c_status = getattr(claim, "status", EvidenceStatus.UNKNOWN)
         c_speaker = getattr(claim, "speaker", None)
+        subj = getattr(claim, "subject", None)
         c_low = c_text.lower()
 
         # Epistemic source
@@ -303,16 +376,70 @@ def build_semantic_graph(
         elif attr == ClaimAttribution.DOCUMENTARY_EVIDENCE:
             source_type = EpistemicSource.OBJECTIVE_RECORD
 
-        # Structural relation & participant extraction across arbitrary domains
-        # Normative / Requirement / Compliance relations
-        m_req = re.search(r"\b(?:as\s+required\s+by|per|under|in\s+accordance\s+with|prescribed\s+by|mandated\s+by)\s+(?:procedure\s+|sop\s+|standard\s+|specification\s+|policy\s+)?([A-Z0-9-]+|[a-z0-9\s-]+?(?=\.|$|,|\s+and\b))", c_text, re.IGNORECASE)
-        m_req_term = re.search(r"\b(?:procedure\s+|sop\s+|standard\s+|specification\s+|policy\s+)([A-Z0-9-]+)\b", c_text, re.IGNORECASE)
-        if m_req or m_req_term:
-            req_label = (m_req.group(1).strip() if m_req else m_req_term.group(1).strip())
-            req_id = _get_or_create_node(req_label, SemanticNodeType.REQUIREMENT, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION, c_id)
-            target_lbl = subj if subj and req_label != subj else (c_speaker or "Process / Activity")
+        # Tracks whether a narrower, lexically-informed check (C-H below) already
+        # produced structure for this claim. The generic structural extractor
+        # (CHECK I) only fires when nothing narrower matched, so it never
+        # duplicates or overrides an already-classified relation — it exists
+        # purely to prevent SILENT STRUCTURAL LOSS on unseen vocabulary.
+        _narrow_check_fired = False
+
+        # ----------------------------------------------------------------
+        # CHECK A: Normative / Requirement / Compliance relations.
+        #
+        # Broadened to capture:
+        #   - "as required by <Requirement>"
+        #   - "required by / under / that <Requirement>"
+        #   - "required to <verb>"  (obligation without explicit req name)
+        #   - "in accordance with / consistent with <Requirement>"
+        #   - "per <Requirement>"
+        #   - "mandated by / governed by <Requirement>"
+        #   - "Procedure/SOP/Standard/Specification/Policy <ID>"
+        #   - "X was required" (passive obligation without an explicit source)
+        # ----------------------------------------------------------------
+        # NOTE: the object-type word (procedure/SOP/standard/schedule/policy/...) is
+        # OPTIONAL and never required for a match — the requirement label is
+        # captured purely from its position after a governance preposition,
+        # not from membership in an enumerated noun list. This lets "required by
+        # Schedule IRR-4", "per Protocol X", "governed by Directive Y", etc. all
+        # resolve identically without the specific governing-document noun being
+        # known in advance.
+        m_req = re.search(
+            r"\b(?:as\s+required\s+by|required\s+(?:by|under)|in\s+accordance\s+with|"
+            r"per|(?:mandated|governed|prescribed)\s+by|consistent\s+with|required\s+under)"
+            r"\s+(?:[a-z]+\s+)?"
+            r"([A-Z0-9][A-Z0-9\-_\.]+|[a-z][a-z0-9\s\-_\.]+?(?=\.|$|,|\s+and\b|\s+which\b|\s+that\b))",
+            c_text,
+            re.IGNORECASE,
+        )
+        m_req_term = re.search(
+            r"\b(?:procedure|sop|standard|specification|policy|protocol|guideline|regulation|rule|requirement)\s+([A-Z0-9][A-Z0-9\-_\.]+)\b",
+            c_text,
+            re.IGNORECASE,
+        )
+        # Passive obligation: "was required" / "is required" without a named source
+        m_passive_req = re.search(
+            r"\b(?:was|were|is|are)\s+(?:a\s+)?required\b",
+            c_low,
+        )
+        if m_req or m_req_term or m_passive_req:
+            if m_req:
+                req_label = m_req.group(1).strip().rstrip(".,;")
+            elif m_req_term:
+                req_label = m_req_term.group(1).strip()
+            else:
+                req_label = "Applicable Requirement"
+            req_id = _get_or_create_node(
+                req_label, SemanticNodeType.REQUIREMENT, EvidenceStatus.VERIFIED,
+                EpistemicSource.AUDIT_OBSERVATION, c_id,
+            )
+            target_lbl = subj if subj and req_label.lower() != subj.lower() else (c_speaker or "Process / Activity")
             target_id = _get_or_create_node(target_lbl, SemanticNodeType.PROCESS, c_status, source_type, c_id)
-            if any(w in c_low for w in ("not completed", "missed", "deviat", "violat", "failed", "omitted", "exceeded", "below", "incomplete", "without", "lacked", "not")):
+            _deviation_words = (
+                "not completed", "missed", "deviat", "violat", "failed", "omitted",
+                "exceeded", "below", "incomplete", "without", "lacked", "not ",
+                "non-compliance", "noncompliance", "does not", "did not", "was not", "were not",
+            )
+            if any(w in c_low for w in _deviation_words):
                 edges.append(SemanticEdge(
                     id=f"E{e_idx}",
                     source_id=target_id,
@@ -337,7 +464,17 @@ def build_semantic_graph(
                 ))
                 e_idx += 1
 
-        elif any(w in c_low for w in ("lacks", "missing", "omitted", "without", "absent", "no record")) and any(w in c_low for w in ("attribute", "parameter", "identifier", "code", "tag", "serial", "batch", "lot", "label", "date", "entry", "signature", "sign-off")):
+        # ----------------------------------------------------------------
+        # CHECK B: Missing required attribute / evidence.
+        # Independent of CHECK A — a claim can be both normative and attribute-missing.
+        # ----------------------------------------------------------------
+        _attr_absence_words = ("lacks", "missing", "omitted", "without", "absent", "no record", "no evidence")
+        _attr_target_words = (
+            "attribute", "parameter", "identifier", "code", "tag", "serial", "batch",
+            "lot", "label", "date", "entry", "signature", "sign-off", "approval",
+            "record", "documentation", "evidence", "log",
+        )
+        if any(w in c_low for w in _attr_absence_words) and any(w in c_low for w in _attr_target_words):
             ent_id = _get_or_create_node(subj or "Entity", SemanticNodeType.ENTITY, c_status, source_type, c_id)
             attr_id = _get_or_create_node("Required Attribute", SemanticNodeType.ATTRIBUTE, c_status, source_type, c_id)
             edges.append(SemanticEdge(
@@ -352,7 +489,11 @@ def build_semantic_graph(
             ))
             e_idx += 1
 
-        elif "deliver" in c_low or "dispatch" in c_low or "sent" in c_low or "transmitt" in c_low:
+        # ----------------------------------------------------------------
+        # CHECK C: Transmission / delivery.
+        # ----------------------------------------------------------------
+        if "deliver" in c_low or "dispatch" in c_low or "sent" in c_low or "transmitt" in c_low:
+            _narrow_check_fired = True
             sys_id = _get_or_create_node(c_speaker or "System", SemanticNodeType.ENTITY, c_status, source_type, c_id)
             target_lbl = subj or "Item"
             target_id = _get_or_create_node(target_lbl, SemanticNodeType.ENTITY, c_status, source_type, c_id)
@@ -368,7 +509,11 @@ def build_semantic_graph(
             ))
             e_idx += 1
 
-        elif "receiv" in c_low:
+        # ----------------------------------------------------------------
+        # CHECK D: Receipt.
+        # ----------------------------------------------------------------
+        if "receiv" in c_low:
+            _narrow_check_fired = True
             recp_id = _get_or_create_node(c_speaker or "Recipient", SemanticNodeType.ACTOR, c_status, source_type, c_id)
             target_lbl = subj or "Item"
             target_id = _get_or_create_node(target_lbl, SemanticNodeType.ENTITY, c_status, source_type, c_id)
@@ -384,7 +529,11 @@ def build_semantic_graph(
             ))
             e_idx += 1
 
-        elif "access" in c_low or "opened" in c_low or "viewed" in c_low:
+        # ----------------------------------------------------------------
+        # CHECK E: Access / view.
+        # ----------------------------------------------------------------
+        if "access" in c_low or "opened" in c_low or "viewed" in c_low:
+            _narrow_check_fired = True
             recp_id = _get_or_create_node(c_speaker or "Recipient", SemanticNodeType.ACTOR, c_status, source_type, c_id)
             target_lbl = subj or "Record"
             target_id = _get_or_create_node(target_lbl, SemanticNodeType.RECORD, c_status, source_type, c_id)
@@ -399,7 +548,11 @@ def build_semantic_graph(
             ))
             e_idx += 1
 
-        elif "acknowledg" in c_low or "sign-off" in c_low or "signature" in c_low:
+        # ----------------------------------------------------------------
+        # CHECK F: Acknowledgement / sign-off.
+        # ----------------------------------------------------------------
+        if "acknowledg" in c_low or "sign-off" in c_low or "signature" in c_low:
+            _narrow_check_fired = True
             recp_id = _get_or_create_node(c_speaker or "Personnel", SemanticNodeType.ACTOR, c_status, source_type, c_id)
             target_lbl = subj or "Record"
             target_id = _get_or_create_node(target_lbl, SemanticNodeType.RECORD, c_status, source_type, c_id)
@@ -414,7 +567,11 @@ def build_semantic_graph(
             ))
             e_idx += 1
 
-        elif "calibrat" in c_low:
+        # ----------------------------------------------------------------
+        # CHECK G: Calibration.
+        # ----------------------------------------------------------------
+        if "calibrat" in c_low:
+            _narrow_check_fired = True
             equip_id = _get_or_create_node(subj or "Equipment", SemanticNodeType.ENTITY, c_status, source_type, c_id)
             rec_id = _get_or_create_node("Calibration Record", SemanticNodeType.RECORD, c_status, source_type, c_id)
             edges.append(SemanticEdge(
@@ -428,7 +585,11 @@ def build_semantic_graph(
             ))
             e_idx += 1
 
-        elif "train" in c_low:
+        # ----------------------------------------------------------------
+        # CHECK H: Training.
+        # ----------------------------------------------------------------
+        if "train" in c_low:
+            _narrow_check_fired = True
             actor_id = _get_or_create_node(c_speaker or "Personnel", SemanticNodeType.ACTOR, c_status, source_type, c_id)
             req_id = _get_or_create_node("Training Requirement", SemanticNodeType.REQUIREMENT, c_status, source_type, c_id)
             edges.append(SemanticEdge(
@@ -441,6 +602,79 @@ def build_semantic_graph(
                 source_claim_ids=[c_id] if c_id else [],
             ))
             e_idx += 1
+
+        # ----------------------------------------------------------------
+        # CHECK I: Generic structural event-clause extraction (fallback).
+        #
+        # Fires ONLY when none of the narrower, lexically-informed checks
+        # (C-H) above already produced structure for this claim. Locates a
+        # clause by English participle MORPHOLOGY (verb form), never by verb
+        # MEANING/vocabulary — so a claim using entirely unseen domain
+        # vocabulary ("The joint was welded", "The dose was dispensed",
+        # "The ledger was reconciled") still produces graph structure
+        # instead of silently contributing nothing.
+        #
+        # Because the specific verb's semantics are NOT classified here, the
+        # relation type stays deliberately generic/non-committal (RELATES_TO
+        # for the subject-event link, EXECUTED_BY for the event-actor link —
+        # both already in the safe structural relation set, neither
+        # normative). This is the "UNKNOWN_RELATION must be safe" contract:
+        # structure is preserved, but no specific semantic claim beyond
+        # "these participants co-occurred in an event, polarity X" is made.
+        # ----------------------------------------------------------------
+        if not _narrow_check_fired:
+            for m in _GENERIC_EVENT_CLAUSE_RE.finditer(c_text):
+                verb = m.group("verb")
+                if not _is_participle(verb):
+                    continue
+                subj_text = (m.group("subject") or "").strip()
+                if not subj_text or len(subj_text) < 2:
+                    continue
+                negated = bool(m.group("neg"))
+                actor_text = (m.group("actor") or "").strip() or None
+
+                event_label = f"{'not ' if negated else ''}{verb}".strip()
+                event_id = _get_or_create_node(
+                    event_label, SemanticNodeType.EVENT, c_status, source_type, c_id,
+                )
+                subj_id = _get_or_create_node(
+                    subj_text, SemanticNodeType.ENTITY, c_status, source_type, c_id,
+                )
+                edges.append(SemanticEdge(
+                    id=f"E{e_idx}",
+                    source_id=subj_id,
+                    target_id=event_id,
+                    relation_type=SemanticRelationType.RELATES_TO,
+                    epistemic_status=c_status,
+                    provenance=source_type,
+                    source_claim_ids=[c_id] if c_id else [],
+                    notes=(
+                        f"UNRESOLVED_RELATION: generic structural extraction (verb={verb!r}, "
+                        f"negated={negated}); relation type not lexically classified — "
+                        "structure preserved without inventing a specific semantic claim"
+                    ),
+                ))
+                e_idx += 1
+
+                if actor_text and not negated:
+                    actor_id = _get_or_create_node(
+                        actor_text, SemanticNodeType.ACTOR, c_status, source_type, c_id,
+                    )
+                    edges.append(SemanticEdge(
+                        id=f"E{e_idx}",
+                        source_id=event_id,
+                        target_id=actor_id,
+                        relation_type=SemanticRelationType.EXECUTED_BY,
+                        epistemic_status=c_status,
+                        provenance=source_type,
+                        source_claim_ids=[c_id] if c_id else [],
+                        notes="Generic structural extraction: event attributed to named actor",
+                    ))
+                    e_idx += 1
+                # Only the first well-formed clause per claim is extracted —
+                # additional clauses in the same sentence are typically
+                # subordinate/modifying rather than independent propositions.
+                break
 
     # 3. Explicitly represent conflicting evidence relations as unresolved conflict edges
     if conflicts:
@@ -461,3 +695,4 @@ def build_semantic_graph(
             e_idx += 1
 
     return SemanticGraph(nodes=list(nodes_by_label.values()), edges=edges)
+

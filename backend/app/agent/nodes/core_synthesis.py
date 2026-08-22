@@ -197,6 +197,14 @@ def _parse_causal_fields(
     valid_claim_ids = {cid for cid, _ in (claim_ids or [])}
     claim_text_by_id = {cid: e.claim for cid, e in (claim_ids or [])}
     _raw_hyp_count = len(raw_rc.get("candidate_hypotheses", []))
+    # Phase 7 Section 5: the set of hypothesis ids the LLM actually proposed
+    # in THIS response — a `deepens_hypothesis_id` referencing anything
+    # outside this set is a dangling/hallucinated reference and must be
+    # dropped, never trusted (Section 26: never fake the feature).
+    _raw_hyp_ids = {
+        str(ch.get("id")) for ch in raw_rc.get("candidate_hypotheses", [])
+        if isinstance(ch, dict) and ch.get("id")
+    }
     cand_hypotheses = []
     for ch in raw_rc.get("candidate_hypotheses", []):
         if isinstance(ch, dict):
@@ -349,6 +357,12 @@ def _parse_causal_fields(
                 supporting_evidence=[claim_text_by_id[c] for c in supporting_ids if c in claim_text_by_id],
                 contradicting_evidence=[claim_text_by_id[c] for c in contradicting_ids if c in claim_text_by_id],
             )
+            # Phase 7 Section 5: validate deepens_hypothesis_id against the
+            # actual set of ids proposed in this response before trusting
+            # it — never against the id of the hypothesis itself either.
+            _raw_deepens = ch.get("deepens_hypothesis_id")
+            if isinstance(_raw_deepens, str) and _raw_deepens in _raw_hyp_ids and _raw_deepens != new_hyp.id:
+                new_hyp.deepens_hypothesis_id = _raw_deepens
             # CROSS-HYPOTHESIS SEMANTIC CONSISTENCY: reject a hypothesis
             # whose own discrimination/confirms/refutes text asserts that
             # its evidence "supports"/"confirms" a DIFFERENT hypothesis id
@@ -1678,8 +1692,19 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         )
         _, _area_plan = _build_area_plan(
             request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
+            canonical_state=canonical,
         )
-        investigation_plan_override = _area_plan
+        # Phase 17: an explicit, structurally-grounded NO_ACTIONABLE_
+        # UNCERTAINTY judgment already made upstream (Stage A --
+        # app.agent.nodes.graph_investigation_planner) must not be clobbered
+        # by this CAPA-potential-areas-only plan -- CAPA still gets its
+        # areas from _area_plan.areas below regardless; only the
+        # investigation_plan override is skipped.
+        _existing_inv = state.get("investigation_plan")
+        if getattr(_existing_inv, "status", None) == "NO_ACTIONABLE_UNCERTAINTY":
+            investigation_plan_override = None
+        else:
+            investigation_plan_override = _area_plan
         capa = CapaAnalysis(
             status=CapaStatus.INVESTIGATION_REQUIRED,
             potential_areas=_area_plan.areas,
@@ -1824,7 +1849,10 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         _, fallback_plan = build_deterministic_investigation_plan(
             request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None), canonical_state=canonical,
         )
-        investigation_plan_override = fallback_plan
+        # Phase 17: do not clobber an upstream NO_ACTIONABLE_UNCERTAINTY
+        # judgment -- see the matching guard in the primary-success branch
+        # above for the full rationale.
+        investigation_plan_override = None if getattr(state.get("investigation_plan"), "status", None) == "NO_ACTIONABLE_UNCERTAINTY" else fallback_plan
 
         if recovery_used and root_cause is not None and five_why is not None:
             analysis_mode = "LLM"
@@ -1865,7 +1893,8 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             fallback_hyps, fallback_plan = build_deterministic_investigation_plan(
                 request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None), canonical_state=canonical,
             )
-            investigation_plan_override = fallback_plan
+            # Phase 17: same NO_ACTIONABLE_UNCERTAINTY guard as above.
+            investigation_plan_override = None if getattr(state.get("investigation_plan"), "status", None) == "NO_ACTIONABLE_UNCERTAINTY" else fallback_plan
             contributing_factors = []
             llm_metrics.increment("deterministic_hypotheses_generated", len(fallback_hyps))
 

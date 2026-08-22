@@ -157,6 +157,38 @@ class CausalRelationship(BaseModel):
     notes: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Real runtime CausalGraph (Phase 3 hardening).
+#
+# `CausalRelationship` above is retained but was never populated by the
+# production pipeline (confirmed by source audit: read in 4 places, written
+# in zero). This is the actual populated runtime causal graph — built by
+# `app.agent.causal_graph.build_causal_graph` from already-epistemically-
+# disciplined `CandidateHypothesis` data (never from raw LLM prose, never
+# from normative semantic-graph edges), and attached to AgentState as
+# `causal_graph` by `final_evidence_verification_node`.
+# ---------------------------------------------------------------------------
+
+
+class CausalGraphNodeType(str, Enum):
+    OBSERVED_DEVIATION = "OBSERVED_DEVIATION"
+    IMMEDIATE_MECHANISM = "IMMEDIATE_MECHANISM"
+    CONTRIBUTING_FACTOR = "CONTRIBUTING_FACTOR"
+    UNDERLYING_CAUSE = "UNDERLYING_CAUSE"
+    SYSTEMIC_ROOT_CAUSE = "SYSTEMIC_ROOT_CAUSE"
+    UNKNOWN = "UNKNOWN"
+    UNRESOLVED = "UNRESOLVED"
+
+
+class CausalGraphEdgeStatus(str, Enum):
+    VERIFIED = "VERIFIED"
+    REPORTED = "REPORTED"
+    POSSIBLE = "POSSIBLE"
+    UNKNOWN = "UNKNOWN"
+    DISPUTED = "DISPUTED"
+    REJECTED = "REJECTED"
+
+
 class EvidenceCompleteness(str, Enum):
     COMPLETE = "COMPLETE"
     PARTIAL = "PARTIAL"
@@ -203,6 +235,183 @@ class EpistemicSource(str, Enum):
     DERIVED = "DERIVED"
     INFERRED = "INFERRED"
     UNKNOWN_SOURCE = "UNKNOWN_SOURCE"
+
+
+class CausalGraphNode(BaseModel):
+    """A single node on the real runtime causal ladder."""
+    node_id: str
+    node_type: CausalGraphNodeType
+    label: str
+    causal_level: CausalLevel = CausalLevel.EVIDENCE_STATE
+    epistemic_status: EvidenceStatus = EvidenceStatus.UNKNOWN
+    proposition_ids: list[str] = []
+    evidence_ids: list[str] = []
+    semantic_node_ids: list[str] = []
+    provenance: EpistemicSource = EpistemicSource.AUDIT_OBSERVATION
+    confidence: Literal["HIGH", "MEDIUM", "LOW"] | None = None
+    source_hypothesis_id: str | None = None
+    # Phase 11 Step 6: a short, controlled-vocabulary concept reference
+    # (from CandidateHypothesis.name, e.g. "TRAINING_NOT_COMPLETED"),
+    # distinct from `label` (the full hypothesis statement). `label` may
+    # legitimately carry hedged/modal prose ("may not have been
+    # completed") since it's the LLM's own descriptive sentence; `label` is
+    # fine to render directly for a VERIFIED edge (an established fact),
+    # but embedding it in a hedged rendering for a non-VERIFIED edge leaks
+    # that modal language back out as if the renderer had asserted it.
+    # `concept_ref` exists so the renderer has a genuinely neutral noun
+    # phrase to name the candidate without repeating its prose claim.
+    concept_ref: str | None = None
+    # Phase 12: structured comparison/measurement context, populated ONLY
+    # from CanonicalFindingState's own typed comparison_*/measurement
+    # fields (never re-derived from raw text) — carried here so
+    # render_causal_transition_answer can reuse the SAME comparison-
+    # subtype-keyed mechanism-category logic build_causal_boundary_answer
+    # already uses, instead of losing quantitative precision when
+    # rendering a graph-derived transition for a comparison-type finding.
+    # Flat scalar fields (not a nested SemanticMeasurement reference) to
+    # match build_causal_boundary_answer's existing signature exactly and
+    # avoid forward-reference ordering with a model defined later in this
+    # file. Unset (None) for the overwhelming majority of nodes — only the
+    # OBSERVED_DEVIATION node of a comparison-type finding populates these.
+    comparison_type: str | None = None
+    comparison_left: str | None = None
+    comparison_left_qualifier: str | None = None
+    comparison_right: str | None = None
+    comparison_subtype: str | None = None
+    measurement_value: float | None = None
+    measurement_unit: str | None = None
+    measurement_qualifier: str | None = None
+    measurement_evidence_status: str | None = None
+
+
+class CausalGraphEdge(BaseModel):
+    """A single licensed causal edge. Only ever created by
+    `build_causal_graph` when an explicit licensing condition (Section 6:
+    verified objective evidence, an explicitly verified mechanism, a
+    verified causal proposition, or an explicit reported causal mechanism)
+    is met — never from co-occurrence, temporal order, or a normative
+    relation (VIOLATES/REQUIRES/GOVERNS/SUBJECT_TO/SATISFIES/CONFORMS_TO)."""
+    edge_id: str
+    source_node_id: str
+    target_node_id: str
+    relation_type: CausalEdgeType = CausalEdgeType.RESULTS_IN
+    epistemic_status: EvidenceStatus = EvidenceStatus.UNKNOWN
+    evidence_ids: list[str] = []
+    proposition_ids: list[str] = []
+    provenance: EpistemicSource = EpistemicSource.AUDIT_OBSERVATION
+    confidence: Literal["HIGH", "MEDIUM", "LOW"] | None = None
+    causal_level_transition: str | None = None  # e.g. "OBSERVED_DEVIATION->IMMEDIATE_MECHANISM"
+    status: CausalGraphEdgeStatus = CausalGraphEdgeStatus.UNKNOWN
+    notes: str | None = None
+    # Phase 6 Section 4: explicit derivation marker. The edge's EXISTENCE is
+    # always licensed by evidence_strength/status (never by evidence
+    # overlap — see build_causal_graph's `_edge_status_for`); overlap is
+    # used ONLY to decide the edge's TOPOLOGY (which node it is sourced
+    # from) once existence is already licensed. This field makes that
+    # distinction machine-readable rather than only documented in a
+    # docstring: "DIRECT" = sourced from the observed deviation;
+    # "EVIDENCE_CORRELATED" = re-parented onto a shallower causal node
+    # because of shared supporting evidence (multi-hop chaining).
+    # Phase 7: "EXPLICIT" = sourced from an asserted `deepens_hypothesis_id`
+    # reference (Section 5's structured causal candidate) — ranked above
+    # EVIDENCE_CORRELATED (inferred from shared evidence) when both would
+    # apply, and both ranked above the default DIRECT (sourced straight
+    # from the observed deviation, no deeper chaining asserted or inferred).
+    derivation: Literal["DIRECT", "EVIDENCE_CORRELATED", "EXPLICIT"] = "DIRECT"
+
+
+class CausalGraph(BaseModel):
+    """The real runtime causal graph. May legitimately contain a single
+    OBSERVED_DEVIATION node and zero edges — that is a valid, complete
+    graph state (evidence boundary reached immediately), not an error."""
+    nodes: list[CausalGraphNode] = []
+    edges: list[CausalGraphEdge] = []
+
+
+class CausalPath(BaseModel):
+    """Phase 9 Step 6: a real directed traversal from the observed deviation
+    to one hypothesis's terminal node — built ONLY by
+    app.agent.causal_graph.build_causal_paths as a pure derivation from
+    already-licensed CausalGraph edges. Never constructed from prose, never
+    hand-populated to satisfy a schema. Competing hypotheses (Step 5) each
+    get their OWN CausalPath — independent hypotheses are never merged into
+    one path merely because they originate from the same deviation node."""
+    path_id: str
+    hypothesis_id: str | None = None
+    ordered_node_ids: list[str] = []
+    ordered_edge_ids: list[str] = []
+    starting_level: str
+    terminal_level: str
+    epistemic_status: str
+    supporting_evidence_ids: list[str] = []
+    contradicting_evidence_ids: list[str] = []
+
+
+class RCACausalNodeRef(BaseModel):
+    """A pure structural reference into CausalGraph — never free text
+    beyond the node's own already-licensed label (Phase 6 Section 11:
+    "Every causal statement must reference causal_node_id ...", "Do not
+    generate a plausible textual root cause")."""
+    causal_node_id: str
+    label: str
+    causal_level: str
+    epistemic_status: str
+    evidence_ids: list[str] = []
+    proposition_ids: list[str] = []
+
+
+class RCACausalEdgeRef(BaseModel):
+    causal_edge_id: str
+    source_node_id: str
+    target_node_id: str
+    status: str
+    evidence_ids: list[str] = []
+
+
+class ImpactGraphRef(BaseModel):
+    """A structural impact reference — never a generated harm narrative.
+    `basis` records WHY this counts as observed/potential/unknown: derived
+    from the referenced node/edge's own epistemic_status, not asserted."""
+    description: str
+    causal_node_id: str | None = None
+    causal_edge_id: str | None = None
+    evidence_ids: list[str] = []
+    basis: Literal["OBSERVED", "POTENTIAL", "UNKNOWN"]
+
+
+class CausalGraphImpactProjection(BaseModel):
+    """Phase 6 Section 14: `build_impact_from_graph` output.
+
+    Reframes OBSERVED/POTENTIAL/UNKNOWN impact in terms the causal graph
+    can answer without inventing a downstream-harm detector (which would
+    require domain-specific "impact" vocabulary this architecture must not
+    hardcode): OBSERVED = the verified deviation itself; POTENTIAL = causal
+    nodes whose mechanism is POSSIBLE/REPORTED (an unconfirmed downstream
+    effect IS a potential impact, structurally); UNKNOWN = unresolved
+    edges, each requiring targeted investigation before impact can be
+    assessed. Severity of the finding's wording plays no role."""
+    observed: list[ImpactGraphRef] = []
+    potential: list[ImpactGraphRef] = []
+    unknown_investigation_required: list[ImpactGraphRef] = []
+
+
+class CausalGraphRCAProjection(BaseModel):
+    """Phase 6 Section 11: `build_rca_from_causal_graph` output. A pure
+    STRUCTURAL PROJECTION of CausalGraph — contains no field that was not
+    computed by reading the graph. If the graph has no established root
+    cause, `root_cause_status` reflects NOT_ESTABLISHED; this model
+    structurally cannot contain a plausible-sounding root cause the graph
+    doesn't support, because every populated field is a list of graph
+    node/edge references, not a text-generation slot."""
+    observed_deviation: RCACausalNodeRef | None = None
+    immediate_mechanisms: list[RCACausalNodeRef] = []
+    contributing_factors: list[RCACausalNodeRef] = []
+    underlying_causes: list[RCACausalNodeRef] = []
+    systemic_root_causes: list[RCACausalNodeRef] = []
+    competing_hypotheses: list[RCACausalNodeRef] = []
+    unresolved_edges: list[RCACausalEdgeRef] = []
+    evidence_boundary_reached: bool = False
+    root_cause_status: Literal["ESTABLISHED", "NOT_ESTABLISHED"] = "NOT_ESTABLISHED"
 
 
 class SemanticNodeType(str, Enum):
@@ -397,6 +606,79 @@ class Proposition(BaseModel):
     derivation_type: str | None = None
 
 
+class HypothesisRelation(BaseModel):
+    """Phase 23 Part B: a claim's relation to ONE specific hypothesis --
+    explicitly separate from the claim's own epistemic weight
+    (EvidenceClaim.status/epistemic_class, which describes the evidence's
+    directness/verification level, never its bearing on any particular
+    hypothesis). Root cause of the Phase 22 live-model finding: asking the
+    LLM for a single field that had to answer both "what kind of evidence
+    is this" AND "does it support/contradict this hypothesis" caused it to
+    default to the easier, always-safe descriptive answer (OBSERVED)
+    instead of committing to the harder relational judgment. Separating
+    the two questions into two fields removes that overload."""
+    hypothesis_id: str
+    relation: Literal["SUPPORTING", "CONTRADICTING", "NEUTRAL", "INSUFFICIENT"]
+    reason: str | None = None
+    # Phase 24 Part D: outcome of the deterministic relation-validation
+    # firewall (app.agent.evidence_interpreter.validate_relation). `relation`
+    # above is always the FINAL, validated value; this field preserves what
+    # the firewall actually did so the decision is auditable (Part Q: "For
+    # each case record ... validation decision").
+    validation_decision: Literal["ACCEPT", "DOWNGRADE_TO_NEUTRAL", "DOWNGRADE_TO_INSUFFICIENT", "REJECT"] = "ACCEPT"
+    # Phase 25 Rule 6: closes the Phase 24 temporal-safety gap. Set by the
+    # interpreter ONLY when this hypothesis is itself a causal claim (one
+    # event caused/led to another) -- distinguishes "this relation is
+    # grounded in temporal sequence alone" from "independent, non-temporal
+    # evidence grounds it" (e.g. an explicit causal statement, a mechanism
+    # description, or a directly-verified consequence). NOT_APPLICABLE for
+    # every non-causal hypothesis relation. The deterministic firewall
+    # (validate_relation) downgrades TEMPORAL_ONLY relations to NEUTRAL --
+    # "A happened before B" alone can never SUPPORT/CONTRADICT "A caused B".
+    causal_basis: Literal["INDEPENDENT_EVIDENCE", "TEMPORAL_ONLY", "NOT_APPLICABLE"] = "NOT_APPLICABLE"
+
+
+class EvidenceProposition(str, Enum):
+    """Phase 24 Part B/C: structural classification of WHAT KIND of
+    proposition a claim makes -- orthogonal to epistemic status (VERIFIED/
+    REPORTED, evidentiary weight) and to hypothesis relevance (SUPPORTING/
+    CONTRADICTING, the relational judgment). Exists specifically to let the
+    deterministic layer distinguish "a search found nothing" (which can
+    never by itself prove non-occurrence) from "an authoritative record
+    affirmatively states X did not occur" (which can) -- without any
+    phrase/keyword list, by requiring the interpreter to name which of
+    these four structural shapes the claim actually has."""
+    POSITIVE_ASSERTION = "POSITIVE_ASSERTION"    # asserts something occurred/exists/is true
+    NEGATIVE_ASSERTION = "NEGATIVE_ASSERTION"    # asserts something did NOT occur/exist/is false
+    ABSENCE_OF_EVIDENCE = "ABSENCE_OF_EVIDENCE"  # a search/record contains nothing on the topic -- does NOT itself prove non-occurrence
+    EVIDENCE_OF_ABSENCE = "EVIDENCE_OF_ABSENCE"  # an authoritative/exhaustive record affirmatively establishes non-occurrence
+
+
+class QuantitativeAssertion(BaseModel):
+    """Phase 24 Part F: a claim's numeric comparison, structured so the
+    deterministic layer can independently verify the arithmetic rather than
+    trusting the LLM's stated conclusion. Populated ONLY when the evidence
+    text itself states both values and a comparison -- never computed or
+    inferred by the LLM (enforced by the prompt, checked by
+    app.agent.evidence_interpreter.verify_quantitative)."""
+    left: float
+    operator: Literal["GT", "LT", "EQ", "NE", "GE", "LE"]
+    right: float
+    unit: str | None = None
+
+
+class TemporalRelation(str, Enum):
+    """Phase 24 Part G: structural temporal relation between two events a
+    claim references, when the evidence states one. Never used to infer
+    causality -- temporal precedence alone is not causal proof."""
+    BEFORE = "BEFORE"
+    AFTER = "AFTER"
+    DURING = "DURING"
+    OVERLAPS = "OVERLAPS"
+    OUTSIDE_PERIOD = "OUTSIDE_PERIOD"
+    UNKNOWN = "UNKNOWN"
+
+
 class EvidenceClaim(BaseModel):
     """Claim-level evidence with full provenance."""
     claim_id: str                    # e.g. "C1"
@@ -429,6 +711,41 @@ class EvidenceClaim(BaseModel):
     # The epistemic stance sub-type when status == BELIEF.
     epistemic_stance: str | None = None   # BELIEF|DOUBT|SUSPICION|ASSUMPTION|OPINION
     stance_holder: str | None = None
+    # Phase 21: adaptive-loop provenance/relevance fields. Extends (never
+    # duplicates) this canonical claim model with the identity/linkage the
+    # EvidenceItem -> EvidenceInterpreter -> EvidenceClaim path needs. All
+    # optional and unset for every pre-Phase-21 EvidenceClaim (finding-text
+    # extraction via app.agent.claim_extractor) -- only claims produced by
+    # app.agent.evidence_interpreter populate them.
+    evidence_ids: list[str] = []
+    hypothesis_ids: list[str] = []
+    # The claim's relationship as interpreted from the evidence: whether it
+    # is a direct OBSERVED/REPORTED account, or a judgment of its relevance
+    # to a target hypothesis (SUPPORTING/CONTRADICTING), or UNKNOWN when the
+    # evidence does not speak to the target at all. Orthogonal to `status`
+    # (evidentiary weight) -- see app.agent.evidence_interpreter for how the
+    # two axes combine without letting this field alone upgrade `status`.
+    # Phase 21 vocabulary preserved for backward compatibility (existing
+    # callers/tests that read this field or construct claims with it
+    # directly). Phase 23: the interpreter no longer asks the LLM for this
+    # value -- it derives it DETERMINISTICALLY from `status` (see
+    # app.agent.evidence_interpreter._epistemic_class_for_status). Per-
+    # hypothesis relevance now lives exclusively in `hypothesis_relations`.
+    epistemic_class: Literal["SUPPORTING", "CONTRADICTING", "OBSERVED", "REPORTED", "UNKNOWN"] | None = None
+    # Phase 23 Part B/D: explicit, structured relation of this claim to
+    # each hypothesis it was interpreted against -- may legitimately be
+    # SUPPORTING for one hypothesis and CONTRADICTING (or absent) for
+    # another (Part K: one evidence item, multiple independent relations).
+    hypothesis_relations: list[HypothesisRelation] = []
+    temporal_context: str | None = None
+    extraction_status: Literal["EXTRACTED", "REJECTED", "UNRESOLVED"] = "EXTRACTED"
+    # Phase 24: structural safety fields. All optional/None for every
+    # pre-Phase-24 claim (finding-text extraction via claim_extractor,
+    # Phase 21-23 interpreter output) -- only claims produced by the
+    # Phase-24 interpreter populate them.
+    proposition_type: EvidenceProposition | None = None
+    quantitative: QuantitativeAssertion | None = None
+    temporal_relation: TemporalRelation | None = None
 
     @property
     def provenance(self) -> str:
@@ -693,6 +1010,81 @@ class EvidenceItem(BaseModel):
     modality: Literal["ACTUAL", "CONDITIONAL", "COUNTERFACTUAL"] = "ACTUAL"
     epistemic_stance: str | None = None
     stance_holder: str | None = None
+    # Phase 19: adaptive-loop provenance fields. Extends (rather than
+    # duplicates, per the audit-first requirement) the existing canonical
+    # evidence model with the identity/linkage EvidenceRequest ->
+    # EvidenceProvider -> EvidenceItem needs. All optional and unset for
+    # every pre-Phase-19 EvidenceItem (finding-text claims, tool results,
+    # etc.) -- only evidence acquired through the new
+    # app.agent.nodes.evidence_acquisition path populates them.
+    evidence_id: str | None = None
+    request_id: str | None = None
+    question_id: str | None = None
+    iteration_id: int | None = None
+    collection_timestamp: str | None = None
+    # The evidence's relationship to the SPECIFIC hypothesis/claim it was
+    # requested to resolve -- orthogonal to `status` (EvidenceStatus is
+    # about the evidence's own verification level; this is about what it
+    # says relative to the target). SUPPORTING/CONTRADICTING/CONFLICTING/
+    # INSUFFICIENT/UNAVAILABLE/UNRESOLVED per Phase 19 Section 3.
+    hypothesis_relevance: Literal[
+        "SUPPORTING", "CONTRADICTING", "CONFLICTING", "INSUFFICIENT", "UNAVAILABLE", "UNRESOLVED",
+    ] | None = None
+    supporting_claim_ids: list[str] = []
+    contradicting_claim_ids: list[str] = []
+    related_node_ids: list[str] = []
+    related_edge_ids: list[str] = []
+
+
+class EvidenceRequest(BaseModel):
+    """Phase 19 Section 1/11: a structured request for evidence to resolve
+    ONE Stage-B investigation target. Built deterministically from an
+    InvestigationQuestion -- never from raw finding text -- and consumed by
+    an EvidenceProvider implementation, which is responsible only for
+    retrieval, never for causal judgment (Section 1: "Do not make the
+    provider responsible for deciding causality")."""
+    request_id: str
+    question_id: str | None = None
+    target_node_id: str | None = None
+    target_edge_id: str | None = None
+    hypothesis_ids: list[str] = []
+    evidence_types: list[str] = []
+    required_artifacts: list[str] = []
+    objective: str = ""
+    iteration_id: int = 0
+    graph_version: int = 0
+    # Phase 22 Part B/C/D: request lifecycle. `status` starts REQUESTED and
+    # is updated deterministically by app.agent.nodes.evidence_acquisition
+    # once evidence comes back (FULFILLED when it resolves the target,
+    # UNRESOLVED when it doesn't -- never CANCELLED/SUPERSEDED by this
+    # engine except when a genuine refinement request supersedes it, see
+    # `parent_request_id`). Never wording-based -- see
+    # `evidence_acquisition.request_identity` for the deterministic
+    # structured identity these states key off of.
+    status: Literal[
+        "REQUESTED", "FULFILLED", "PARTIALLY_FULFILLED", "SUPERSEDED", "UNRESOLVED", "CANCELLED",
+    ] = "REQUESTED"
+    # Set ONLY when this request is a genuine refinement of an earlier
+    # request that came back insufficient (same target, narrower/different
+    # evidence requirement) -- the parent is marked SUPERSEDED, never
+    # deleted, so the chain "why was R2 created" stays inspectable.
+    parent_request_id: str | None = None
+
+
+class HypothesisStatusChange(BaseModel):
+    """Phase 19 Section 8: one entry in a hypothesis's status-transition
+    history. Never overwritten -- app.agent.nodes.evidence_acquisition
+    APPENDS one of these per transition, so "why did this hypothesis
+    become supported" always has a real, inspectable provenance chain
+    instead of only the current status."""
+    hypothesis_id: str
+    previous_status: str
+    new_status: str
+    changed_by_evidence_ids: list[str] = []
+    changed_by_claim_ids: list[str] = []
+    graph_version: int = 0
+    iteration_id: int = 0
+    reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +1098,26 @@ class FiveWhyStep(BaseModel):
     # MIXED: the answer combines clauses with DIFFERENT evidence provenance
     # CONFLICTING / CONFLICTING_REPORTS: conflicting reported statements on a proposition
     status: Literal["VERIFIED", "SUPPORTED", "REPORTED", "REPORTED_STATEMENT", "REPORTED_UNVERIFIED", "MIXED", "CONFLICTING", "CONFLICTING_REPORTS", "INFERRED", "UNKNOWN", "REQUIRES_EVIDENCE", "NOT_ESTABLISHED"]
-
+    # Phase 3: causal-graph grounding fields. Populated ONLY when this step
+    # corresponds to a real edge in AgentState["causal_graph"] (either
+    # produced directly by graph traversal, or attached retroactively when
+    # a prose-generated step is matched to a real edge) — never fabricated
+    # to satisfy a schema requirement. A step with these fields unset is
+    # honestly reporting that no causal-graph grounding exists for it.
+    step_id: str | None = None
+    source_node_id: str | None = None
+    target_node_id: str | None = None
+    causal_edge_id: str | None = None
+    evidence_ids: list[str] = []
+    proposition_ids: list[str] = []
+    causal_level: str | None = None
+    provenance: str | None = None
+    # Phase 11 Step 5/8: explicit marker for a terminal evidence-boundary
+    # step (no further causal edge is licensed from this node) versus a
+    # real causal transition. Distinguishes "the chain legitimately
+    # continues no further" from "this step IS a causal transition" —
+    # never both true at once for the same step.
+    boundary_status: Literal["TRANSITION", "EVIDENCE_BOUNDARY"] | None = None
 
 
 class FiveWhyAnalysis(BaseModel):
@@ -772,7 +1183,49 @@ class CandidateHypothesis(BaseModel):
     confidence: Literal["HIGH", "MEDIUM", "LOW"] | None = None
     source_type: str = "INFERRED_INVESTIGATION_HYPOTHESIS"
     causal_role: Literal["PRIMARY_CAUSE", "CONTRIBUTING_CAUSE", "DETECTION_FAILURE", "SYSTEMIC_CAUSE", "IMPACT_FACTOR"] = "PRIMARY_CAUSE"
-
+    # Phase 6 Section 3: graph-native back-reference. Populated ONLY by
+    # app.agent.causal_graph.build_causal_graph, AFTER it has decided (via
+    # the pre-existing, unchanged eligibility engine) whether this
+    # hypothesis is licensed to exist as a causal graph node/edge at all —
+    # never set by the LLM, never set by this model's own validators. A
+    # hypothesis with these fields unset honestly reports it has no current
+    # graph representation (e.g. REFUTED candidates are intentionally never
+    # stamped — see Section 8, "not every hypothesis... is licensed to
+    # exist as a graph node").
+    causal_node_id: str | None = None
+    causal_edge_id: str | None = None
+    causal_edge_source_node_id: str | None = None
+    # Phase 7 Section 5: EXPLICIT sequential causal chaining. When the LLM
+    # (or the deterministic generator) asserts that THIS hypothesis is a
+    # deeper causal explanation of another hypothesis already in the same
+    # candidate_hypotheses list, it cites that hypothesis's `id` here. This
+    # is validated (must reference a real id in the same response; a
+    # dangling reference is dropped, never trusted blindly) and, when the
+    # referenced hypothesis is itself graph-licensed, takes PRIORITY over
+    # the Phase 4 evidence-overlap heuristic when build_causal_graph decides
+    # this edge's source node — a real asserted transition, not an inferred
+    # one from incidental shared evidence.
+    deepens_hypothesis_id: str | None = None
+    # Phase 9 Step 5/6: stamped by app.agent.causal_graph.build_causal_paths
+    # with the id of this hypothesis's own independent CausalPath — never
+    # shared across competing hypotheses, since each is evaluated on its
+    # own supporting/contradicting evidence.
+    causal_path_id: str | None = None
+    # Phase 20 Part B/C: set to True ONLY by the single authoritative
+    # evidence->hypothesis evaluator (app.agent.nodes.evidence_acquisition.
+    # reconcile_hypothesis_from_evidence, called from the Phase 19 adaptive
+    # loop). Every OTHER status-writing site in the codebase (the pre-
+    # existing eligibility/promotion re-derivation loops in
+    # final_evidence_verification_node) must skip a hypothesis with this
+    # flag set rather than silently overwrite the authoritative decision --
+    # this is what makes "exactly one epistemic authority" a real,
+    # checkable runtime property (INV-INVEST-028) instead of a design
+    # intention. False for every hypothesis whose status has only ever been
+    # set by core_synthesis (initial LLM/deterministic synthesis) -- that
+    # is a proposal, not yet an authoritative evidence-grounded decision,
+    # and remains open to the existing eligibility/promotion logic exactly
+    # as before Phase 20.
+    status_locked: bool = False
 
 
 class CausalSufficiencyAssessment(BaseModel):
@@ -940,6 +1393,32 @@ class InvestigationQuestion(BaseModel):
     next_step_if_false: str | None = None
     decision_branches: list[str] = []
     discrimination_criterion: str | None = None
+    # Phase 4: real graph-grounded fields. Populated ONLY when this question
+    # was generated by app.agent.causal_graph.build_causal_uncertainty_graph
+    # + the graph-grounded question deriver in plan_investigation_fallback —
+    # never fabricated to satisfy a schema requirement. A question without
+    # these fields set is honestly reporting it came from the prose/template
+    # path, not the causal-graph path.
+    target_node_id: str | None = None
+    target_edge_id: str | None = None
+    source_node_id: str | None = None
+    causal_level: str | None = None
+    unresolved_relation: str | None = None
+    information_gain_rank: int | None = None
+    # Phase 14 Section 5: deterministic ordinal information-gain classification
+    # for a graph-grounded question, computed ONLY from the number of
+    # proposition_ids structurally backing its target causal-uncertainty edge
+    # (app.agent.causal_graph.rank_uncertainty_nodes_by_information_gain's
+    # same signal) -- never from lexical similarity, question length, or a
+    # fabricated probability. Unset for non-graph-grounded questions, same
+    # honesty contract as target_node_id/target_edge_id above.
+    information_gain_band: Literal["HIGH", "MEDIUM", "LOW"] | None = None
+    information_gain_reason: str | None = None
+    # Phase 17: which planning stage produced this question -- STAGE_A
+    # (pre-synthesis, semantic-graph-only) or STAGE_B (post-synthesis,
+    # reasons over CandidateHypothesis + licensed CausalGraph). Unset for
+    # legacy-template questions, honestly reporting they came from neither.
+    planner_stage: Literal["STAGE_A", "STAGE_B"] | None = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.question_id and self.id:
@@ -968,6 +1447,73 @@ class InvestigationPlan(BaseModel):
     detection_control_questions: list[InvestigationQuestion] = []
     financial_questions: list[InvestigationQuestion] = []
     systemic_questions: list[InvestigationQuestion] = []
+    # Phase 15 Section 9: makes the one case where this codebase already
+    # legitimately produces zero questions (a non-actionable finding --
+    # plan_investigation_node's fast path in app/agent/nodes/
+    # investigation_planner.py) an explicit, machine-readable state instead
+    # of an empty list a caller has to interpret. Every OTHER path through
+    # build_deterministic_investigation_plan still always returns at least
+    # one question (Section 8's "plan.questions is NEVER empty" guarantee,
+    # unchanged this phase -- see the Phase 15 report for why a broader
+    # NO_ACTIONABLE_UNCERTAINTY rollout was not attempted) — this field
+    # honestly reports QUESTIONS_GENERATED for every one of those, not a
+    # claim that a general graph-driven "nothing left to investigate"
+    # judgment exists yet.
+    status: Literal["QUESTIONS_GENERATED", "NO_ACTIONABLE_UNCERTAINTY"] = "QUESTIONS_GENERATED"
+    # Phase 16 Section 35: real observability over which planning path
+    # actually produced this plan's CONTENT. Populated by
+    # app.agent.nodes.graph_investigation_planner.plan_investigation_graph_first
+    # and consumed by app.agent.nodes.investigation_planner.plan_investigation_node
+    # — never a decorative label. See the Phase 16 report for the honest
+    # scope of what "GRAPH_FIRST" vs "LEGACY_FALLBACK" actually means here:
+    # question CONTENT for an actionable finding still comes from the
+    # deterministic template planner (a real, disclosed, unmigrated
+    # dependency: CandidateHypothesis/CausalGraph do not exist yet at
+    # investigation-planning time in the current LangGraph node ordering),
+    # while NO_ACTIONABLE_UNCERTAINTY and TARGET_UNRESOLVED are genuine
+    # graph-first structural judgments that own the plan outright.
+    planner_mode: Literal[
+        "NO_ACTIONABLE_UNCERTAINTY", "TARGET_UNRESOLVED", "GRAPH_FIRST", "LEGACY_FALLBACK",
+    ] | None = None
+    fallback_reason: str | None = None
+    graph_targets_considered: int = 0
+    graph_targets_selected: int = 0
+    # Phase 17: which planning stage produced this PLAN's content (as
+    # opposed to planner_mode, which describes the authoritative state).
+    # STAGE_A = app.agent.nodes.graph_investigation_planner (pre-synthesis).
+    # STAGE_B = app.agent.nodes.causal_investigation_planner (post-
+    # synthesis, reasons over real CandidateHypothesis + CausalGraph).
+    # None = legacy template planner.
+    planner_stage: Literal["STAGE_A", "STAGE_B"] | None = None
+
+
+class InvestigationIterationRecord(BaseModel):
+    """Phase 18 Section 2: one structured, serializable record of a single
+    Stage-B invocation, appended to AgentState["investigation_history"] by
+    app.agent.nodes.causal_investigation_planner. Never natural language --
+    every field is a real ID or structural signal, so the loop (and any
+    caller) can answer "what changed since the last iteration" from state
+    alone, not by re-reading generated prose."""
+    iteration_id: int
+    planner_stage: Literal["STAGE_A", "STAGE_B"] = "STAGE_B"
+    investigation_question_ids: list[str] = []
+    target_node_ids: list[str] = []
+    target_edge_ids: list[str] = []
+    hypothesis_ids: list[str] = []
+    evidence_ids: list[str] = []
+    causal_graph_version: int
+    unresolved_targets_before: list[str] = []
+    unresolved_targets_after: list[str] = []
+    newly_resolved_targets: list[str] = []
+    newly_created_uncertainties: list[str] = []
+    planner_decision: Literal[
+        "SAME_TARGET", "NEW_TARGET", "TARGET_RESOLVED", "HYPOTHESIS_ELIMINATED",
+        "NEW_UNCERTAINTY", "NO_ACTIONABLE_UNCERTAINTY",
+    ]
+    termination_reason: Literal[
+        "ROOT_CAUSE_VERIFIED", "CAUSAL_CHAIN_RESOLVED", "NO_ACTIONABLE_UNCERTAINTY",
+        "EVIDENCE_BOUNDARY_REACHED", "EVIDENCE_EXHAUSTED", "MAX_ITERATIONS", "FAIL_CLOSED",
+    ] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -995,6 +1541,11 @@ class ConditionalCapaAction(BaseModel):
     effectiveness_owner: str | None = None
     effectiveness_review_period: str | None = None
     root_cause_hypothesis_id: str | None = None
+    # Phase 22 Part H: traceability to the claims that grounded the
+    # hypothesis this branch is conditional on, when available (mirrors
+    # CandidateHypothesis.supporting_claim_ids -- never a second, competing
+    # vocabulary).
+    supporting_claim_ids: list[str] = []
 
 
 class CapaAnalysis(BaseModel):
@@ -1180,6 +1731,17 @@ class InvestigationReport(BaseModel):
     referenced_documents: list[ReferencedDocumentInfo] = []
     semantic_graph: SemanticGraph = Field(default_factory=SemanticGraph)
     semantic_traceability: SemanticTraceabilityMatrix = Field(default_factory=SemanticTraceabilityMatrix)
+    causal_graph: CausalGraph | None = None
+    # Phase 6 Section 11: additive structural RCA projection. Populated
+    # alongside (never replacing) `root_cause` — a pure read of
+    # `causal_graph`, containing no independently-generated causal text.
+    rca_projection: CausalGraphRCAProjection | None = None
+    # Phase 6 Section 14: additive structural impact projection. Populated
+    # alongside (never replacing) `impact_assessment`.
+    impact_graph_projection: CausalGraphImpactProjection | None = None
+    # Phase 9 Step 6: real derived causal-path objects, one per hypothesis
+    # with a licensed edge chain back to the deviation.
+    causal_paths: list[CausalPath] = []
     human_review_required: bool = True  # always True -- enforced here, not just prompted
     analysis_mode: Literal["LLM", "DETERMINISTIC", "DEGRADED"] = "LLM"
     analysis_engine: Literal["LLM", "DETERMINISTIC"] = "LLM"

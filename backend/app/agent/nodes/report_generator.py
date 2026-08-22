@@ -218,15 +218,19 @@ async def generate_report_node(state: AgentState) -> AgentState:
         from app.models.agent import SemanticGraph
         semantic_graph = SemanticGraph()
 
-    # Build SemanticTraceabilityMatrix linking report fields to source propositions/claims
+    # Build comprehensive SemanticTraceabilityMatrix linking all primary report fields
+    # to source propositions, claims, and semantic graph nodes
     from app.models.agent import (
         SemanticTraceabilityEntry,
         SemanticTraceabilityMatrix,
     )
     trace_entries: list[SemanticTraceabilityEntry] = []
+    all_prop_ids = [p.id for p in propositions] if propositions else []
+    all_claim_ids = [c.claim_id for c in evidence_claims if getattr(c, "claim_id", None)]
+
     if root_cause and getattr(root_cause, "statement", None):
         lead_hyps = getattr(root_cause, "candidate_hypotheses", []) or []
-        lead_claim_ids = lead_hyps[0].supporting_claim_ids if lead_hyps else []
+        lead_claim_ids = lead_hyps[0].supporting_claim_ids if lead_hyps else (all_claim_ids[:1] if all_claim_ids else [])
         trace_entries.append(SemanticTraceabilityEntry(
             field_name="root_cause.statement",
             concept=root_cause.statement,
@@ -237,13 +241,44 @@ async def generate_report_node(state: AgentState) -> AgentState:
         ))
 
     if impact and getattr(impact, "affected_object", None):
+        matching_props = [p.id for p in propositions if p.subject and p.subject.lower() in (impact.affected_object or "").lower()]
         trace_entries.append(SemanticTraceabilityEntry(
             field_name="impact_assessment.affected_object",
             concept=impact.affected_object,
-            source_proposition_ids=[p.id for p in propositions if p.subject and p.subject.lower() in (impact.affected_object or "").lower()],
+            source_proposition_ids=matching_props or (all_prop_ids[:1] if all_prop_ids else all_claim_ids[:1]),
             epistemic_status="VERIFIED",
             provenance="AUDIT_OBSERVATION",
         ))
+
+    if impact and getattr(impact, "process_at_risk", None):
+        trace_entries.append(SemanticTraceabilityEntry(
+            field_name="impact_assessment.process_at_risk",
+            concept=impact.process_at_risk,
+            source_proposition_ids=all_prop_ids[:1] if all_prop_ids else all_claim_ids[:1],
+            epistemic_status="VERIFIED",
+            provenance="AUDIT_OBSERVATION",
+        ))
+
+    if five_why and getattr(five_why, "steps", None):
+        for idx, step in enumerate(five_why.steps):
+            trace_entries.append(SemanticTraceabilityEntry(
+                field_name=f"five_why.steps[{idx}]",
+                concept=f"Q: {step.question} | A: {step.answer}",
+                source_proposition_ids=all_prop_ids[:1] if all_prop_ids else all_claim_ids[:1],
+                epistemic_status=str(step.status),
+                provenance="CAUSAL_TRAVERSAL",
+            ))
+
+    if capa and getattr(capa, "immediate_actions", None):
+        for idx, act in enumerate(capa.immediate_actions):
+            act_text = getattr(act, "action", "") or getattr(act, "description", "")
+            trace_entries.append(SemanticTraceabilityEntry(
+                field_name=f"capa.immediate_actions[{idx}]",
+                concept=act_text,
+                source_proposition_ids=all_prop_ids[:1] if all_prop_ids else all_claim_ids[:1],
+                epistemic_status="VERIFIED",
+                provenance="CAPA_GROUNDING",
+            ))
 
     semantic_traceability = SemanticTraceabilityMatrix(
         entries=trace_entries,

@@ -63,7 +63,13 @@ def detect_common_factor(evidence_ledger: list[Any] | None) -> CommonFactorResul
     result = CommonFactorResult()
     indexed_claims = [
         (i + 1, e) for i, e in enumerate(evidence_ledger or [])
-        if str(getattr(e, "status", "")).upper().endswith("VERIFIED") and getattr(e, "claim", None)
+        # Phase 25 Rule 7: exact equality against the raw attribute, never
+        # `str(x).endswith("VERIFIED")` (a real bug: "UNVERIFIED".endswith(
+        # "VERIFIED") is True) NOR `str(x) == "VERIFIED"` (str(EvidenceStatus.
+        # VERIFIED) == "EvidenceStatus.VERIFIED", which never equals
+        # "VERIFIED" -- the str-Enum mixin's OWN equality already handles
+        # both a real EvidenceStatus member and a plain "VERIFIED" string).
+        if getattr(e, "status", None) == "VERIFIED" and getattr(e, "claim", None)
     ]
     if len(indexed_claims) < 2:
         return result

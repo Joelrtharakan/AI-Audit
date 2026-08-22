@@ -7,7 +7,10 @@ directly from canonical finding semantics, claim conflicts, and mechanism polari
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 from app.models.agent import (
     CandidateHypothesis,
@@ -2626,6 +2629,63 @@ def build_deterministic_investigation_plan(
             f"Root cause analysis and scope documentation from previous {recurrence_topic} CAPA",
         ])
 
+    # -----------------------------------------------------------------------
+    # Phase 4 Section 3/4: graph-grounded investigation question(s), derived
+    # from the pre-investigation CausalUncertaintyGraph (built from the
+    # semantic graph alone — the only causal structure that actually exists
+    # at planning time, since CandidateHypothesis data doesn't exist until
+    # core_synthesis runs afterward). Appended to, never replacing, the
+    # existing question set; capped at 2 to avoid flooding an already
+    # complete plan, and only added when the underlying uncertainty node
+    # is not already covered by an existing question's target vocabulary.
+    # -----------------------------------------------------------------------
+    if canonical_state is not None:
+        try:
+            from app.agent.causal_graph import (
+                build_causal_uncertainty_graph,
+                information_gain_band_for_edge,
+                rank_uncertainty_nodes_by_information_gain,
+            )
+            _uncertainty_graph = build_causal_uncertainty_graph(canonical_state)
+            _ranked = rank_uncertainty_nodes_by_information_gain(_uncertainty_graph)
+            _edge_by_target = {e.target_node_id: e for e in _uncertainty_graph.edges}
+            _existing_q_text = " ".join(q.question.lower() for q in questions)
+            _added = 0
+            for _node in _ranked:
+                if _added >= 2:
+                    break
+                if _node.label.lower() in _existing_q_text:
+                    continue
+                _edge = _edge_by_target.get(_node.node_id)
+                if _edge is None:
+                    continue
+                _added += 1
+                _gain_band, _gain_reason = information_gain_band_for_edge(_edge)
+                questions.append(InvestigationQuestion(
+                    question_id=f"Q_GRAPH_{_added}",
+                    id=f"Q_GRAPH_{_added}",
+                    question=(
+                        f"What objective evidence establishes the causal mechanism connecting "
+                        f"the observed deviation to {_node.label}?"
+                    ),
+                    purpose=f"Resolve unresolved causal edge to {_node.label}",
+                    objective=f"Resolve unresolved causal edge to {_node.label}",
+                    evidence="Objective records establishing the causal mechanism",
+                    evidence_required="Objective records establishing the causal mechanism",
+                    target_type="OTHER",
+                    target_node_id=_node.node_id,
+                    target_edge_id=_edge.edge_id,
+                    source_node_id=_edge.source_node_id,
+                    causal_level=str(_node.causal_level),
+                    unresolved_relation=_edge.notes,
+                    information_gain_rank=_added,
+                    information_gain_band=_gain_band,
+                    information_gain_reason=_gain_reason,
+                    priority="HIGH",
+                ))
+        except Exception as _ug_err:  # pragma: no cover — defensive, never fatal to planning
+            logger.warning("Causal uncertainty graph question derivation failed: %s", _ug_err)
+
     # Standardize all question fields to satisfy Section 5 schema
     for i, q in enumerate(questions):
         if not q.id:
@@ -2684,6 +2744,15 @@ def build_conditional_capa_actions(
     topic_cap = topic[0].upper() + topic[1:]
     actions: list[ConditionalCapaAction] = []
     for h in hypotheses:
+        # Phase 22 Part G: a REFUTED hypothesis is not "IF confirmed" --
+        # it has already been determined not to be the cause (by the sole
+        # authoritative evaluator; see app.agent.nodes.evidence_acquisition.
+        # reconcile_hypothesis_from_evidence). Recommending a conditional
+        # action for it would misrepresent an already-closed question as
+        # still open.
+        if str(getattr(h, "status", "")) == "REFUTED":
+            continue
+        _actions_before = len(actions)
         name = h.name.upper()
         condition = f"IF {h.id} ({h.name.replace('_', ' ').title()}) is confirmed"
         if name.endswith("NOT_COMPLETED"):
@@ -2713,6 +2782,9 @@ def build_conditional_capa_actions(
                 verification_method=f"{topic_cap} completion is documented and verified before authorization.",
                 evidence_needed=f"Authenticated {topic} attendance/completion record",
             ))
+            for branch in actions[_actions_before:]:
+                branch.root_cause_hypothesis_id = h.id
+                branch.supporting_claim_ids = list(getattr(h, "supporting_claim_ids", None) or [])
             continue
         elif "RECORD_UNAVAILABLE" in name or "RECORD_OMISSION" in name:
             action = f"Improve controlled storage, retrieval, and traceability of {topic} completion records."
@@ -2792,6 +2864,13 @@ def build_conditional_capa_actions(
             effectiveness_owner="TO_BE_ASSIGNED" if is_recurrence_action else None,
             effectiveness_review_period="TO_BE_DEFINED" if is_recurrence_action else None,
         ))
+        # Phase 22 Part H: stamp every branch generated for this hypothesis
+        # with its traceability -- which hypothesis, and which claims (if
+        # any) grounded it -- rather than leaving CAPA's link back to the
+        # evidence chain implicit in prose only.
+        for branch in actions[_actions_before:]:
+            branch.root_cause_hypothesis_id = h.id
+            branch.supporting_claim_ids = list(getattr(h, "supporting_claim_ids", None) or [])
     return actions
 
 

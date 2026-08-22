@@ -531,11 +531,41 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             source_claim_id=_meas_claim_id,
         )
 
+    # Align affected_object and affected_process with semantic graph nodes
+    from app.models.agent import EpistemicSource, SemanticNode, SemanticNodeType
+    _aff_obj = resolved.affected_object or deviation_subject
+    if _aff_obj and not _aff_obj.startswith("UNKNOWN") and not _aff_obj.startswith("UNRESOLVED"):
+        _existing_nodes = {n.label.strip().lower(): n for n in semantic_graph.nodes}
+        if _aff_obj.strip().lower() not in _existing_nodes:
+            semantic_graph.nodes.append(
+                SemanticNode(
+                    id=f"N{len(semantic_graph.nodes) + 1}",
+                    label=_aff_obj,
+                    node_type=SemanticNodeType.ENTITY,
+                    epistemic_status=EvidenceStatus.VERIFIED,
+                    provenance=EpistemicSource.AUDIT_OBSERVATION,
+                )
+            )
+
+    _aff_proc = resolved.affected_process or "UNKNOWN"
+    if _aff_proc and _aff_proc not in ("UNKNOWN", "NOT_ESTABLISHED", "UNRESOLVED"):
+        _existing_nodes = {n.label.strip().lower(): n for n in semantic_graph.nodes}
+        if _aff_proc.strip().lower() not in _existing_nodes:
+            semantic_graph.nodes.append(
+                SemanticNode(
+                    id=f"N{len(semantic_graph.nodes) + 1}",
+                    label=_aff_proc,
+                    node_type=SemanticNodeType.PROCESS,
+                    epistemic_status=EvidenceStatus.VERIFIED,
+                    provenance=EpistemicSource.AUDIT_OBSERVATION,
+                )
+            )
+
     canonical_state = CanonicalFindingState(
         raw_finding=request.finding_text,
         finding_subject=deviation_subject,
-        affected_object=resolved.affected_object or deviation_subject,
-        affected_process=resolved.affected_process or "UNKNOWN",
+        affected_object=_aff_obj,
+        affected_process=_aff_proc,
         affected_activity=resolved.affected_activity or "UNKNOWN",
         deviation=observed_deviation,
         observed_deviation=observed_deviation,
@@ -636,6 +666,24 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     # Deterministically enforce Observation Quality Sufficiency (Section 1 & 2):
     # If a concrete affected object and observed deviation exist, quality is SUFFICIENT.
     # Root cause uncertainty must NEVER downgrade observation quality.
+    #
+    # Release-gate note: a variant of this fix was tried and reverted. The
+    # `canonical_state.is_actionable` precondition below is NOT redundant --
+    # it is a deliberate AND-gate: deviation_subject/observed_deviation can
+    # carry non-trivial fallback/placeholder text even for genuinely
+    # non-actionable input (e.g. "Hi"), so requiring is_actionable to
+    # ALREADY be True before this correction fires is what prevents
+    # exactly that over-correction. Removing it caused a real, confirmed
+    # regression (test_input_actionability_regression.py) where
+    # conversational/prompt-injection inputs were incorrectly upgraded to
+    # SUFFICIENT/actionable. The originally-hypothesized failure mode this
+    # was meant to fix (an LLM quality-check call failing and leaving
+    # is_actionable stale) does not occur on this path in practice: the
+    # LLM-based app.services.observation_quality.check_observation_quality
+    # is not called here at all -- the quality determination above (lines
+    # ~162-187) is fully deterministic. See Stage B's plan_investigation_causal
+    # for where the actual reachable "zero hypotheses is not verified
+    # non-actionability" gap was found and fixed instead.
     from app.models.analysis import ObservationQualityResult, ObservationQualityStatus
     if canonical_state.is_actionable and not deviation_subject.startswith("UNKNOWN") and len(observed_deviation.strip()) >= 5:
         # Unless text is extremely vague ("something was wrong"), mark as SUFFICIENT

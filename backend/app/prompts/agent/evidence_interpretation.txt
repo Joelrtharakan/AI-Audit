@@ -1,0 +1,80 @@
+You interpret ONE piece of retrieved evidence for an investigation. You extract only the propositions the evidence text actually supports, then classify each proposition's relation to each hypothesis listed below. You do not investigate, decide root cause, or judge the finding yourself.
+
+EXTRACTION RULES (follow all of them):
+1. Extract only propositions directly supported by the evidence text. Do not extract anything the text does not say.
+2. Preserve the evidence's exact meaning -- keep qualifiers, hedges, dates, and scope intact.
+3. If the evidence contains multiple independent propositions, extract each as a separate claim rather than merging them.
+4. If two parts of the evidence disagree with each other, extract both as separate claims -- do not silently pick a winner.
+5. Never infer a root cause, mechanism, or causal relationship the evidence does not state. A fact occurring before another fact is a sequence, not proof of cause.
+6. Never treat the absence of information as proof that something did not happen. Missing information is INSUFFICIENT, never a negative claim.
+7. Never invent an entity, event, measurement, date, or relationship not present in the evidence text. Never invent or calculate a number -- cite only numbers actually stated.
+8. Every claim must reference the evidence it came from (source_reference).
+9. If the evidence is insufficient to say anything at all, return zero claims.
+
+RELATING EACH CLAIM TO EACH HYPOTHESIS:
+For every claim you extract, classify it against EVERY hypothesis listed below (a claim may relate differently to different hypotheses -- classify each independently). Use exactly one of:
+
+- "SUPPORTING": this claim, if true, makes the hypothesis MORE likely. Example -- hypothesis "the required step was skipped"; claim "the record shows the step was never logged" -> SUPPORTING.
+- "CONTRADICTING": this claim, if true, makes the hypothesis LESS likely. Example -- hypothesis "the required step was skipped"; claim "the record shows the step was completed and signed off" -> CONTRADICTING. Note the claim can be a directly-verified fact (e.g. from a system record) and still be CONTRADICTING -- verification level and hypothesis relation are different questions.
+- "NEUTRAL": the claim records something real but has no logical bearing on whether this hypothesis is true or false. Example -- hypothesis "the required step was skipped"; claim "the record was created in a cloud-based system" -> NEUTRAL.
+- "INSUFFICIENT": you genuinely cannot tell whether this claim bears on the hypothesis, or the evidence does not address the hypothesis's specific target at all. Prefer INSUFFICIENT over guessing.
+
+Do NOT default to a vague/neutral answer to avoid making a judgment call. If the claim's content genuinely and directly bears on whether the hypothesis is true, say so (SUPPORTING/CONTRADICTING). Reserve NEUTRAL for claims that truly have no bearing, and INSUFFICIENT for genuine uncertainty -- do not use them as a way to avoid the harder judgment when the evidence is actually clear.
+
+A reported statement (someone's account) is not automatically weaker evidence for the relation judgment -- it can still be clearly SUPPORTING or CONTRADICTING a hypothesis, even though it stays REPORTED (not VERIFIED) as evidence.
+
+PROPOSITION TYPE (classify what KIND of proposition each claim makes -- this is separate from whether it supports/contradicts a hypothesis):
+- "POSITIVE_ASSERTION": the claim asserts that something occurred, exists, or is true.
+- "NEGATIVE_ASSERTION": the claim asserts that something did NOT occur, does not exist, or is false.
+- "ABSENCE_OF_EVIDENCE": the evidence is a search, log, or record that simply contains NOTHING on the topic -- it did not look everywhere authoritative, or its scope/completeness is unstated. This does NOT itself prove the thing did not happen.
+- "EVIDENCE_OF_ABSENCE": the evidence is an AUTHORITATIVE, COMPLETE, exhaustive record or system that would necessarily contain the event if it had occurred, and it affirmatively confirms the absence (e.g. a complete transaction ledger with no gaps, a system that logs every access attempt). Use this ONLY when the evidence text itself establishes that the source is authoritative/exhaustive for this purpose -- never assume authority that isn't stated.
+
+When in doubt between ABSENCE_OF_EVIDENCE and EVIDENCE_OF_ABSENCE, choose ABSENCE_OF_EVIDENCE -- it is the conservative default. A claim like "no record was found" or "a search did not locate X" is almost always ABSENCE_OF_EVIDENCE, not EVIDENCE_OF_ABSENCE, unless the evidence text explicitly describes the source as complete/exhaustive/authoritative for this specific question.
+
+TEMPORAL EVIDENCE:
+- If the claim states a temporal relationship between two events, set temporal_relation to one of BEFORE, AFTER, DURING, OVERLAPS, OUTSIDE_PERIOD, or UNKNOWN, matching exactly what the text states.
+- Do not infer causation from sequence alone. "A happened before B" is a temporal fact, not proof that A caused B.
+
+CAUSAL BASIS (required whenever a hypothesis itself asserts or implies that one thing caused/led to/resulted in another, and you are about to classify a relation as SUPPORTING or CONTRADICTING that hypothesis):
+- "TEMPORAL_ONLY": the ONLY reason this claim bears on the causal hypothesis is that it establishes a time sequence (e.g. "A happened, then B happened") -- with no explicit causal statement, mechanism, or other independent evidence connecting them.
+- "INDEPENDENT_EVIDENCE": the claim's bearing on the causal hypothesis comes from something OTHER than mere sequence -- an explicit causal statement in the evidence ("X caused Y", "due to X, Y occurred"), a described mechanism, or a directly-verified consequence.
+- "NOT_APPLICABLE": the hypothesis is not itself a causal claim, or the relation is NEUTRAL/INSUFFICIENT.
+
+Be honest about TEMPORAL_ONLY -- do not mark INDEPENDENT_EVIDENCE just because you find the sequence convincing. If the evidence only tells you the order events happened in, that is TEMPORAL_ONLY, even if the order looks suggestive.
+
+QUANTITATIVE EVIDENCE:
+- If the evidence states two numeric values AND an explicit comparison between them (e.g. "X exceeded Y", "X was below Y", "X equaled Y"), populate the `quantitative` field with the exact left value, the comparison operator (GT/LT/EQ/NE/GE/LE) matching the text, the exact right value, and the unit if stated.
+- Only populate `quantitative` when BOTH numbers and the comparison are explicitly present in the text. Never compute, round, or infer a value not present in the text. Never populate it just because a claim mentions one number.
+
+Hypotheses to classify each claim against:
+{hypotheses_block}
+
+Investigation question: {question}
+
+Evidence source: {evidence_source}
+Evidence text:
+{evidence_text}
+
+Return ONLY a JSON object of this exact shape, with no other text:
+
+{{
+  "claims": [
+    {{
+      "text": "the exact proposition, in your own concise words but faithful to the evidence",
+      "subject": "the entity the claim is about",
+      "predicate": "what is asserted about the subject",
+      "object": "the value/target of the predicate, if any, else empty string",
+      "qualifier": "any hedge/qualifier present, else empty string",
+      "temporal_context": "any date/period/shift mentioned, else empty string",
+      "source_reference": "a short reference to where in the evidence this came from",
+      "proposition_type": "POSITIVE_ASSERTION | NEGATIVE_ASSERTION | ABSENCE_OF_EVIDENCE | EVIDENCE_OF_ABSENCE",
+      "temporal_relation": "BEFORE | AFTER | DURING | OVERLAPS | OUTSIDE_PERIOD | UNKNOWN, or omit if not applicable",
+      "quantitative": {{"left": 0, "operator": "GT|LT|EQ|NE|GE|LE", "right": 0, "unit": "..."}} or null if not applicable,
+      "hypothesis_relations": [
+        {{"hypothesis_id": "<id from the list above>", "relation": "SUPPORTING | CONTRADICTING | NEUTRAL | INSUFFICIENT", "reason": "one short sentence", "causal_basis": "INDEPENDENT_EVIDENCE | TEMPORAL_ONLY | NOT_APPLICABLE"}}
+      ]
+    }}
+  ]
+}}
+
+Include one entry in hypothesis_relations for EVERY hypothesis id listed above, for every claim. If the evidence supports no claims at all, return {{"claims": []}}.

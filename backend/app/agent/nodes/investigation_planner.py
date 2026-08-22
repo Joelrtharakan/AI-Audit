@@ -41,12 +41,27 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     settings = get_settings()
     plan = InvestigationPlan()
 
-    # NON-ACTIONABLE FAST PATH: if input contains no actionable audit finding,
-    # do NOT manufacture false investigation plans, questions, or tool calls.
+    # Phase 16: the graph-first planner is called FIRST and unconditionally
+    # — it, not a settings flag or a heuristic buried in the legacy
+    # planner, decides which of NO_ACTIONABLE_UNCERTAINTY /
+    # TARGET_UNRESOLVED / content-bearing applies to this run. See
+    # app.agent.nodes.graph_investigation_planner's module docstring for
+    # the precise, audited scope of what "authoritative" means here.
     canonical = state.get("canonical_finding_state")
-    if canonical and not getattr(canonical, "is_actionable", True):
-        trace.append(AgentTraceStep.ok("Investigation Planner: non-actionable input — investigation plan not applicable"))
-        state["investigation_plan"] = InvestigationPlan(areas=[], questions=[], evidence_to_collect=[])
+    from app.agent.nodes.graph_investigation_planner import plan_investigation_graph_first
+    _graph_result = plan_investigation_graph_first(canonical)
+    if canonical is not None:
+        try:
+            from app.agent.causal_graph import build_causal_uncertainty_graph
+            state["causal_uncertainty_graph"] = build_causal_uncertainty_graph(canonical)
+        except Exception as _ug_err:
+            logger.warning("Causal uncertainty graph construction failed (non-fatal): %s", _ug_err)
+
+    if _graph_result.planner_mode == "NO_ACTIONABLE_UNCERTAINTY":
+        trace.append(AgentTraceStep.ok(
+            f"Investigation Planner: NO_ACTIONABLE_UNCERTAINTY ({_graph_result.reason})"
+        ))
+        state["investigation_plan"] = _graph_result.plan
         state["needs_investigation"] = False
         state["planned_tools"] = []
         state["trace"] = trace
@@ -60,20 +75,37 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     if not settings.lqms_aspnet_base_url and not is_mocked:
         from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
         from app.agent.causal_guard import select_investigation_strategy
-        
+
         prim_unc = getattr(canonical, "primary_uncertainty", "UNKNOWN") if canonical else "UNKNOWN"
         strategy_label = select_investigation_strategy(prim_unc, canonical)
-        
+
         _, plan = build_deterministic_investigation_plan(
             request.finding_text,
             state.get("evidence_ledger", []),
             canonical_subject=getattr(canonical, "finding_subject", None),
             canonical_state=canonical,
         )
-        
+        # Phase 16 Section 16/35: label this plan's content source honestly.
+        # TARGET_UNRESOLVED means the graph-first planner itself could not
+        # determine a target (missing/empty semantic_graph) and this is a
+        # genuine, observable fallback. Otherwise, question CONTENT still
+        # comes from the legacy template planner even though real
+        # graph-first targets were identified (planner_mode="LEGACY_FALLBACK"
+        # with an honest fallback_reason) -- see the module docstring on
+        # graph_investigation_planner for exactly why this dependency is
+        # not yet closed.
+        plan.planner_mode = _graph_result.planner_mode if _graph_result.planner_mode == "TARGET_UNRESOLVED" else "LEGACY_FALLBACK"
+        plan.fallback_reason = (
+            _graph_result.reason if _graph_result.planner_mode == "TARGET_UNRESOLVED"
+            else "graph-first targets identified but question content generation is not yet migrated off the legacy template planner (CandidateHypothesis/CausalGraph do not exist at investigation-planning time)"
+        )
+        plan.graph_targets_considered = _graph_result.graph_targets_considered
+        plan.graph_targets_selected = 0
+
         trace.append(AgentTraceStep.ok(
             f"Investigation Planner: constructed plan for uncertainty '{prim_unc}' "
-            f"via strategy '{strategy_label}' with {len(plan.questions)} question(s) (fast-path)"
+            f"via strategy '{strategy_label}' with {len(plan.questions)} question(s) "
+            f"(fast-path, planner_mode={plan.planner_mode})"
         ))
         state["investigation_plan"] = plan
         state["needs_investigation"] = False
@@ -224,6 +256,62 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
             kept_questions.append(iq)
         plan.questions = kept_questions
 
+        # -----------------------------------------------------------------
+        # Phase 5 Section 8: LLM questions are candidates, never authoritative.
+        # Resolve each surviving question against the pre-investigation
+        # causal-uncertainty graph; attach target_node_id/causal_level where
+        # a real structural match exists (informational grounding). Reject
+        # only when the uncertainty graph DOES contain unresolved structure
+        # and a question overlaps NONE of it — an LLM question that ignores
+        # every real structural uncertainty in the finding is exactly the
+        # "generic checklist" this architecture must not surface. A finding
+        # with an empty uncertainty graph (no normative deviation captured
+        # in the semantic graph) is not held to this bar — there is nothing
+        # structural to validate against yet.
+        # -----------------------------------------------------------------
+        if canonical is not None:
+            try:
+                from app.agent.causal_graph import build_causal_uncertainty_graph
+                from app.services.text_grounding import significant_words as _sig_words
+                _ug = build_causal_uncertainty_graph(canonical)
+                _unresolved_nodes = [
+                    n for n in _ug.nodes if n.node_type.value == "UNRESOLVED"
+                ]
+                if _unresolved_nodes:
+                    _edge_by_target = {e.target_node_id: e for e in _ug.edges}
+                    _node_words = {n.node_id: _sig_words(n.label) for n in _unresolved_nodes}
+                    _validated_questions = []
+                    for iq in plan.questions:
+                        q_words = _sig_words(iq.question)
+                        matched = next(
+                            (n for n in _unresolved_nodes if q_words & _node_words[n.node_id]),
+                            None,
+                        )
+                        if matched is not None:
+                            iq.target_node_id = matched.node_id
+                            edge = _edge_by_target.get(matched.node_id)
+                            if edge is not None:
+                                iq.target_edge_id = edge.edge_id
+                                iq.source_node_id = edge.source_node_id
+                            iq.causal_level = str(matched.causal_level)
+                            _validated_questions.append(iq)
+                            continue
+                        # Not grounded — still keep it if it overlaps the
+                        # evidence-to-collect vocabulary (Section 8 validates
+                        # against graph OR evidence requirement, not graph
+                        # alone, since a legitimate context question may not
+                        # map onto a normative-violation node specifically).
+                        if any(q_words & significant_words(e) for e in plan.evidence_to_collect):
+                            _validated_questions.append(iq)
+                            continue
+                        trace.append(AgentTraceStep.warn(
+                            f"LLM investigation question rejected — resolves to no unresolved "
+                            f"causal-graph structure and no evidence requirement: {iq.question!r}"
+                        ))
+                    plan.questions = _validated_questions
+            except Exception as _val_err:
+                logger.warning("LLM question graph-target validation failed (non-fatal): %s", _val_err)
+
         # QUESTION -> EVIDENCE CONSISTENCY CHECK (over structured questions)
         evidence_vocab = [significant_words(e) for e in plan.evidence_to_collect]
         for iq in plan.questions:
@@ -242,6 +330,7 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
             _, fallback_plan = build_deterministic_investigation_plan(
                 request.finding_text, state.get("evidence_ledger", []),
                 canonical_subject=getattr(_canonical, "finding_subject", None),
+                canonical_state=_canonical,
             )
             plan = fallback_plan
             trace.append(AgentTraceStep.warn("Investigation Planner: generated fallback questions and evidence plan"))
@@ -265,7 +354,16 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
         _, plan = build_deterministic_investigation_plan(
             request.finding_text, state.get("evidence_ledger", []),
             canonical_subject=getattr(_canonical, "finding_subject", None),
+            canonical_state=_canonical,
         )
+
+    _uncertainty_graph = state.get("causal_uncertainty_graph")
+    if _uncertainty_graph is None and canonical is not None:
+        try:
+            from app.agent.causal_graph import build_causal_uncertainty_graph
+            _uncertainty_graph = build_causal_uncertainty_graph(canonical)
+        except Exception as _ug_err:
+            logger.warning("Causal uncertainty graph construction failed (non-fatal): %s", _ug_err)
 
     return {
         **state,
@@ -274,6 +372,7 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
         "completed_tools": [],
         "current_tool": None,
         "investigation_plan": plan,
+        "causal_uncertainty_graph": _uncertainty_graph,
         "trace": trace,
         "errors": errors,
     }
