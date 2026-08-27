@@ -150,6 +150,14 @@ class FinancialObservation(BaseModel):
     # one remediation observation over several others, rather than
     # guessing which of multiple stated amounts is authoritative.
     is_aggregate_total: bool = False
+    # Provenance: True when this observation is the DERIVED RESULT of a
+    # calculation over other claims (e.g. event_count x amount_per_event),
+    # rather than a value directly stated by a single evidence item. The
+    # semantic materializer sets this so that a separate claim which merely
+    # restates a value already consumed as a component of -- or produced as
+    # -- this derived result is not aggregated again as an independent
+    # exposure (see app.financial.relationship_validator).
+    is_derived: bool = False
 
     @field_validator("amount", "amount_min", "amount_max", "unit_amount", "quantity", "recovery_amount", mode="before")
     @classmethod

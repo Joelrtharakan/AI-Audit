@@ -150,7 +150,11 @@ async def analyze_financial_exposure_semantic(
 
     if status == "NO_EVIDENCE":
         return None
-    if status != "OK" or interpretation is None:
+    if interpretation is None:
+        # Genuinely nothing usable came back (no provider, or output that
+        # not even compositional salvage could parse). This is the ONLY
+        # path that yields a number-free honest-failure result -- a
+        # partial / incomplete interpretation is still processed below.
         detail = {
             "LLM_UNAVAILABLE": "The LLM financial-interpretation provider was unavailable, so no automated "
             "financial figure was produced. This is reported rather than substituted with a keyword estimate.",
@@ -158,8 +162,12 @@ async def analyze_financial_exposure_semantic(
             "No automated financial figure was produced.",
         }.get(status, "The LLM financial interpretation could not be completed.")
         return _honest_failure_result(status, detail), SemanticFinancialAnalysisAudit(
-            interpretation, SemanticValidationOutcome(semantic_status=status)  # type: ignore[arg-type]
+            None, SemanticValidationOutcome(semantic_status=status)  # type: ignore[arg-type]
         )
+    # status is "OK" or "LLM_INCOMPLETE" and we hold a (possibly partial)
+    # interpretation. Both flow through the SAME validate -> materialize ->
+    # calculate path: every independently-grounded financial fact it
+    # contains is used; a missing optional field never discards the rest.
 
     try:
         observations, outcome = validate_and_materialize(interpretation, evidence_count=len(evidence_ledger))

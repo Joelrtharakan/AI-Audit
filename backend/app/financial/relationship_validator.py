@@ -127,6 +127,32 @@ def _dimensional_unit(claim: SemanticClaim) -> str | None:
     return claim.unit
 
 
+def _amount_already_accounted(
+    accounted: list[tuple[str, str, float]],
+    population: str,
+    currency: str | None,
+    value: float | None,
+) -> bool:
+    """True when `value` (in `currency`, for `population`) has already been
+    consumed as a component of -- or produced as the derived result of --
+    an accepted calculation.
+
+    Such a value is the SAME money re-expressed by a separate claim (e.g.
+    an `amount_per_event` figure the LLM also emitted as a standalone
+    gross-exposure claim, or the product N x X restated as a "total"),
+    NOT an independent exposure, so it must not be summed a second time by
+    the downstream calculator. This is pure structural value-identity --
+    the same tolerance the calculator already uses for corroboration
+    de-duplication -- and special-cases no scenario, wording, currency,
+    cost factor, or amount."""
+    if value is None or currency is None:
+        return False
+    for pop, cur, v in accounted:
+        if pop == population and cur == currency and abs(v - value) <= max(1.0, abs(v) * 1e-6):
+            return True
+    return False
+
+
 def _units_compatible(a: str | None, b: str | None) -> bool:
     if not a or not b:
         return True  # a wildcard/unstated unit is compatible with anything
@@ -206,6 +232,15 @@ def validate_and_materialize(
     outcome = SemanticValidationOutcome()
     obs_idx = 1
     consumed_claim_ids: set[str] = set()
+    # (observation_population, currency, value) triples that an accepted
+    # calculation has already ACCOUNTED FOR -- every monetary component it
+    # consumed plus the derived result it produced. A later standalone
+    # monetary claim whose value matches one of these is a restatement of
+    # money already in the calculation graph, not a new exposure, and is
+    # withheld from independent aggregation (spec: a component of a
+    # calculation must not automatically become an additional exposure;
+    # a derived result must not be re-aggregated).
+    accounted_amounts: list[tuple[str, str, float]] = []
 
     validated_factor = _validate_cost_factor(interpretation, claims)
     # The LLM's own top-level relevance judgment gates the factor: if it
@@ -330,12 +365,28 @@ def validate_and_materialize(
             reject(calc.calculation_id, "CONFLICTING_CLAIMS", "An input claim has an unresolved conflict with another claim; refusing to arbitrarily select one.")
             continue
 
-        # D. Population -- all participating claims must share ONE
-        # population; no CURRENT_FINDING x HISTORICAL mixing.
+        # D. Population.
+        #  * MULTIPLY / ANNUALIZE: every input must describe ONE population
+        #    -- a rate only applies to a quantity of the SAME population,
+        #    and a historical count must never borrow a current rate.
+        #  * SUBTRACT / SUM / DIVIDE: a RECOVERY / REMEDIATION / PREVENTION
+        #    claim is DEFINITIONALLY a different population from the gross
+        #    it nets against; that cross-population pairing is the entire
+        #    point of the operation and must not be rejected as a
+        #    "mismatch". What stays fatal for every operation is mixing
+        #    CURRENT_FINDING with HISTORICAL (different time periods are
+        #    never silently combined).
         populations = {c.population for c in input_claims}
-        if len(populations) > 1:
-            reject(calc.calculation_id, "POPULATION_MISMATCH", f"Claims span multiple populations: {sorted(populations)}.")
-            continue
+        _NETTING_POPS = {"RECOVERY", "REMEDIATION", "PREVENTION"}
+        _base_pops = {p for p in populations if p not in _NETTING_POPS}
+        if calc.operation in ("MULTIPLY", "ANNUALIZE"):
+            if len(populations) > 1:
+                reject(calc.calculation_id, "POPULATION_MISMATCH", f"Claims span multiple populations: {sorted(populations)}.")
+                continue
+        else:
+            if {"CURRENT_FINDING", "HISTORICAL"}.issubset(_base_pops) or len(_base_pops) > 1:
+                reject(calc.calculation_id, "POPULATION_MISMATCH", f"Claims span multiple non-netting populations: {sorted(_base_pops)}.")
+                continue
 
         # Rate/quantity ROLE is derived PRIMARILY from each claim's own
         # `fact_type` -- an unambiguous, per-claim signal the LLM assigns
@@ -479,23 +530,65 @@ def validate_and_materialize(
                 source_evidence_ids=source_ids,
                 verification_status=linked_status,  # type: ignore[arg-type]
                 financial_population=_to_observation_population(population),  # type: ignore[arg-type]
+                is_derived=True,
                 notes=f"Derived from semantic relationship(s): {', '.join(r.relationship_id for r in rels)}.",
             ))
             obs_idx += 1
-        elif amount_claim is not None:
-            observations.append(FinancialObservation(
-                observation_id=f"SEM-OBS-{obs_idx:03d}",
-                amount=amount_claim.value,
-                currency=currency,
-                amount_type=_amount_type_for(amount_claim, validated_factor),
-                source_evidence_ids=source_ids,
-                verification_status=amount_claim.evidence_status,  # type: ignore[arg-type]
-                financial_population=_to_observation_population(population),  # type: ignore[arg-type]
-            ))
-            obs_idx += 1
+            # Record what this derived result accounts for: the per-event /
+            # rate value it CONSUMED as a component, and the product it
+            # PRODUCED. Neither may be independently re-materialized from a
+            # separate claim that merely restates the same figure.
+            _derived_pop = _to_observation_population(population)
+            _rv = _rate_value_as_multiplier(rate_claim)
+            _qv = qty_claim.value
+            if currency is not None and _rv is not None and _qv:
+                accounted_amounts.append((_derived_pop, currency, float(_rv)))
+                accounted_amounts.append((_derived_pop, currency, float(_rv) * float(_qv)))
         else:
-            reject(calc.calculation_id, "UNSUPPORTED_OPERATION", f"No materialization rule for operation '{calc.operation}' with these fact types.")
-            continue
+            # Non-multiplicative operation (SUBTRACT / SUM / DIVIDE), or a
+            # MULTIPLY that is really just a flat amount. Materialize EVERY
+            # monetary input claim as its OWN observation, each keeping its
+            # own population, evidence status, and semantic role. The
+            # deterministic executor (calculate_confirmed_impact) then
+            # combines them exactly -- e.g. verified_gross - verified_
+            # recovery -- rather than this validator computing anything.
+            # Materializing each claim independently is what prevents a
+            # recovery / remediation input from being silently consumed
+            # and dropped just because it shared a proposal with a gross
+            # amount (spec: compositional, never lose a valid financial
+            # population).
+            monetary = [
+                c
+                for c in input_claims
+                if c.fact_type in ("AMOUNT", "RECOVERY", "REMEDIATION_COST", "PREVENTION_COST")
+                and c.value is not None
+                and c.value > 0
+                and c.currency is not None
+            ]
+            if not monetary:
+                reject(
+                    calc.calculation_id,
+                    "UNSUPPORTED_OPERATION",
+                    f"No monetary claim with a stated currency to materialize for operation '{calc.operation}'.",
+                )
+                continue
+            for c in monetary:
+                observations.append(FinancialObservation(
+                    observation_id=f"SEM-OBS-{obs_idx:03d}",
+                    amount=c.value,
+                    currency=c.currency,
+                    amount_type=_amount_type_for(c, validated_factor),
+                    source_evidence_ids=[eid for eid in c.source_evidence_ids if eid in valid_evidence_ids],
+                    verification_status=c.evidence_status,  # type: ignore[arg-type]
+                    financial_population=_to_observation_population(c.population),  # type: ignore[arg-type]
+                    notes=f"Semantic calculation {calc.calculation_id} ({calc.operation}); "
+                    f"relationship(s): {', '.join(r.relationship_id for r in rels)}.",
+                ))
+                obs_idx += 1
+                if c.currency is not None and c.value is not None:
+                    accounted_amounts.append(
+                        (_to_observation_population(c.population), c.currency, float(c.value))
+                    )
 
         outcome.accepted_calculation_ids.append(calc.calculation_id)
         for c in input_claims:
@@ -590,6 +683,25 @@ def validate_and_materialize(
             # was withheld, not merely forgotten.
             outcome.llm_disagreements.append(
                 f"{c.claim_id}: claim has no stated currency; withheld rather than defaulted to INR."
+            )
+            continue
+        if c.fact_type == "AMOUNT" and _amount_already_accounted(
+            accounted_amounts,
+            _to_observation_population(c.population),
+            c.currency,
+            c.value,
+        ):
+            # This bare AMOUNT restates a monetary value already consumed
+            # as a component of -- or produced as -- an accepted
+            # calculation for the same population/currency. It is the same
+            # money re-expressed, not an independent gross-exposure claim,
+            # so it must NOT be materialized and summed again. RECOVERY /
+            # REMEDIATION_COST / PREVENTION_COST are definitionally
+            # separate financial roles and are never suppressed here.
+            outcome.llm_disagreements.append(
+                f"{c.claim_id}: this monetary value is already represented in an accepted "
+                "calculation (consumed as a component or produced as its derived result); "
+                "not aggregated again as an independent exposure."
             )
             continue
         observations.append(FinancialObservation(

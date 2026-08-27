@@ -24,12 +24,22 @@ is nothing for the LLM to read.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from pydantic import ValidationError
 
 from app.config import get_settings
 from app.financial.provider_normalization import normalize_to_canonical
-from app.financial.semantic_models import FinancialSemanticStatus, SemanticFindingInterpretation
+from app.financial.semantic_models import (
+    CalculationProposal,
+    CostFactorAssessment,
+    FinancialSemanticStatus,
+    QuantificationAssessment,
+    SemanticClaim,
+    SemanticFindingInterpretation,
+    SemanticFindingSummary,
+    SemanticRelationship,
+)
 from app.models.agent import EvidenceItem
 from app.services.llm_client import LLMError, get_llm_client
 from app.services.llm_json import parse_llm_json
@@ -158,9 +168,86 @@ async def interpret_evidence_semantically(
     parsed = normalize_to_canonical(parsed)
 
     try:
-        interpretation = SemanticFindingInterpretation.model_validate(parsed)
+        return "OK", SemanticFindingInterpretation.model_validate(parsed)
     except ValidationError as exc:
-        logger.warning("Semantic financial interpretation failed schema validation (%s).", exc)
-        return "LLM_INVALID", None
+        # A single malformed optional field (one bad claim, one relationship
+        # missing an endpoint, an unrecognized enum in the cost factor)
+        # must NOT erase the financial facts the model DID express. Rebuild
+        # the interpretation from whatever validates piece-by-piece; only
+        # when nothing usable survives is it a genuine LLM_INVALID.
+        logger.info(
+            "Semantic financial interpretation failed strict schema validation (%s); "
+            "salvaging valid components.",
+            exc,
+        )
+        interpretation = _salvage_interpretation(parsed)
+        if interpretation is None:
+            return "LLM_INVALID", None
+        has_content = bool(
+            interpretation.claims
+            or interpretation.calculation_proposals
+            or interpretation.cost_factor.selected_factor not in ("NOT_ESTABLISHED", "OTHER")
+        )
+        return ("LLM_INCOMPLETE" if not has_content else "OK"), interpretation
 
-    return "OK", interpretation
+
+def _salvage_interpretation(parsed: Any) -> SemanticFindingInterpretation | None:
+    """Compositional recovery: validate each part of the interpretation
+    independently and keep everything that is individually well-formed,
+    dropping only the specific pieces that are not. Never fabricates a
+    field -- a dropped claim is simply absent, exactly as if the model had
+    not emitted it. Returns None only when `parsed` is not even a JSON
+    object."""
+    if not isinstance(parsed, dict):
+        return None
+
+    def _one(model, item):
+        try:
+            return model.model_validate(item)
+        except ValidationError:
+            return None
+
+    claims = [c for c in (_one(SemanticClaim, x) for x in _as_list(parsed.get("claims"))) if c is not None]
+    kept_ids = {c.claim_id for c in claims}
+
+    relationships = []
+    for x in _as_list(parsed.get("relationships")):
+        rel = _one(SemanticRelationship, x)
+        # a relationship is only meaningful if both endpoints survived
+        if rel is not None and rel.source_claim in kept_ids and rel.target_claim in kept_ids:
+            relationships.append(rel)
+    kept_rel_ids = {r.relationship_id for r in relationships}
+
+    proposals = []
+    for x in _as_list(parsed.get("calculation_proposals")):
+        calc = _one(CalculationProposal, x)
+        if calc is None:
+            continue
+        # keep the proposal but prune references the salvage dropped;
+        # the structural validator downstream still rejects it cleanly if
+        # too little remains, with an auditable reason.
+        calc.inputs = [i for i in calc.inputs if i in kept_ids]
+        calc.relationship_ids = [r for r in calc.relationship_ids if r in kept_rel_ids]
+        proposals.append(calc)
+
+    cost_factor = _one(CostFactorAssessment, parsed.get("cost_factor")) or CostFactorAssessment()
+    quantification = _one(QuantificationAssessment, parsed.get("quantification")) or QuantificationAssessment()
+    finding = _one(SemanticFindingSummary, parsed.get("finding")) or SemanticFindingSummary()
+
+    relevance = parsed.get("financial_relevance")
+    if relevance not in ("NONE", "POTENTIAL", "MATERIAL", "CONFIRMED"):
+        relevance = None
+
+    return SemanticFindingInterpretation(
+        finding=finding,
+        claims=claims,
+        relationships=relationships,
+        calculation_proposals=proposals,
+        cost_factor=cost_factor,
+        quantification=quantification,
+        financial_relevance=relevance,
+    )
+
+
+def _as_list(v: Any) -> list:
+    return v if isinstance(v, list) else []
