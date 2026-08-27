@@ -12,6 +12,26 @@ Output schema: [`app/models/agent.py`](../models/agent.py)
 
 ---
 
+## Quick Start (Running Locally)
+
+### 1. Backend (FastAPI on Port 8010)
+```bash
+cd backend
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8010
+```
+- **Backend API**: `http://localhost:8010`
+- **Interactive OpenAPI Docs**: `http://localhost:8010/docs`
+
+### 2. Frontend (Dev Server on Port 5510)
+```bash
+cd frontend
+python3 dev_server.py
+```
+- **Frontend App**: `http://localhost:5510/index.html`
+
+---
+
 ## 1. Design principles
 
 These rules are enforced **in code**, not just in prompts, because prompts

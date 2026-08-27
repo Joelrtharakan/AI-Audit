@@ -58,9 +58,9 @@ _FINITE_VERB_PATTERNS = [
 # replaces: "records"/"data"/"evidence"/"the finding"/"the audit" are exactly
 # as common a self-referential-evidence framing as "system logs".
 _SELF_REFERENTIAL_EVIDENCE_PREFIX_RE = re.compile(
-    r"^\s*(?:"
+    r"^\s*(?:(?:historical|prior|previous|recent|current)\s+)?(?:"
     r"(?:system\s+)?records?|the\s+logs?|logs?|data|the\s+system|"
-    r"(?:the\s+)?evidence|the\s+finding|the\s+audit|"
+    r"(?:the\s+)?evidence|the\s+finding|the\s+audit|(?:the\s+)?audit\s+logs?|"
     r"(?:scada|server|dispatch|distribution|security\s+badge|error|audit\s+trail|"
     r"[a-z]+\s+trail)\s+(?:system\s+|error\s+)?logs?"
     r")\s+"
@@ -137,7 +137,186 @@ def reject_subject_if_clause(subject: str | None) -> bool:
     if len(words) > 12:
         return True
 
+    # 4b. Ends with a bare modal/auxiliary verb ("...specific cause
+    # could", "...the record would") -- a complete noun phrase never
+    # terminates on a modal with nothing after it; this is always a
+    # truncated clause fragment, structurally, regardless of domain.
+    if words[-1] in {"could", "would", "should", "might", "may", "will", "shall", "can", "must", "did", "does", "do"}:
+        return True
+
+    # 4c. A BARE quantifier with nothing following it at all ("Each",
+    # "Every", "Both", "Several") is a pure grammatical distributor, not
+    # even a fragment of a noun phrase -- it can never name an entity
+    # regardless of domain. This is the degenerate (1-word) case of rule
+    # 5 below; a real extractor can surface it when a sentence like "Each
+    # resulted in a cost of X" gets summarized down to its leading
+    # quantifier with the actual subject lost.
+    #
+    # _QUANTITY_WORDS is deliberately NOT reused whole here: it mixes
+    # true determiners (each/every/several/...), which can NEVER stand
+    # alone as an entity, with generic COUNT NOUNS (batch/item/piece/
+    # set/count/number), which legitimately CAN ("Batch worth Rs500,000
+    # was scrapped..." -> affected_object "Batch" is correct). Only the
+    # determiner subset is rejected in the bare, 1-word case.
+    if len(words) == 1 and words[0] in _BARE_DETERMINER_WORDS:
+        return True
+
+    # 5. A bare quantifier attached to nothing but a generic
+    # occurrence/meta noun (e.g. "each event", "several failures",
+    # "multiple incidents") describes a FACT about how many of something
+    # happened, not a specific entity -- reusing _QUANTITY_WORDS (already
+    # the authoritative quantifier set used for population-clause
+    # detection) against a small, deliberately domain-neutral set of
+    # abstract occurrence nouns, never a finding-specific vocabulary list.
+    if len(words) == 2 and words[0] in _QUANTITY_WORDS:
+        _tail = words[1][:-1] if words[1].endswith("s") and len(words[1]) > 3 else words[1]
+        if _tail in _GENERIC_OCCURRENCE_NOUNS:
+            return True
+
+    # 6. A recurrence/frequency descriptor attached to nothing but a
+    # generic occurrence noun (e.g. "recurring failures", "repeated
+    # incidents") describes a CHARACTERISTIC of how often something
+    # happened, not a specific entity -- the same shape as rule 5 above,
+    # with a grammatical modifier set instead of a quantifier set.
+    if len(words) == 2 and words[0] in _FREQUENCY_MODIFIERS:
+        _tail = words[1][:-1] if words[1].endswith("s") and len(words[1]) > 3 else words[1]
+        if _tail in _GENERIC_OCCURRENCE_NOUNS:
+            return True
+
+    # 6b. A "same type/kind of <generic occurrence noun>" reference (e.g.
+    # "same type of failure", "the same kind of incident") names a
+    # CATEGORY comparison, not a specific entity -- structurally identical
+    # in spirit to rule 6 above, just a different grammatical shape.
+    # Trailing words (e.g. a stray verb fragment like "occurred
+    # previously" carried over from an upstream framing-strip) do not
+    # rescue the candidate -- if it STARTS with this shape, it never
+    # names a concrete entity.
+    _same_type_m = re.match(r"^(?:the\s+)?same\s+(?:type|kind)\s+of\s+([a-z]+)\b", s, re.IGNORECASE)
+    if _same_type_m:
+        _tail_noun = _same_type_m.group(1).lower()
+        _tail_noun_sing = _tail_noun[:-1] if _tail_noun.endswith("s") and len(_tail_noun) > 3 else _tail_noun
+        if _tail_noun_sing in _GENERIC_OCCURRENCE_NOUNS:
+            return True
+
+    # 7. A phrase composed ENTIRELY of financial-metric modifiers and
+    # meta-nouns (e.g. "historical average cost", "reported amount",
+    # "annualized exposure") describes a financial FACT/METRIC, not a
+    # specific affected object -- rejected only when every word in the
+    # candidate is drawn from these generic, domain-neutral sets and at
+    # least one is a meta-noun, so a real entity that happens to contain
+    # "cost" (e.g. "cost center CC-004") is untouched.
+    if len(words) >= 2 and any(w in _FINANCIAL_META_NOUNS for w in words):
+        if all(w in _FINANCIAL_META_NOUNS or w in _FINANCIAL_MODIFIERS for w in words):
+            return True
+
+    # 8. A bare temporal-unit noun preceded by nothing but a temporal
+    # modifier (e.g. "past year", "last quarter", "this month") is a
+    # DATE/PERIOD reference, not an entity.
+    if len(words) == 2 and words[0] in _TEMPORAL_MODIFIERS:
+        _tail = words[1][:-1] if words[1].endswith("s") and len(words[1]) > 4 else words[1]
+        if _tail in _TEMPORAL_UNIT_NOUNS:
+            return True
+
+    # 9. A bare, single-word financial-metric term (e.g. "ROI",
+    # "payback") standing entirely alone -- unambiguous even without
+    # surrounding context, unlike a word such as "recovery" that has
+    # legitimate non-financial meanings and is deliberately left alone.
+    if len(words) == 1 and words[0] in _BARE_FINANCIAL_TERMS:
+        return True
+
+    # 9a. A bare discourse/temporal adverb standing entirely alone (e.g.
+    # "previously", "historically", "subsequently") -- these can survive
+    # as a truncated remainder after an earlier rule strips the noun
+    # phrase that followed them (e.g. "same type of failure occurred
+    # previously" -> "previously" once "same type of failure" is
+    # rejected), and are never themselves an entity.
+    _BARE_DISCOURSE_ADVERBS = {"previously", "historically", "subsequently", "recently", "formerly", "thereafter"}
+    if len(words) == 1 and words[0] in _BARE_DISCOURSE_ADVERBS:
+        return True
+
+    # 9c. A candidate that is just "type"/"kind", alone or preceded by
+    # "same"/"this"/"that", with no actual noun naming what type/kind --
+    # a truncated remainder of a "same type of X" category reference
+    # (rule 6b), never a specific entity on its own.
+    if s.lower() in {"type", "kind", "same type", "same kind", "this type", "that type"}:
+        return True
+
+    # 9b. A candidate that IS a bare number and nothing else (e.g. "2.5")
+    # is a value with no surrounding entity context at all -- distinct
+    # from "Room 102"/"Line 3", which pair a number with a preceding
+    # location/container noun in the same candidate.
+    if len(words) == 1 and re.fullmatch(r"\d+(?:\.\d+)?%?", words[0]):
+        return True
+
+    # 10. A bare numeric token carrying a percent sign (e.g. "40%"), or
+    # one immediately followed by a measurement/duration unit word (e.g.
+    # "0.5 years", "2 million"), is a measured VALUE, never an entity --
+    # narrowly scoped to these two shapes so a legitimate bare-number
+    # identifier with NO unit following it (e.g. "Room 102", "Line 3",
+    # "Batch 205") is left untouched.
+    for _i, _w in enumerate(words):
+        if re.fullmatch(r"\d+(?:\.\d+)?%", _w):
+            return True
+        if re.fullmatch(r"\d+(?:\.\d+)?", _w) and _i + 1 < len(words):
+            _next = words[_i + 1].rstrip("s")
+            if _next in {"year", "month", "week", "day", "hour", "minute", "percent", "million", "billion", "thousand"}:
+                return True
+
     return False
+
+
+# Abstract nouns that merely name "a thing that happened," never a specific
+# affected object/asset/record/system in their own right -- distinct from
+# _STOPWORD_HEADS (which guards a different extraction path) and never
+# extended with domain vocabulary (equipment, payment, training, ...).
+_GENERIC_OCCURRENCE_NOUNS = {
+    "event", "failure", "incident", "occurrence", "case", "instance",
+    "issue", "deviation", "defect", "error", "discrepancy", "problem",
+}
+
+# Grammatical modifiers describing frequency/recurrence character, never a
+# domain-specific vocabulary list -- "recurring failures" names a pattern,
+# not a specific affected object.
+_FREQUENCY_MODIFIERS = {
+    "recurring", "recurrent", "repeated", "repeating", "frequent",
+    "intermittent", "occasional", "isolated", "similar", "related",
+}
+
+# Generic financial/statistical meta-nouns -- these name a MEASUREMENT of
+# money, never a specific affected object/asset/record on their own.
+# Deliberately narrow and generic (not tied to any domain vocabulary like
+# "payment"/"invoice") -- a real entity that happens to contain one of
+# these words alongside a concrete identifier or noun (e.g. "cost center
+# CC-004") is unaffected, since rule 7 only rejects a candidate composed
+# ENTIRELY of these words plus _FINANCIAL_MODIFIERS.
+_FINANCIAL_META_NOUNS = {
+    "cost", "costs", "exposure", "amount", "amounts", "value", "values",
+    "rate", "rates", "average", "price", "prices", "expense", "expenses",
+    "expenditure", "loss", "losses", "projection", "projections", "ratio",
+}
+_FINANCIAL_MODIFIERS = {
+    "historical", "average", "verified", "reported", "estimated",
+    "annual", "annualized", "projected", "current", "total", "potential",
+    "expected", "confirmed", "gross", "net", "unit", "financial",
+    "remediation", "implementation", "forecast", "recurring",
+    "proposed", "recurrence", "capa", "prevention", "benefit-cost",
+}
+
+# Bare, single-word financial-metric terms that are unambiguous even
+# alone (no common non-financial meaning) -- narrow by design, so a
+# genuinely domain-general word is never swept in here. "recovery" is
+# included ONLY as a bare single-word candidate (rule 9 fires solely at
+# len(words) == 1) -- a two-word entity like "Recovery Department" or
+# "Recovery Team" is completely unaffected, since it never reaches this
+# rule at all, so the ambiguity concern that used to keep "recovery" out
+# does not apply here.
+_BARE_FINANCIAL_TERMS = {"roi", "payback", "recovery"}
+
+# Temporal-unit nouns and the modifiers that can precede them to form a
+# bare date/period reference ("past year", "last quarter", "this month")
+# rather than an entity.
+_TEMPORAL_UNIT_NOUNS = {"year", "month", "week", "day", "quarter", "period"}
+_TEMPORAL_MODIFIERS = {"past", "last", "this", "next", "current", "coming", "previous", "prior"}
 
 
 def validate_semantic_subject(subject: str | None) -> bool:
@@ -519,6 +698,19 @@ _QUANTITY_WORDS = {
     "item", "items", "piece", "pieces", "set", "sets", "batch", "batches",
 }
 
+# The subset of _QUANTITY_WORDS that is a TRUE grammatical determiner --
+# never a standalone entity reference, unlike the generic count nouns also
+# in _QUANTITY_WORDS ("batch", "item", "piece", "set", "count", "number"),
+# which legitimately CAN be the entity itself ("Batch worth Rs500,000 was
+# scrapped" -> affected_object "Batch" is correct, not a fragment).
+_BARE_DETERMINER_WORDS = {
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "twenty", "thirty", "forty", "fifty",
+    "hundred", "thousand", "first", "second", "third", "fourth", "fifth",
+    "multiple", "several", "numerous", "various", "many", "few", "both", "each", "every",
+    "some", "any", "no", "none", "all", "total",
+}
+
 _QUANTITY_PREFIX_RE = re.compile(
     r"^(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
     r"multiple|several|numerous|various|many|few|some)\s+",
@@ -617,6 +809,14 @@ _DATE_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Month-to-month range with no day numbers (e.g. "January through April
+# 2026", "January to April 2026", "January-April 2026") -- distinct from
+# _DATE_RANGE_RE, which always anchors to a day number.
+_MONTH_RANGE_RE = re.compile(
+    rf"\b({_MONTHS})\s+(?:through|to|–|-)\s+({_MONTHS})(?:\s+(\d{{4}}))?\b",
+    re.IGNORECASE,
+)
+
 _DATE_SINGLE_RE = re.compile(
     rf"\b(?:\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTHS}(?:\s+\d{{4}})?|{_MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?|"
     rf"\d{{1,2}}/\d{{1,2}}/\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}}|"
@@ -656,6 +856,12 @@ def extract_date(text: str) -> str | None:
             year_part = f" {yr}" if yr else ""
             return f"{d1}–{d2} {month}{year_part}"
         return matched
+
+    # 1b. Month-to-month range with no day numbers (e.g. "January through
+    # April 2026").
+    m_month_range = _MONTH_RANGE_RE.search(text)
+    if m_month_range:
+        return m_month_range.group(0).strip()
 
     # 2. Match single dates / month expressions
     m_single = _DATE_SINGLE_RE.search(text)
@@ -763,6 +969,7 @@ def classify_finding_specificity(
         _DATE_RE.search(text)
         or _DATE_SINGLE_RE.search(text)
         or _DATE_RANGE_RE.search(text)
+        or _MONTH_RANGE_RE.search(text)
         or _RELATIVE_TIME_RE.search(text)
     )
     has_reported = bool(reported_claims)
@@ -1462,13 +1669,39 @@ def _mask_referenced_document_spans(text: str) -> str:
     return re.sub(r"\s+", " ", masked).strip()
 
 
+# Grounds a notification/email/dispatch/message/notice/alert keyword to an
+# actual delivery-or-receipt event stated in the text (verb adjacent to the
+# keyword within a short span, either order) -- structural, not tied to any
+# specific finding's wording.
+_NOTIFICATION_DELIVERY_GROUNDING_RE = re.compile(
+    r"\b(?:email|notification|dispatch|message|notice|alert)s?\b[^.;]{0,40}\b"
+    r"(?:delivered|received|sent|transmitted|dispatched|forwarded|issued|arrived)\b"
+    r"|"
+    r"\b(?:delivered|received|sent|transmitted|dispatched|forwarded|issued|arrived)\b[^.;]{0,40}\b"
+    r"(?:email|notification|dispatch|message|notice|alert)s?\b",
+    re.IGNORECASE,
+)
+
+
 def _extract_activity_from_reported_finding(text: str) -> str:
     """Extract a clean activity noun phrase when finding is purely reported speech."""
     if "payment" in text.lower():
         return "vendor payment"
     if "shipment" in text.lower() or "customs" in text.lower():
         return "shipment delivery"
-    if any(w in text.lower() for w in ("email", "notification", "dispatch", "message", "notice", "alert")):
+    # A bare "email"/"notification"/"dispatch"/"message"/"notice"/"alert"
+    # keyword occurring ANYWHERE in the text used to be enough to fabricate
+    # a specific activity noun phrase ("email notification") regardless of
+    # whether the finding actually named such an object -- a vague finding
+    # merely mentioning "notification" in passing would incorrectly
+    # resolve to a confident "notification delivery" entity. This branch
+    # now requires the keyword to be textually GROUNDED as the object of a
+    # concrete delivery/receipt verb (delivered, received, sent,
+    # transmitted, dispatched, forwarded, issued, arrived) in the same
+    # clause -- "email delivered"/"never received the notification" is
+    # real grounding; "something related to notification seemed unclear"
+    # is not.
+    if _NOTIFICATION_DELIVERY_GROUNDING_RE.search(text):
         if "email" in text.lower():
             return "email notification"
         elif "dispatch" in text.lower() and ("notification" in text.lower() or "alert" in text.lower()):
@@ -3031,11 +3264,18 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
 # ---------------------------------------------------------------------------
 
 _NP = r"(?P<np>[A-Za-z][A-Za-z0-9\s/&._-]{2,50}?)"
+# [,;:] or a period -- but NEVER a period sitting between two digits
+# (a decimal point, e.g. the "." in "0.5"): since _NP's quantifier is
+# lazy, without this exclusion the shortest match satisfying _NP_END
+# stops right at a decimal point mid-number ("estimated at 0.5" ->
+# "estimated at 0"), corrupting the captured noun phrase. A genuine
+# clause-ending period is unaffected, since it is never followed by a
+# digit continuing the same number.
 _NP_END = (
     r"(?=\s+(?:for|of|in|on|at|during|by|from|with|to|as|that|which|when|while|"
     r"prior|before|after|contrary|required|was|were|is|are|has|have|had|could|"
     r"would|should|will|shall|remain|remains|remained|and|or|but|despite|"
-    r"notwithstanding)\b|[,.;:]|$)"
+    r"notwithstanding)\b|[,;:]|\.(?!\d)|$)"
 )
 
 # A. agentless passive whose subject is an actor -> descend into the
@@ -3176,6 +3416,14 @@ _STOPWORD_HEADS = {
     "during", "in", "on", "at", "for", "of", "and", "or", "was", "were", "is",
     "are", "had", "has", "have", "no", "not", "any", "some", "all", "which",
     "who", "when", "while", "audit", "review", "observation", "finding",
+    # Generic meta-words describing the finding/report itself, and bare
+    # prepositions that can trail a captured fragment (e.g. "the deviation
+    # over a four-month period") -- neither is ever the actual affected
+    # object, so both must stop a candidate noun phrase the same way
+    # "finding"/"observation" already do, rather than being captured as
+    # (or trailing into) the fallback subject/entity.
+    "deviation", "over", "through", "within", "across", "since", "before",
+    "after", "period", "duration", "timeframe",
 }
 
 
@@ -3357,8 +3605,14 @@ def resolve_deviation(finding_text: str, fact_claims: list[str] | None = None) -
             m_svo = re.match(
                 r"^(?:the\s+|an?\s+)?(?P<subj>[a-zA-Z0-9\s-]{2,30}?)\s+"
                 r"(?P<verb>[a-zA-Z]+(?:ed|s|d))\s+"
-                r"(?:the\s+|an?\s+)?(?P<obj>[a-zA-Z0-9][a-zA-Z0-9\s/-]{2,40}?)\s*"
-                r"(?P<mod>(?:using|with|without|contrary\s+to|instead\s+of|rather\s+than|before|after|outside)\b[^.;]+)?(?:\.|$)",
+                # obj's char class includes "." so a decimal number (e.g.
+                # "0.5") can be captured whole; the terminator below only
+                # treats a period as end-of-clause when NOT followed by a
+                # digit, so the lazy quantifier can no longer stop right
+                # at a decimal point mid-number ("estimated at 0.5" would
+                # otherwise truncate to "estimated at 0").
+                r"(?:the\s+|an?\s+)?(?P<obj>[a-zA-Z0-9][a-zA-Z0-9\s/.\-]{2,40}?)\s*"
+                r"(?P<mod>(?:using|with|without|contrary\s+to|instead\s+of|rather\s+than|before|after|outside)\b[^.;]+)?(?:\.(?!\d)|$)",
                 sent,
                 re.IGNORECASE,
             )

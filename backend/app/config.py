@@ -9,6 +9,55 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    # LLM semantic financial-evidence interpretation (app.financial.
+    # semantic_engine): when enabled, financial analysis first asks the
+    # LLM to structurally interpret the evidence (claims/relationships/
+    # calculation proposals), independently validates and calculates the
+    # result deterministically, and only falls back to the pure
+    # regex-extraction engine (app.financial.engine.analyze_financial_
+    # exposure) when the LLM path is unavailable or produces nothing
+    # validatable -- every failure mode (no provider configured, network
+    # error, invalid JSON, empty validated result) fails closed to the
+    # regex fallback, never fabricates a result.
+    #
+    # Defaults to ON: verified against a real, locally-running Ollama
+    # provider (qwen3:8b) -- the semantic interpreter correctly identifies
+    # quantity/rate claims, the RATE_APPLIES_TO_QUANTITY relationship, the
+    # MULTIPLY calculation, and a grounded cost factor (e.g. DOWNTIME_COST)
+    # from unseen finding text, taking ~20s per call. In an environment
+    # with NO reachable LLM provider, attempting the call does not fail
+    # fast (measured: an unreachable local Ollama endpoint does not refuse
+    # the connection, it hangs until `financial_semantic_reasoning_
+    # timeout_seconds`) -- but every failure mode still fails closed to
+    # the regex-extraction fallback (see analyze_financial_exposure_
+    # semantic's docstring), so the cost of leaving this on with no
+    # provider configured is added latency per investigation, never a
+    # wrong or fabricated result. Set to False to force pure-regex
+    # behavior regardless of provider availability (e.g. to avoid that
+    # latency in a deployment with no LLM provider reachable).
+    financial_semantic_reasoning_enabled: bool = True
+    # Measured real qwen3:8b latency for this prompt/schema: ~20-40s on a
+    # lightly-loaded box, but a genuinely complete multi-claim
+    # interpretation (5+ claims, relationships, several calculation
+    # proposals) is ~1300 output tokens and can take 90s+ under load or on
+    # a slower host. 60s was leaving real, well-formed findings timing out
+    # (observed: TIMEOUT at 60050ms) -> LLM_UNAVAILABLE -> the whole
+    # financial section collapsing to NOT_ESTABLISHED. 120s gives the
+    # honest interpretation room to finish; a genuinely unreachable
+    # provider still fails closed (just later).
+    financial_semantic_reasoning_timeout_seconds: float = 120.0
+
+    # Canonical semantic finding context (app.services.canonical_finding_
+    # interpreter): a broader LLM interpretation (primary deviation,
+    # entity/state separation, causal claims, previous-CAPA reference)
+    # computed alongside the existing deterministic pipeline in SHADOW
+    # MODE ONLY -- the deterministic result remains authoritative;
+    # disagreements are recorded on the report, never used to override
+    # any output. Same off-by-default rationale as financial_semantic_
+    # reasoning_enabled (an unreachable provider does not fail fast).
+    canonical_semantic_shadow_enabled: bool = False
+    canonical_semantic_shadow_timeout_seconds: float = 8.0
+
     # Production Local Ollama Inference Server
     llm_provider: str = "ollama"
     ollama_base_url: str = "http://localhost:11434"
@@ -43,6 +92,17 @@ class Settings(BaseSettings):
     ollama_critic_timeout_seconds: float = 15.0
     ollama_critic_max_tokens: int = 250
     ollama_critic_num_ctx: int = 4096
+    # A complete multi-claim financial interpretation (claims +
+    # relationships + several calculation proposals + cost_factor +
+    # quantification) measured at ~1300 output tokens for a 5-claim
+    # finding against real qwen3:8b. 900 was truncating the JSON mid-
+    # structure -> unparseable -> LLM_INVALID -> the entire financial
+    # analysis discarded, even when the model's semantics were correct.
+    # 2200 covers the observed complete output with headroom; the parser
+    # additionally salvages a near-complete truncated response (see
+    # json_parser.extract_json_str) rather than failing all-or-nothing.
+    ollama_financial_semantic_max_tokens: int = 2200
+    ollama_financial_semantic_num_ctx: int = 8192
 
     # Optional provider timeouts & keys (for fallback router tests)
     google_api_key: str = ""

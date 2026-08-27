@@ -170,6 +170,7 @@ def _parse_causal_fields(
     claim_ids: list[tuple[str, Any]] | None = None,
     canonical_subject: str | None = None,
     canonical: CanonicalFindingState | None = None,
+    semantic_context: Any = None,
 ) -> tuple[RootCauseAnalysis, FiveWhyAnalysis, list[ContributingFactor]]:
     """Parse+guard root_cause / five_why / contributing_factors from a
     core_synthesis-shaped JSON object.
@@ -734,6 +735,7 @@ def _parse_causal_fields(
             from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
             fallback_hyps, _ = build_deterministic_investigation_plan(
                 finding_text, evidence_ledger, canonical_subject=canonical_subject, canonical_state=canonical,
+                semantic_context=semantic_context,
             )
             root_cause.candidate_hypotheses = fallback_hyps
             trace.append(AgentTraceStep.warn("Core Synthesis: generated fallback candidate hypotheses from finding text"))
@@ -1076,7 +1078,7 @@ def _reportedly_clause(obj: str, condition: str | None) -> str:
     return f"{obj} was reportedly {cond}."
 
 
-def _derive_deterministic_impact(request_finding_text: str, canonical, observed_deviation: str) -> tuple[ImpactAssessment, str, str, str | None]:
+def _derive_deterministic_impact(request_finding_text: str, canonical, observed_deviation: str, semantic_context: Any = None) -> tuple[ImpactAssessment, str, str, str | None]:
     """Shared deterministic impact derivation used both when a compact
     recovery call succeeds (recovery's schema deliberately excludes impact)
     and when full deterministic synthesis runs. Returns
@@ -1096,12 +1098,21 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
     # SINGLE AUTHORITATIVE SUBJECT SOURCE: canonical.finding_subject is
     # produced exactly once, by understand_finding_node's deterministic
     # resolver (resolve_deviation).
-    canon_subject = getattr(canonical, "finding_subject", None) if canonical else None
-    if canon_subject and canon_subject != "UNKNOWN" and validate_semantic_subject(canon_subject):
-        clean_noun = canon_subject
+    if semantic_context is not None:
+        # States A/B (promotion pass): the validated LLM canonical context
+        # is authoritative over the legacy CanonicalFindingState/raw-text
+        # resolver when present -- an explicit "no entity resolved" (state
+        # B) must never be replaced by resolve_deviation()'s own guess.
+        from app.services.canonical_context_validator import get_affected_object_candidate
+        _canonical_affected = get_affected_object_candidate(semantic_context)
+        clean_noun = _canonical_affected or "UNKNOWN — no affected object could be isolated from the finding text"
     else:
-        resolved = resolve_deviation(request_finding_text, [])
-        clean_noun = resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
+        canon_subject = getattr(canonical, "finding_subject", None) if canonical else None
+        if canon_subject and canon_subject != "UNKNOWN" and validate_semantic_subject(canon_subject):
+            clean_noun = canon_subject
+        else:
+            resolved = resolve_deviation(request_finding_text, [])
+            clean_noun = resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
     clean_noun = strip_quantity_prefix(clean_noun) or clean_noun
     topic = topic_word(clean_noun)
     topic_cap = topic[0].upper() + topic[1:]
@@ -1654,6 +1665,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             has_unresolved_conflict, claim_ids,
             canonical_subject=getattr(canonical, "finding_subject", None),
             canonical=canonical,
+            semantic_context=state.get("canonical_semantic_context"),
         )
         synthesis_execution["validation_rejections"] = (
             llm_metrics.snapshot().get("validation_rejections_total", 0) - _rejections_before
@@ -1673,6 +1685,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         # ---------------------------------------------------------------------
         impact, clean_noun, topic, actor = _derive_deterministic_impact(
             request.finding_text, canonical, observed_deviation,
+            semantic_context=state.get("canonical_semantic_context"),
         )
         # NOTE: investigation_plan_override is deliberately left unset here
         # (stays None). build_deterministic_investigation_plan() generates
@@ -1796,6 +1809,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                 has_unresolved_conflict, claim_ids,
                 canonical_subject=getattr(canonical, "finding_subject", None),
                 canonical=canonical,
+                semantic_context=state.get("canonical_semantic_context"),
             )
             synthesis_execution["source"] = "RECOVERY_LLM"
             synthesis_execution["recovery_used"] = True
@@ -1840,6 +1854,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         # -------------------------------------------------------------
         impact, clean_noun, topic, actor = _derive_deterministic_impact(
             request.finding_text, canonical, observed_deviation,
+            semantic_context=state.get("canonical_semantic_context"),
         )
 
         from app.agent.nodes.plan_investigation_fallback import (
@@ -1848,6 +1863,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         )
         _, fallback_plan = build_deterministic_investigation_plan(
             request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None), canonical_state=canonical,
+            semantic_context=state.get("canonical_semantic_context"),
         )
         # Phase 17: do not clobber an upstream NO_ACTIONABLE_UNCERTAINTY
         # judgment -- see the matching guard in the primary-success branch
@@ -1889,9 +1905,11 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             from app.agent.nodes.five_why_fallback import build_deterministic_five_why
             five_why = build_deterministic_five_why(
                 request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
+                semantic_context=state.get("canonical_semantic_context"),
             )
             fallback_hyps, fallback_plan = build_deterministic_investigation_plan(
                 request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None), canonical_state=canonical,
+                semantic_context=state.get("canonical_semantic_context"),
             )
             # Phase 17: same NO_ACTIONABLE_UNCERTAINTY guard as above.
             investigation_plan_override = None if getattr(state.get("investigation_plan"), "status", None) == "NO_ACTIONABLE_UNCERTAINTY" else fallback_plan

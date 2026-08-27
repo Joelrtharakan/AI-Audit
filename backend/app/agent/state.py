@@ -59,6 +59,14 @@ class AgentState(TypedDict, total=False):
     observation_quality: ObservationQualityResult | None
     extraction: ExtractionResult | None
     canonical_finding_state: CanonicalFindingState | None
+    # LLM canonical semantic finding context (promotion pass) -- validated
+    # (never raw), computed once in plan_investigation_node, reused by
+    # every later node instead of independently re-interpreting raw text.
+    # None whenever unavailable/disabled (see canonical_semantic_shadow_
+    # enabled); downstream consumers must fall back to unchanged legacy
+    # behavior in that case, never conflating it with an explicit semantic
+    # NOT_ESTABLISHED.
+    canonical_semantic_context: Any | None
 
 
 
@@ -167,6 +175,7 @@ class AgentState(TypedDict, total=False):
     hypothesis_history: list[Any]
     impact_assessment: ImpactAssessment | None
     cost_impact: CostImpact | None
+    financial_analysis: Any | None
     capa_analysis: CapaAnalysis | None
     # "LLM" (normal path) or "DEGRADED" (core_synthesis's LLM call failed and
     # a deterministic fallback ran) -- must be surfaced to the final report

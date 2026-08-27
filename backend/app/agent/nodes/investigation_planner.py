@@ -41,6 +41,37 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     settings = get_settings()
     plan = InvestigationPlan()
 
+    # Canonical semantic finding context (promotion pass): computed ONCE,
+    # here, as early as possible -- before the deterministic investigation
+    # plan is built -- and reused by every later node via
+    # `state["canonical_semantic_context"]` instead of each node
+    # independently re-interpreting raw text. Validated (never trusted
+    # raw), and gated behind a settings flag that defaults OFF (see
+    # app.config.Settings.canonical_semantic_shadow_enabled's docstring
+    # for why: an unreachable local provider does not fail fast). When
+    # unavailable/disabled, `semantic_context` stays None and every
+    # downstream consumer below falls back to its unchanged legacy
+    # behavior -- this is state C (Section 17), never conflated with an
+    # explicit semantic NOT_ESTABLISHED (state B).
+    semantic_context = None
+    if settings.canonical_semantic_shadow_enabled:
+        try:
+            from app.services.canonical_context_validator import validate_canonical_context
+            from app.services.canonical_finding_interpreter import interpret_finding_canonically
+
+            raw_semantic_context = await interpret_finding_canonically(
+                finding_text=request.finding_text,
+                evidence_ledger=state.get("evidence_ledger", []),
+            )
+            if raw_semantic_context is not None:
+                semantic_context = validate_canonical_context(
+                    raw_semantic_context, state.get("evidence_ledger", []), request.finding_text
+                )
+        except Exception as exc:  # noqa: BLE001 - fail-closed by design
+            logger.warning("Canonical semantic interpretation failed unexpectedly (%s); using deterministic path.", exc)
+            semantic_context = None
+    state["canonical_semantic_context"] = semantic_context
+
     # Phase 16: the graph-first planner is called FIRST and unconditionally
     # — it, not a settings flag or a heuristic buried in the legacy
     # planner, decides which of NO_ACTIONABLE_UNCERTAINTY /
@@ -84,6 +115,7 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
             state.get("evidence_ledger", []),
             canonical_subject=getattr(canonical, "finding_subject", None),
             canonical_state=canonical,
+            semantic_context=semantic_context,
         )
         # Phase 16 Section 16/35: label this plan's content source honestly.
         # TARGET_UNRESOLVED means the graph-first planner itself could not

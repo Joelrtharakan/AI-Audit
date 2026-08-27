@@ -131,6 +131,71 @@ def _check_estimated_amount_not_actual_loss(state: dict[str, Any]) -> tuple[bool
     return True, None
 
 
+def _check_financial_confirmed_loss_verified(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """FIN-001: Verified financial loss requires verified financial evidence.
+    FIN-015: Net confirmed loss requires verified gross exposure and verified recovery."""
+    fin = state.get("financial_analysis") or getattr(state.get("report"), "financial_analysis", None)
+    if not fin or not getattr(fin, "confirmed_impact", None):
+        return True, None
+    ci = fin.confirmed_impact
+    if getattr(ci, "is_confirmed_loss", False) and getattr(ci, "confirmed_net_loss", None) is not None:
+        if getattr(ci, "verified_recovery", None) is None:
+            return False, "Confirmed net loss was calculated without verified recovery"
+        if getattr(ci, "verified_gross_exposure", None) is None:
+            return False, "Confirmed net loss was calculated without verified gross exposure"
+    return True, None
+
+
+def _check_financial_unverified_recovery_safety(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """FIN-002 / FIN-003: Unverified recovery cannot be treated as zero recovery, and cannot be used to calculate net confirmed loss."""
+    fin = state.get("financial_analysis") or getattr(state.get("report"), "financial_analysis", None)
+    if not fin or not getattr(fin, "confirmed_impact", None):
+        return True, None
+    ci = fin.confirmed_impact
+    if getattr(ci, "recovery_status", "") == "REQUIRES_VERIFICATION":
+        if getattr(ci, "confirmed_net_loss", None) is not None:
+            return False, "Net confirmed loss calculated while recovery status is REQUIRES_VERIFICATION"
+    return True, None
+
+
+def _check_financial_annualization_requires_period(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """FIN-005: Annualization requires verified observation period."""
+    fin = state.get("financial_analysis") or getattr(state.get("report"), "financial_analysis", None)
+    if not fin or not getattr(fin, "annualized_exposure", None):
+        return True, None
+    ann = fin.annualized_exposure
+    if getattr(ann, "is_assessable", False):
+        if not getattr(ann, "observation_period_months", None) or ann.observation_period_months <= 0:
+            return False, "Annualized exposure calculated without a verified observation period"
+    return True, None
+
+
+def _check_financial_recurrence_requires_frequency(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """FIN-006: Expected annual exposure requires evidence-backed recurrence."""
+    fin = state.get("financial_analysis") or getattr(state.get("report"), "financial_analysis", None)
+    if not fin or not getattr(fin, "recurrence_analysis", None):
+        return True, None
+    rec = fin.recurrence_analysis
+    if getattr(rec, "is_assessable", False):
+        if not getattr(rec, "historical_events_per_year", None) and not getattr(rec, "historical_events_range_min", None):
+            return False, "Recurrence-based annual exposure calculated without verified historical frequency"
+    return True, None
+
+
+def _check_financial_potential_not_confirmed(state: dict[str, Any]) -> tuple[bool, str | None]:
+    """FIN-004: Potential exposure must never be rendered as confirmed loss."""
+    fin = state.get("financial_analysis") or getattr(state.get("report"), "financial_analysis", None)
+    if not fin or not getattr(fin, "potential_exposure", None):
+        return True, None
+    pot = fin.potential_exposure
+    if getattr(pot, "is_present", False) and getattr(fin, "status", None) == "CONFIRMED_NET_LOSS":
+        ci = getattr(fin, "confirmed_impact", None)
+        if not ci or not getattr(ci, "is_confirmed_loss", False):
+            return False, "Potential exposure was improperly promoted to CONFIRMED_NET_LOSS status"
+    return True, None
+
+
+
 def _check_capa_effectiveness_not_overclaimed(state: dict[str, Any]) -> tuple[bool, str | None]:
     """INV-CAPA-001/002: CAPA completion never proves effectiveness, and
     missing effectiveness evidence never proves ineffectiveness -- the
@@ -4092,6 +4157,41 @@ INVARIANT_REGISTRY: list[InvariantRule] = [
         severity=InvariantSeverity.BLOCKER,
         description="CAPA actions must act exclusively on verified risks, mechanisms, or root causes.",
         validate=_check_capa_grounding,
+    ),
+    InvariantRule(
+        inv_id="INV-FIN-001-ADD",
+        category=InvariantCategory.FINANCIAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Confirmed financial loss requires verified evidence provenance and verified recovery.",
+        validate=_check_financial_confirmed_loss_verified,
+    ),
+    InvariantRule(
+        inv_id="INV-FIN-002-ADD",
+        category=InvariantCategory.FINANCIAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Unverified recovery cannot be used to compute net confirmed loss.",
+        validate=_check_financial_unverified_recovery_safety,
+    ),
+    InvariantRule(
+        inv_id="INV-FIN-005-ADD",
+        category=InvariantCategory.FINANCIAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Annualized exposure requires verified observation period.",
+        validate=_check_financial_annualization_requires_period,
+    ),
+    InvariantRule(
+        inv_id="INV-FIN-006-ADD",
+        category=InvariantCategory.FINANCIAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Recurrence-based expected loss requires verified frequency.",
+        validate=_check_financial_recurrence_requires_frequency,
+    ),
+    InvariantRule(
+        inv_id="INV-FIN-004-ADD",
+        category=InvariantCategory.FINANCIAL,
+        severity=InvariantSeverity.BLOCKER,
+        description="Potential exposure cannot be promoted to confirmed loss.",
+        validate=_check_financial_potential_not_confirmed,
     ),
 ]
 

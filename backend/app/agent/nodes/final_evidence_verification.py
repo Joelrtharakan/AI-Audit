@@ -376,6 +376,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         backfilled_fw = build_deterministic_five_why(
             finding_text, evidence_ledger,
             canonical_subject=getattr(_backfill_canonical, "finding_subject", None),
+            semantic_context=state.get("canonical_semantic_context"),
         )
         if backfilled_fw.steps:
             trace.append(AgentTraceStep.warn(
@@ -1012,6 +1013,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 finding_text, evidence_ledger,
                 canonical_subject=getattr(canonical, "finding_subject", None),
                 canonical_state=canonical,
+                semantic_context=state.get("canonical_semantic_context"),
             )
             # Backfilled hypotheses must pass through the SAME unsupported-
             # specificity firewall as every other path (no output may bypass
@@ -1511,6 +1513,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             fw = build_deterministic_five_why(
                 finding_text, evidence_ledger,
                 canonical_subject=getattr(canonical, "finding_subject", None),
+                semantic_context=state.get("canonical_semantic_context"),
             )
             state["five_why"] = fw
             if report:
@@ -1863,8 +1866,23 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         return t
 
     # Cost & Financial Impact synchronization and verification (Sections 26-42)
-    cost_impact = state.get("cost_impact") or (canonical.cost_impact if canonical else None)
-    if not cost_impact:
+    #
+    # `report.cost_impact` is a COMPATIBILITY PROJECTION of the canonical
+    # `financial_analysis` (app.financial.models.FinancialAnalysisResult) --
+    # it is never independently computed here. `financial_analysis` was
+    # already produced once, earlier, by generate_report_node (LLM-semantic
+    # first, deterministic regex-extraction fallback -- see
+    # app.financial.semantic_engine / app.financial.engine); this function
+    # derives cost_impact from that same result via a pure field mapping
+    # (app.financial.compatibility) so there is exactly one authoritative
+    # financial calculation per report, never two disagreeing ones. The
+    # legacy regex analyzer is retained ONLY as a last-resort fallback for
+    # the rare case financial_analysis itself is entirely unavailable, and
+    # never overrides a canonical result that already succeeded.
+    from app.financial.compatibility import derive_cost_impact_from_financial_analysis
+    financial_analysis = state.get("financial_analysis") or getattr(report, "financial_analysis", None)
+    cost_impact = derive_cost_impact_from_financial_analysis(financial_analysis)
+    if cost_impact is None:
         from app.services.cost_analysis import analyze_cost_and_financial_impact
         cost_impact = analyze_cost_and_financial_impact(finding_text, evidence_ledger)
 
@@ -1877,7 +1895,18 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     if impact:
         impact.financial_amount = fin_amt
         if re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment)\b", finding_text, re.IGNORECASE):
-            amt_txt = f" of {fin_amt.formatted}" if (fin_amt and fin_amt.formatted) else ""
+            # `FinancialAmount.formatted` is a display-string field nothing
+            # in the pipeline ever populates -- it is always None by
+            # construction, so gating on it silently dropped every amount
+            # from this narrative. Derive the display string from
+            # amount+currency (the fields that ARE populated) instead.
+            from app.services.cost_analysis import format_currency_amount
+            _amt_display = None
+            if fin_amt and fin_amt.formatted:
+                _amt_display = fin_amt.formatted
+            elif fin_amt and fin_amt.amount is not None and fin_amt.currency:
+                _amt_display = format_currency_amount(fin_amt.amount, fin_amt.currency)
+            amt_txt = f" of {_amt_display}" if _amt_display else ""
             impact.potential_effect = f"A duplicate payment{amt_txt} was identified. The underlying cause and the extent of any unrecovered financial loss have not yet been established."
             if not getattr(impact, "control_at_risk", None):
                 impact.control_at_risk = "Duplicate-Payment Prevention and Reconciliation"

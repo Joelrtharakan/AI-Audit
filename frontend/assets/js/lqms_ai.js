@@ -601,102 +601,346 @@
         }
         html += "</div>";
 
-        // --- 7b. Cost & Financial Impact Card (Conditional: Section 26-42) ---
+        // --- 7b. Single Unified Cost & Financial Exposure Analysis Section ---
+        var finAnalysis = report.financial_analysis;
         var costImpact = report.cost_impact;
-        if (costImpact && costImpact.cost_factor_detected) {
-            var costStatus = costImpact.financial_status || "REQUIRES_ASSESSMENT";
-            var statusColor = (costStatus === "VERIFIED") ? "#059669" : (costStatus === "REPORTED" || costStatus === "ESTIMATED") ? "#0284c7" : "#d97706";
-            var statusBg = (costStatus === "VERIFIED") ? "#ecfdf5" : (costStatus === "REPORTED" || costStatus === "ESTIMATED") ? "#f0f9ff" : "#fffbe6";
-            var statusBorder = (costStatus === "VERIFIED") ? "#a7f3d0" : (costStatus === "REPORTED" || costStatus === "ESTIMATED") ? "#bae6fd" : "#ffe58f";
+        var hasMultiCurrency = !!(finAnalysis && finAnalysis.currency_breakdown && finAnalysis.currency_breakdown.length > 0);
+        var hasCapaEconData = !!(finAnalysis && finAnalysis.capa_economics && (
+            (typeof finAnalysis.capa_economics.remediation_cost === "number" && !isNaN(finAnalysis.capa_economics.remediation_cost) && isFinite(finAnalysis.capa_economics.remediation_cost))
+            || (finAnalysis.capa_economics.remediation_status === "REQUIRES_RECONCILIATION" && finAnalysis.capa_economics.conflicting_remediation_amounts && finAnalysis.capa_economics.conflicting_remediation_amounts.length > 0)
+        ));
+        var hasCurrencyConflict = !!(finAnalysis && finAnalysis.conversion_status === "CONFLICT");
+        var hasFinData = (finAnalysis && finAnalysis.status && finAnalysis.status !== "NOT_ASSESSABLE") || (costImpact && costImpact.cost_factor_detected) || hasMultiCurrency || hasCapaEconData || hasCurrencyConflict;
 
-            html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
+        if (hasFinData) {
+            var fStatRaw = (finAnalysis && finAnalysis.status) ? finAnalysis.status : (costImpact ? costImpact.financial_status || "REQUIRES_ASSESSMENT" : "NOT_ASSESSABLE");
+            // Internal engine states collapse to one auditor-safe label --
+            // the pill never spells out a provider/interpreter diagnostic.
+            var fStat = (/^FINANCIAL_SEMANTIC_/.test(fStatRaw) || fStatRaw === "REQUIRES_ASSESSMENT") ? "NOT ASSESSABLE" : fStatRaw;
+            var dimConf = (finAnalysis && finAnalysis.dimensional_confidence) ? finAnalysis.dimensional_confidence : {};
+            var fConf = (dimConf.overall || (finAnalysis && finAnalysis.confidence) || (costImpact && costImpact.confidence) || "MEDIUM");
+            // Never silently default an unstated currency to INR -- only
+            // fall back to an explicit "UNKNOWN" label when neither the
+            // canonical result nor its compatibility projection states one.
+            var fCurr = (finAnalysis && finAnalysis.currency) || (costImpact && costImpact.currency) || "UNKNOWN";
+            var fConfColor = (fConf === "HIGH") ? "#059669" : (fConf === "MEDIUM") ? "#0284c7" : "#d97706";
+            var fConfBg = (fConf === "HIGH") ? "#ecfdf5" : (fConf === "MEDIUM") ? "#f0f9ff" : "#fffbe6";
+
+            var cImp = finAnalysis ? finAnalysis.confirmed_impact : null;
+            var grossVal = (cImp && cImp.verified_gross_exposure !== null && cImp.verified_gross_exposure !== undefined)
+                ? cImp.verified_gross_exposure
+                : (costImpact && costImpact.gross_exposure !== null && costImpact.gross_exposure !== undefined ? costImpact.gross_exposure : null);
+            var repGrossVal = (cImp && cImp.reported_financial_exposure !== null && cImp.reported_financial_exposure !== undefined)
+                ? cImp.reported_financial_exposure : null;
+            var recVal = (cImp && cImp.verified_recovery !== null && cImp.verified_recovery !== undefined)
+                ? cImp.verified_recovery
+                : (costImpact && costImpact.recovered_amount !== null && costImpact.recovered_amount !== undefined ? costImpact.recovered_amount : null);
+            // A recovery amount stated but not yet VERIFIED must still be
+            // shown -- never silently dropped merely because it isn't
+            // VERIFIED -- but always labeled distinctly from a verified one.
+            var repRecVal = (cImp && cImp.reported_recovery !== null && cImp.reported_recovery !== undefined)
+                ? cImp.reported_recovery : null;
+            var netLossVal = (cImp && cImp.confirmed_net_loss !== null && cImp.confirmed_net_loss !== undefined)
+                ? cImp.confirmed_net_loss
+                : (costImpact && costImpact.actual_loss !== null && costImpact.actual_loss !== undefined ? costImpact.actual_loss : null);
+            var potUnrecVal = (cImp && cImp.potential_unrecovered_exposure !== null && cImp.potential_unrecovered_exposure !== undefined)
+                ? cImp.potential_unrecovered_exposure
+                : (costImpact && costImpact.potential_cost_exposure ? costImpact.potential_cost_exposure : null);
+            // Never coerce an honest NOT_ESTABLISHED classification (the
+            // system correctly refusing to guess a cost factor) into
+            // DIRECT_LOSS here -- that would silently fabricate a
+            // classification the backend explicitly declined to make.
+            var finFactor = (cImp && cImp.financial_factor)
+                ? cImp.financial_factor
+                : (costImpact && (costImpact.financial_factor || costImpact.cost_factor_type)
+                    ? (costImpact.financial_factor || costImpact.cost_factor_type)
+                    : "NOT_ESTABLISHED");
+            var recStatus = (cImp && cImp.recovery_status) ? cImp.recovery_status : (costImpact ? (costImpact.recoverability_status || "REQUIRES_VERIFICATION") : "REQUIRES_VERIFICATION");
+
+            // The subtitle must name the ACTUAL reasoning path that
+            // produced this result -- never a static claim of
+            // "deterministic" analysis when the semantic LLM path (or an
+            // unavailable-provider fallback) actually produced it.
+            var reasoningSource = finAnalysis ? finAnalysis.reasoning_source : null;
+            var reasoningSubtitle = "Evidence-grounded financial exposure & recurrence analysis";
+            if (reasoningSource === "LLM_SEMANTIC") {
+                reasoningSubtitle = "Evidence-grounded financial semantic analysis (LLM-interpreted, deterministically validated & calculated) & recurrence analysis";
+            } else if (reasoningSource === "DETERMINISTIC_REGEX" || reasoningSource === "DETERMINISTIC_FALLBACK_LEGACY") {
+                reasoningSubtitle = "Evidence-grounded deterministic exposure quantification & recurrence analysis";
+            }
+
+            html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0; margin-bottom:20px;'>";
             html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
-            html += "<div style='display:flex; align-items:center; gap:10px;'>";
-            html += "<span style='font-size:16px;'>💰</span>";
-            html += "<h5 style='font-weight:800; font-size:16px; color:#0f172a; margin:0; letter-spacing:-0.2px;'>Cost & Financial Impact</h5>";
+            html += "<div>";
+            html += "<h5 style='font-weight:800; font-size:16px; color:#0f172a; margin:0; letter-spacing:-0.2px;'>Cost & Financial Exposure Analysis</h5>";
+            html += "<div style='font-size:11px; color:#64748b; font-weight:600;'>" + safeEsc(reasoningSubtitle) + "</div>";
             html += "</div>";
-            html += "<span style='font-size:11px; font-weight:800; background:" + statusBg + "; color:" + statusColor + "; border:1px solid " + statusBorder + "; padding:5px 12px; border-radius:20px; text-transform:uppercase; letter-spacing:0.5px;'>" + safeEsc(costStatus) + "</span>";
+            html += "<div style='display:flex; gap:8px;'>";
+            html += "<span style='font-size:11px; font-weight:800; background:#f1f5f9; color:#334155; border:1px solid #cbd5e1; padding:5px 12px; border-radius:20px; text-transform:uppercase;'>" + safeEsc(fStat.replace(/_/g, " ")) + "</span>";
+            html += "<span style='font-size:11px; font-weight:800; background:" + fConfBg + "; color:" + fConfColor + "; border:1px solid #cbd5e1; padding:5px 12px; border-radius:20px; text-transform:uppercase;'>CONFIDENCE: " + safeEsc(fConf) + "</span>";
+            html += "</div>";
             html += "</div>";
 
-            if (costImpact.narrative) {
+            // Honest-failure notice: when the LLM financial-semantic stage
+            // could not complete, the system says so rather than showing a
+            // keyword-derived guess. No monetary figure is shown in this case.
+            // Auditor-facing honest-failure notice. The internal engineering
+            // state (LLM_UNAVAILABLE / LLM_INVALID / LLM_INCOMPLETE and the
+            // provider/parser/schema detail behind it) is NEVER surfaced
+            // here -- the auditor sees only that a financial figure could
+            // not be produced, and why in domain terms. Shown only when the
+            // result carries no usable financial component at all; a
+            // partial result (cost factor identified, recovery known, etc.)
+            // reports financial_semantic_status "OK" and renders normally
+            // below.
+            var semStatus = finAnalysis ? finAnalysis.financial_semantic_status : null;
+            if (semStatus && semStatus !== "OK") {
+                html += "<div style='background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:12px 16px; margin-bottom:16px;'>";
+                html += "<div style='font-size:11px; font-weight:800; color:#92400e; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;'>Financial Analysis: NOT ASSESSABLE</div>";
+                html += "<div style='font-size:12px; color:#78350f; line-height:1.5;'>Insufficient structurally valid financial evidence was available to quantify a cost factor for this finding. Any monetary exposure should be assessed manually from the evidence ledger.</div>";
+                html += "</div>";
+            }
+
+            // Narrative if present
+            if (costImpact && costImpact.narrative) {
                 html += "<p style='font-size:13px; color:#334155; margin-bottom:16px; line-height:1.6; background:#f8fafc; padding:12px 16px; border-radius:10px; border:1px solid #f1f5f9; font-weight:500;'>" + safeEsc(costImpact.narrative) + "</p>";
             }
 
-            // --- Gross / Recovered / Net Outstanding exposure breakdown ---
-            // Only rendered when gross_exposure is present -- it anchors the
-            // gross - recovered = net_exposure invariant enforced server-side,
-            // so the other two are only meaningful alongside it.
-            var curr = costImpact.currency || "INR";
-            var fmtAmt = function(v) { return curr + " " + v.toLocaleString(); };
-            if (costImpact.gross_exposure !== null && costImpact.gross_exposure !== undefined) {
-                var netVal = (costImpact.net_exposure !== null && costImpact.net_exposure !== undefined)
-                    ? costImpact.net_exposure
-                    : (costImpact.unrecovered_amount !== null && costImpact.unrecovered_amount !== undefined)
-                        ? costImpact.unrecovered_amount
-                        : (costImpact.outstanding_amount !== null && costImpact.outstanding_amount !== undefined)
-                            ? costImpact.outstanding_amount
-                            : null;
-                var exposureFields = [
-                    { label: "Gross Exposure", val: fmtAmt(costImpact.gross_exposure), accent: "#0f172a" },
-                    {
-                        label: "Recovered",
-                        val: (costImpact.recovered_amount !== null && costImpact.recovered_amount !== undefined) ? fmtAmt(costImpact.recovered_amount) : "None Confirmed",
-                        accent: "#059669"
-                    },
-                    {
-                        label: "Net Outstanding",
-                        val: netVal !== null ? fmtAmt(netVal) : "NOT ESTABLISHED",
-                        accent: netVal ? "#dc2626" : "#059669"
+            // Currency conflict: an explicit currency code conflicts with a
+            // currency symbol in the same stated amount (e.g. "USD ₹10,000")
+            // -- no calculation, conversion, or exposure figure is ever
+            // produced from it. Surfaced explicitly so this is visibly
+            // distinct from "no financial data present at all".
+            if (hasCurrencyConflict) {
+                html += "<div style='background:#fef2f2; border:1px solid #fecaca; border-radius:10px; padding:12px 16px; margin-bottom:16px;'>";
+                html += "<div style='font-size:12px; font-weight:800; color:#b91c1c; text-transform:uppercase; letter-spacing:0.5px;'>Currency Status: CONFLICT</div>";
+                html += "<div style='font-size:12px; color:#7f1d1d; margin-top:6px; line-height:1.5;'>" + safeEsc(finAnalysis.assessment_reason || "An explicit currency code conflicts with a currency symbol for the same amount. Calculation excluded.") + "</div>";
+                html += "</div>";
+            }
+
+            // Multi-currency breakdown: evidence contains more than one
+            // currency with no authoritative conversion basis. Each
+            // currency's own exposure is shown independently -- never
+            // combined into a single misleading converted figure.
+            if (hasMultiCurrency) {
+                html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:14px;'>";
+                finAnalysis.currency_breakdown.forEach(function(ce) {
+                    var ceAmt = (ce.gross_amount !== null && ce.gross_amount !== undefined) ? ce.gross_amount
+                        : (ce.reported_amount !== null && ce.reported_amount !== undefined ? ce.reported_amount : null);
+                    var ceAmtOk = ceAmt !== null && typeof ceAmt === "number" && !isNaN(ceAmt) && isFinite(ceAmt);
+                    // Prefer the original evidence-ledger status (e.g.
+                    // BELIEF) for display when it is known -- it is more
+                    // precise than the collapsed VERIFIED/REPORTED
+                    // calculation bucket, which remains authoritative for
+                    // eligibility but is never the sole label shown.
+                    var ceDisplayStatus = ce.source_evidence_status || ce.status || "NOT_ASSESSABLE";
+                    var ceRemedOk = typeof ce.remediation_cost === "number" && !isNaN(ce.remediation_cost) && isFinite(ce.remediation_cost);
+                    html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:3px solid #0f172a; border-radius:10px; padding:12px 14px;'>";
+                    html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>" + safeEsc(ce.currency) + " Exposure</div>";
+                    html += "<div style='font-size:15px; color:#0f172a; font-weight:800;'>" + (ceAmtOk ? (safeEsc(ce.currency) + " " + ceAmt.toLocaleString()) : "NOT ESTABLISHED") + "</div>";
+                    html += "<div style='font-size:11px; color:#64748b; margin-top:2px;'>" + safeEsc(ceDisplayStatus.replace(/_/g, " ")) + "</div>";
+                    if (ce.historical_is_assessable && typeof ce.historical_annualized_amount === "number" && !isNaN(ce.historical_annualized_amount) && isFinite(ce.historical_annualized_amount)) {
+                        html += "<div style='font-size:11px; color:#166534; margin-top:6px; padding-top:6px; border-top:1px solid #e2e8f0;'><strong>Historical Annualized Exposure:</strong> " + safeEsc(ce.currency) + " " + ce.historical_annualized_amount.toLocaleString() + "/year</div>";
                     }
-                ];
-                html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:16px;'>";
-                exposureFields.forEach(function(f) {
-                    html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:3px solid " + f.accent + "; border-radius:10px; padding:12px 14px;'>";
-                    html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;'>" + escapeHtml(f.label) + "</div>";
-                    html += "<div style='font-size:14px; color:" + f.accent + "; font-weight:800;'>" + safeEsc(f.val) + "</div>";
+                    // Remediation cost is a DISTINCT financial population
+                    // -- never merged into the exposure figure above, and
+                    // never labelled as loss/exposure -- so a currency
+                    // whose only fact is a proposed remediation still
+                    // surfaces here instead of disappearing.
+                    if (ceRemedOk) {
+                        html += "<div style='font-size:11px; color:#7c2d92; margin-top:6px; padding-top:6px; border-top:1px solid #e2e8f0;'><strong>Remediation Cost:</strong> " + safeEsc(ce.currency) + " " + ce.remediation_cost.toLocaleString() + " — " + safeEsc((ce.remediation_cost_status || "NOT_ASSESSABLE").replace(/_/g, " ")) + "</div>";
+                        if (typeof ce.indicative_payback_years === "number" && !isNaN(ce.indicative_payback_years) && isFinite(ce.indicative_payback_years)) {
+                            html += "<div style='font-size:11px; color:#7c2d92; margin-top:2px;'>Indicative Payback: " + ce.indicative_payback_years + " years</div>";
+                        }
+                    }
                     html += "</div>";
                 });
                 html += "</div>";
+                html += "<div style='background:#fffbe6; border:1px solid #fde68a; border-radius:10px; padding:12px 16px; margin-bottom:16px;'>";
+                html += "<div style='font-size:11px; font-weight:800; color:#92400e; text-transform:uppercase; letter-spacing:0.5px;'>Consolidated Exposure: NOT ASSESSABLE</div>";
+                html += "<div style='font-size:12px; color:#78350f; margin-top:4px;'>Multiple currencies are present and no authoritative exchange rate is available. Each currency is shown independently above; amounts are never combined across currencies.</div>";
+                html += "</div>";
             }
 
-            var costSummaryFields = [
-                { label: "Financial Factor", val: costImpact.financial_factor || costImpact.cost_factor_type },
-                { label: "Potential Exposure", val: costImpact.potential_cost_exposure },
-                { label: "Actual Financial Loss", val: costImpact.actual_loss !== null && costImpact.actual_loss !== undefined ? ((costImpact.currency || "INR") + " " + costImpact.actual_loss.toLocaleString()) : (costImpact.actual_loss_status || "NOT ESTABLISHED") },
-                { label: "Recovery Status", val: costImpact.recoverability_status || costImpact.recoverability },
-                { label: "Calculation Basis", val: costImpact.calculation_basis },
-                { label: "Confidence", val: costImpact.confidence }
-            ].filter(function(f) { return f.val && safeStr(f.val); });
+            // Helper function to safely format finite numbers
+            var isFiniteNum = function(n) { return n !== null && n !== undefined && typeof n === "number" && !isNaN(n) && isFinite(n); };
+            var fmtFin = function(n) { return isFiniteNum(n) ? (fCurr + " " + n.toLocaleString()) : "NOT ESTABLISHED"; };
 
-            if (costSummaryFields.length) {
-                html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:16px;'>";
-                costSummaryFields.forEach(function(f) {
-                    html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px;'>";
-                    html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;'>" + escapeHtml(f.label) + "</div>";
-                    html += "<div style='font-size:13px; color:#0f172a; font-weight:700;'>" + safeEsc(f.val) + "</div>";
+            // Key Exposure Metrics Grid
+            html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:16px;'>";
+            
+            // 1. Gross / Reported Exposure
+            html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:3px solid #0f172a; border-radius:10px; padding:12px 14px;'>";
+            if (isFiniteNum(grossVal)) {
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>Verified Gross Exposure</div>";
+                html += "<div style='font-size:15px; color:#0f172a; font-weight:800;'>" + fCurr + " " + grossVal.toLocaleString() + "</div>";
+            } else if (cImp && cImp.reported_unit_exposure && cImp.reported_event_count) {
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>Reported Financial Exposure</div>";
+                html += "<div style='font-size:15px; color:#0284c7; font-weight:800;'>" + fCurr + " " + cImp.reported_unit_exposure.toLocaleString() + " per reported event</div>";
+                html += "<div style='font-size:11px; color:#64748b; margin-top:2px;'>Across " + cImp.reported_event_count + " reported event(s) (UNVERIFIED)</div>";
+            } else if (isFiniteNum(repGrossVal)) {
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>Reported Financial Exposure</div>";
+                html += "<div style='font-size:15px; color:#0284c7; font-weight:800;'>" + fCurr + " " + repGrossVal.toLocaleString() + " (UNVERIFIED)</div>";
+            } else {
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>Verified Gross Exposure</div>";
+                html += "<div style='font-size:15px; color:#64748b; font-weight:800;'>NOT ESTABLISHED</div>";
+            }
+            html += "</div>";
+
+            // 2. Verified Recovery
+            html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:3px solid #0284c7; border-radius:10px; padding:12px 14px;'>";
+            html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>Verified Recovery</div>";
+            if (isFiniteNum(recVal)) {
+                html += "<div style='font-size:15px; color:#0284c7; font-weight:800;'>" + fCurr + " " + recVal.toLocaleString() + " (" + safeEsc(recStatus.replace(/_/g, " ")) + ")</div>";
+            } else if (isFiniteNum(repRecVal)) {
+                // Reported (not yet verified) recovery -- shown, never
+                // dropped, but clearly distinguished from a verified one.
+                html += "<div style='font-size:15px; color:#64748b; font-weight:800;'>" + fCurr + " " + repRecVal.toLocaleString() + " (REPORTED)</div>";
+                html += "<div style='font-size:11px; color:#64748b; margin-top:2px;'>REQUIRES VERIFICATION</div>";
+            } else {
+                html += "<div style='font-size:15px; color:#64748b; font-weight:800;'>NOT ESTABLISHED</div>";
+                html += "<div style='font-size:11px; color:#64748b; margin-top:2px;'>REQUIRES VERIFICATION</div>";
+            }
+            html += "</div>";
+
+            // 3. Confirmed Net Loss or Potential Unrecovered
+            if (isFiniteNum(netLossVal)) {
+                html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:3px solid #dc2626; border-radius:10px; padding:12px 14px;'>";
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>Confirmed Net Loss</div>";
+                html += "<div style='font-size:15px; color:#dc2626; font-weight:800;'>" + fCurr + " " + netLossVal.toLocaleString() + "</div>";
+                html += "</div>";
+            } else if (isFiniteNum(potUnrecVal)) {
+                html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:3px solid #d97706; border-radius:10px; padding:12px 14px;'>";
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>Potential Unrecovered Exposure</div>";
+                html += "<div style='font-size:15px; color:#d97706; font-weight:800;'>UP TO " + fCurr + " " + potUnrecVal.toLocaleString() + "</div>";
+                html += "</div>";
+            } else {
+                html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-left:3px solid #64748b; border-radius:10px; padding:12px 14px;'>";
+                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;'>Confirmed Net Loss</div>";
+                html += "<div style='font-size:15px; color:#64748b; font-weight:800;'>NOT ESTABLISHED</div>";
+                html += "</div>";
+            }
+            html += "</div>";
+
+            // Additional Unverified Events Line (if present)
+            if (cImp && cImp.potential_additional_events) {
+                html += "<div style='background:#fefce8; border:1px solid #fef08a; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:12px; color:#713f12;'>";
+                html += "<strong>Potential Additional Events:</strong> " + cImp.potential_additional_events + " delivery(s) potentially affected (UNVERIFIED — excluded from verified exposure and recurrence).";
+                html += "</div>";
+            }
+
+            // Financial Factor & Calculation Basis
+            var factorLine = "<div style='font-size:12px; color:#334155; margin-bottom:12px; font-weight:600;'><strong>Financial Factor:</strong> <span style='background:#f1f5f9; padding:3px 8px; border-radius:4px; border:1px solid #cbd5e1;'>" + safeEsc(finFactor.replace(/_/g, " ")) + "</span></div>";
+            html += factorLine;
+
+            var calcFormula = (cImp && cImp.calculation_formula) ? cImp.calculation_formula : (costImpact && costImpact.calculation_basis ? costImpact.calculation_basis : null);
+            if (calcFormula) {
+                html += "<div style='font-size:12px; color:#475569; background:#f8fafc; padding:8px 12px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:14px; font-weight:500;'><strong>Evidence-Based Calculation:</strong> " + safeEsc(calcFormula) + "</div>";
+            }
+
+            // Subsection: Recurrence & Annualization Analysis
+            var ann = finAnalysis ? finAnalysis.annualized_exposure : null;
+            var rec = finAnalysis ? finAnalysis.recurrence_analysis : null;
+            var hasRecurrenceData = (ann && ann.is_assessable) || (rec && rec.is_assessable);
+
+            html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:14px 16px; margin-bottom:16px;'>";
+            html += "<div style='font-size:12px; font-weight:800; color:#0f172a; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;'>Recurrence & Annualization Analysis</div>";
+
+            if (hasRecurrenceData) {
+                html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-bottom:10px;'>";
+                if (ann && ann.is_assessable && isFiniteNum(ann.annualized_amount)) {
+                    html += "<div style='background:#ffffff; border:1px solid #bbf7d0; border-radius:8px; padding:10px 12px;'>";
+                    html += "<div style='font-size:11px; font-weight:800; color:#166534; text-transform:uppercase;'>Evidence-Based Annualized Exposure</div>";
+                    html += "<div style='font-size:15px; color:#15803d; font-weight:800; margin:3px 0;'>" + safeEsc(ann.currency || fCurr) + " " + ann.annualized_amount.toLocaleString() + "/year</div>";
+                    if (ann.observed_event_rate_per_year) {
+                        html += "<div style='font-size:11px; color:#166534; font-weight:600;'>Observed Event Rate: " + ann.observed_event_rate_per_year + " events/year</div>";
+                    }
+                    html += "<div style='font-size:10px; color:#166534; margin-top:2px;'>" + safeEsc(ann.basis) + "</div>";
+                    html += "<div style='font-size:10px; color:#475569; font-style:italic; margin-top:4px;'>" + safeEsc(ann.qualification) + "</div>";
                     html += "</div>";
-                });
+                }
+                if (rec && rec.is_assessable && isFiniteNum(rec.expected_annual_exposure)) {
+                    html += "<div style='background:#ffffff; border:1px solid #bfdbfe; border-radius:8px; padding:10px 12px;'>";
+                    html += "<div style='font-size:11px; font-weight:800; color:#1e40af; text-transform:uppercase;'>Expected Annual Recurrence Loss</div>";
+                    html += "<div style='font-size:15px; color:#2563eb; font-weight:800; margin:3px 0;'>" + safeEsc(rec.currency || fCurr) + " " + rec.expected_annual_exposure.toLocaleString() + "/year</div>";
+                    html += "<div style='font-size:10px; color:#1e40af;'>" + safeEsc(rec.basis) + "</div>";
+                    html += "</div>";
+                }
+                html += "</div>";
+            } else {
+                var recReason = (ann && ann.reason_if_not_assessable) || (rec && rec.reason_if_not_assessable) || "Insufficient verified historical recurrence data or observation period to establish a recurrence rate.";
+                html += "<div style='font-size:12px; color:#64748b; line-height:1.5;'><strong style='color:#334155;'>Status:</strong> NOT ASSESSABLE<br><strong style='color:#334155;'>Reason:</strong> " + safeEsc(recReason) + "</div>";
+            }
+            html += "</div>";
+
+            // Economic Analysis (Remediation Cost / Payback) -- reuses
+            // the existing deterministic capa_economics calculation.
+            // Remediation cost is a DISTINCT financial population from
+            // gross/historical exposure above; shown only when the
+            // finding has a single currency (the multi-currency case
+            // renders remediation per-currency in the breakdown above
+            // instead, since capa_economics itself is single-currency).
+            var capaEcon = finAnalysis ? finAnalysis.capa_economics : null;
+            var capaConflict = !!(capaEcon && capaEcon.remediation_status === "REQUIRES_RECONCILIATION" && capaEcon.conflicting_remediation_amounts && capaEcon.conflicting_remediation_amounts.length > 0);
+            if (!hasMultiCurrency && capaEcon && (isFiniteNum(capaEcon.remediation_cost) || capaConflict)) {
+                html += "<div style='background:#faf5ff; border:1px solid #e9d5ff; border-radius:12px; padding:14px 16px; margin-bottom:16px;'>";
+                html += "<div style='font-size:12px; font-weight:800; color:#0f172a; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;'>Economic Analysis</div>";
+                if (capaConflict) {
+                    // Multiple differing remediation-cost estimates with
+                    // no explicit total marker -- never summed, never
+                    // arbitrarily picked. Kept visible rather than
+                    // silently vanishing, per the same principle as
+                    // currency-conflict visibility above.
+                    html += "<div style='font-size:12px; font-weight:800; color:#9333ea; text-transform:uppercase;'>Remediation Cost: REQUIRES RECONCILIATION</div>";
+                    html += "<div style='font-size:11px; color:#6b21a8; margin-top:4px;'>Conflicting remediation estimates: " + safeEsc(capaEcon.currency || fCurr) + " " + capaEcon.conflicting_remediation_amounts.map(function(a) { return a.toLocaleString(); }).join(", ") + ". No explicit total was stated, and the evidence does not establish whether these are additive components or alternative options.</div>";
+                } else {
+                    html += "<div style='display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:10px;'>";
+                    html += "<div><div style='font-size:11px; font-weight:700; color:#7c2d92; text-transform:uppercase;'>Remediation Cost" + (capaEcon.remediation_cost_status && capaEcon.remediation_cost_status !== "VERIFIED" && capaEcon.remediation_cost_status !== "NOT_ASSESSABLE" ? " (" + safeEsc(capaEcon.remediation_cost_status) + ")" : "") + "</div><div style='font-size:14px; color:#581c87; font-weight:800;'>" + safeEsc(capaEcon.currency || fCurr) + " " + capaEcon.remediation_cost.toLocaleString() + "</div></div>";
+                    if (isFiniteNum(capaEcon.annual_avoided_exposure)) {
+                        html += "<div><div style='font-size:11px; font-weight:700; color:#7c2d92; text-transform:uppercase;'>Annual Avoided Exposure</div><div style='font-size:14px; color:#581c87; font-weight:800;'>" + safeEsc(capaEcon.currency || fCurr) + " " + capaEcon.annual_avoided_exposure.toLocaleString() + "/year</div></div>";
+                    }
+                    if (capaEcon.is_assessable && isFiniteNum(capaEcon.indicative_payback_years)) {
+                        html += "<div><div style='font-size:11px; font-weight:700; color:#7c2d92; text-transform:uppercase;'>Indicative Payback</div><div style='font-size:14px; color:#581c87; font-weight:800;'>" + capaEcon.indicative_payback_years + " years</div></div>";
+                    }
+                    html += "</div>";
+                    if (capaEcon.is_assessable) {
+                        html += "<div style='font-size:11px; color:#6b21a8; font-style:italic; margin-top:8px;'>" + safeEsc(capaEcon.qualification || "Indicative evidence-based economic comparison, not guaranteed ROI.") + "</div>";
+                    } else {
+                        html += "<div style='font-size:11px; color:#6b21a8; margin-top:8px;'>Payback not assessable: a verified annual avoided exposure in the same currency is not yet established.</div>";
+                    }
+                }
                 html += "</div>";
             }
 
-            if (costImpact.cost_drivers && costImpact.cost_drivers.length) {
-                html += "<div style='margin-bottom:14px;'>";
-                html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:6px;'>Potential Cost Drivers:</div>";
-                html += "<div style='display:flex; flex-wrap:wrap; gap:6px;'>";
-                costImpact.cost_drivers.forEach(function(d) {
-                    html += "<span style='background:#f1f5f9; color:#334155; border:1px solid #cbd5e1; font-size:11px; font-weight:600; padding:4px 10px; border-radius:6px;'>&bull; " + safeEsc(d) + "</span>";
-                });
+            // Multi-Dimensional Financial Confidence
+            if (dimConf && (dimConf.transaction_confidence || dimConf.event_confidence)) {
+                var txnC = dimConf.transaction_confidence || dimConf.event_confidence || "NOT_ASSESSABLE";
+                var amtC = dimConf.amount_confidence || "NOT_ASSESSABLE";
+                var recC = dimConf.recovery_confidence || "NOT_ASSESSABLE";
+                var lossC = dimConf.net_loss_confidence || dimConf.loss_confidence || "NOT_ASSESSABLE";
+                var projC = dimConf.projection_confidence || "NOT_ASSESSABLE";
+
+                html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:10px 14px; margin-bottom:14px;'>";
+                html += "<div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;'>Financial Confidence:</div>";
+                html += "<div style='display:flex; flex-wrap:wrap; gap:12px; font-size:11px; color:#334155; font-weight:600;'>";
+                html += "<span>Transaction: <strong style='color:" + (txnC === "HIGH" ? "#059669" : "#64748b") + ";'>" + safeEsc(txnC) + "</strong></span>";
+                html += "<span>Amount: <strong style='color:" + (amtC === "HIGH" ? "#059669" : "#64748b") + ";'>" + safeEsc(amtC) + "</strong></span>";
+                html += "<span>Recovery: <strong style='color:" + (recC === "HIGH" ? "#059669" : "#64748b") + ";'>" + safeEsc(recC) + "</strong></span>";
+                html += "<span>Net Loss: <strong style='color:" + (lossC === "HIGH" ? "#059669" : "#64748b") + ";'>" + safeEsc(lossC) + "</strong></span>";
+                html += "<span>Projection: <strong style='color:" + (projC === "HIGH" ? "#059669" : "#64748b") + ";'>" + safeEsc(projC) + "</strong></span>";
                 html += "</div>";
                 html += "</div>";
             }
 
-            if (costImpact.evidence_required && costImpact.evidence_required.length) {
+            // Evidence Required
+            var reqEv = (finAnalysis && finAnalysis.uncertainty && finAnalysis.uncertainty.evidence_needed_to_resolve && finAnalysis.uncertainty.evidence_needed_to_resolve.length)
+                ? finAnalysis.uncertainty.evidence_needed_to_resolve
+                : (costImpact && costImpact.evidence_required && costImpact.evidence_required.length ? costImpact.evidence_required : []);
+            if (reqEv && reqEv.length) {
                 html += "<div style='background:#fefce8; border:1px solid #fef08a; border-radius:10px; padding:12px 16px;'>";
-                html += "<div style='font-size:11px; font-weight:800; color:#854d0e; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;'>Financial Evidence Required for Assessment:</div>";
+                html += "<div style='font-size:11px; font-weight:800; color:#854d0e; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;'>Financial Evidence Required:</div>";
                 html += "<ul style='margin:0; padding-left:18px; font-size:12px; color:#713f12; line-height:1.6;'>";
-                costImpact.evidence_required.forEach(function(e) {
-                    html += "<li>" + safeEsc(e) + "</li>";
-                });
+                reqEv.forEach(function(e) { html += "<li>" + safeEsc(e) + "</li>"; });
                 html += "</ul>";
                 html += "</div>";
             }

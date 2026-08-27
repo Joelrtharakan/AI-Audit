@@ -318,7 +318,11 @@ def get_default_missing_evidence(factor_type: str, text: str) -> tuple[list[str]
 # ---------------------------------------------------------------------------
 
 def parse_currency(text: str) -> str:
-    """Detect the relevant currency."""
+    """Detect the relevant currency. Never defaults an unstated currency to
+    INR (or any other currency) -- returns the explicit "UNKNOWN" sentinel
+    when the text carries no currency symbol/code/word at all, one of the
+    sanctioned outcomes for an unresolvable currency (the others being
+    NOT_ASSESSABLE/rejection, used by callers where that's the better fit)."""
     if "₹" in text or re.search(r"\b(?:INR|rupees?|Rs\.?)\b", text, re.IGNORECASE):
         return "INR"
     if "€" in text or re.search(r"\b(?:EUR|euros?)\b", text, re.IGNORECASE):
@@ -327,7 +331,7 @@ def parse_currency(text: str) -> str:
         return "GBP"
     if "$" in text or re.search(r"\b(?:USD|dollars?)\b", text, re.IGNORECASE):
         return "USD"
-    return "INR"
+    return "UNKNOWN"
 
 
 # Indian numbering-system magnitude words -- "lakh"/"lac" = 100,000,
@@ -513,7 +517,7 @@ def analyze_cost_and_financial_impact(
         fin_amt = FinancialAmount(
             amount=calc_total,
             formatted=exposure_str,
-            currency=curr or "INR",
+            currency=curr,
             factor=factor_type,
             source_claim_ids=matched_cids,
             support_status="ESTIMATED",
@@ -602,7 +606,7 @@ def analyze_cost_and_financial_impact(
             fin_amt = FinancialAmount(
                 amount=amount,
                 formatted=formatted_amount_str,
-                currency=curr or "INR",
+                currency=curr,
                 factor=factor_type,
                 source_claim_ids=matched_cids,
                 support_status="VERIFIED",
@@ -780,7 +784,7 @@ def analyze_cost_and_financial_impact(
         fin_amt = FinancialAmount(
             amount=amount,
             formatted=formatted_amount_str,
-            currency=curr or "INR",
+            currency=curr,
             factor=factor_type,
             source_claim_ids=matched_cids,
             support_status="VERIFIED" if is_verified else "REPORTED",

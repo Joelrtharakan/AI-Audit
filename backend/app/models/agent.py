@@ -19,6 +19,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.financial.models import FinancialAnalysisResult
+
 
 # ---------------------------------------------------------------------------
 # Evidence classification
@@ -1723,6 +1725,7 @@ class InvestigationReport(BaseModel):
     impact_assessment: ImpactAssessment
     cost_impact: CostImpact | None = None
     financial_amount: FinancialAmount | None = None
+    financial_analysis: FinancialAnalysisResult | None = None
     evidence_gaps: list[EvidenceGap] = []
     evidence: list[EvidenceItem] = []
     propositions: list[Proposition] = []
@@ -1749,6 +1752,14 @@ class InvestigationReport(BaseModel):
     fallback_used: bool = False
     provider_attempts: list[str] = []
     critic_status: str | None = None
+    # Shadow-mode comparison (canonical semantic finding model pass):
+    # points where the existing deterministic pipeline's own
+    # interpretation disagreed with the LLM canonical semantic
+    # interpretation. Purely observational -- the deterministic values
+    # used elsewhere in this report remain authoritative; nothing here
+    # ever overrides them. Empty whenever canonical semantic
+    # interpretation was not attempted or was unavailable.
+    semantic_pipeline_disagreements: list[dict] = Field(default_factory=list)
 
     @field_validator("human_review_required")
     @classmethod

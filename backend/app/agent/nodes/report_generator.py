@@ -11,6 +11,7 @@ import logging
 
 from app.agent.grounding_guard import build_source_text, filter_list_field, ungrounded_entities
 from app.agent.state import AgentState
+from app.config import get_settings
 from app.models.agent import (
     AgentFinalState,
     AgentTraceStep,
@@ -286,6 +287,89 @@ async def generate_report_node(state: AgentState) -> AgentState:
         untraced_concepts=[],
     )
 
+    # Evidence-Grounded Financial Exposure & Cost-of-Recurrence Analysis.
+    #
+    # LLM semantic understanding -> deterministic validation -> the SAME
+    # deterministic calculator is tried FIRST when enabled: it can
+    # correctly interpret evidence wording the regex extractor has never
+    # seen (see app.financial.semantic_engine). It fails closed on any
+    # problem (no provider, network error, invalid output, nothing
+    # validatable) and falls back unconditionally to the existing,
+    # fully-regression-tested regex-extraction engine, which remains the
+    # authoritative safety net.
+    from app.financial.engine import analyze_financial_exposure
+    finding_text = state["request"].finding_text if state.get("request") else ""
+    financial_analysis = state.get("financial_analysis")
+    if not financial_analysis:
+        settings = get_settings()
+        evidence_ledger = state.get("evidence_ledger", [])
+        semantic_result = None
+        # The LLM semantic path OWNS financial meaning whenever it is
+        # enabled AND there is an evidence ledger for it to interpret. It
+        # returns an explicit result in every case (including honest
+        # failure, with financial_semantic_status set) EXCEPT when there is
+        # no evidence ledger -- the one case where the deterministic
+        # text-reading engine is the only option. It is NEVER silently
+        # replaced by a keyword/regex interpretation on a genuine failure.
+        if settings.financial_semantic_reasoning_enabled and evidence_ledger:
+            try:
+                from app.financial.semantic_engine import analyze_financial_exposure_semantic
+                semantic_outcome = await analyze_financial_exposure_semantic(
+                    finding_text=finding_text,
+                    evidence_ledger=evidence_ledger,
+                )
+                if semantic_outcome is not None:
+                    semantic_result, _semantic_audit = semantic_outcome
+            except Exception as exc:  # noqa: BLE001 - last-resort crash guard only
+                logger.warning("Semantic financial analysis crashed unexpectedly (%s); reporting honestly.", exc)
+                from app.financial.semantic_engine import _honest_failure_result
+                semantic_result = _honest_failure_result(
+                    "LLM_UNAVAILABLE",
+                    "The financial semantic analysis stage failed unexpectedly; no automated figure was produced.",
+                )
+        if semantic_result is not None:
+            financial_analysis = semantic_result
+            financial_analysis.reasoning_source = "LLM_SEMANTIC"
+        else:
+            financial_analysis = analyze_financial_exposure(
+                finding_text=finding_text,
+                evidence_ledger=evidence_ledger,
+                evidence_claims=evidence_claims,
+            )
+            financial_analysis.reasoning_source = "DETERMINISTIC_REGEX"
+
+    # Canonical semantic finding context -- promoted to authoritative
+    # downstream input (investigation planner / Five-Why, see
+    # plan_investigation_node/core_synthesis_node/final_evidence_
+    # verification_node) when `canonical_semantic_shadow_enabled` is on.
+    # Computed ONCE, early, in plan_investigation_node and reused here via
+    # state -- never recomputed (avoids a second LLM call for the same
+    # finding). Disagreement recording is kept for diagnostics: it now
+    # compares what was ACTUALLY used (the canonical value, when promoted)
+    # against what the pure legacy raw-text path would independently have
+    # produced, never the reverse.
+    semantic_pipeline_disagreements: list[dict] = []
+    settings = get_settings()
+    if settings.canonical_semantic_shadow_enabled:
+        try:
+            from app.services.shadow_semantic_comparison import compare_deterministic_vs_canonical
+
+            canonical_context = state.get("canonical_semantic_context")
+            if canonical_context is not None:
+                det_canonical_state = state.get("canonical_finding_state")
+                deterministic_subject = (
+                    getattr(det_canonical_state, "affected_object", None)
+                    or getattr(det_canonical_state, "finding_subject", None)
+                    if det_canonical_state is not None else None
+                )
+                disagreements = compare_deterministic_vs_canonical(
+                    finding_text, deterministic_subject, canonical_context
+                )
+                semantic_pipeline_disagreements = [d.model_dump() for d in disagreements]
+        except Exception as exc:  # noqa: BLE001 - diagnostics must never affect the authoritative report
+            logger.warning("Canonical semantic comparison failed unexpectedly (%s); ignored.", exc)
+            semantic_pipeline_disagreements = []
+
     report = InvestigationReport(
         observation_quality=observation_quality,  # type: ignore[arg-type]
         observation_confidence=obs_conf,  # type: ignore[arg-type]
@@ -301,6 +385,7 @@ async def generate_report_node(state: AgentState) -> AgentState:
         capa=capa,
         impact_assessment=impact,
         cost_impact=cost_impact,
+        financial_analysis=financial_analysis,
         evidence_gaps=state.get("evidence_gaps", []),
         evidence=state.get("evidence_ledger", []),
         propositions=propositions,
@@ -316,6 +401,7 @@ async def generate_report_node(state: AgentState) -> AgentState:
         fallback_used=bool(state.get("fallback_used", False)),
         provider_attempts=state.get("provider_attempts", []),
         critic_status=state.get("critic_status"),
+        semantic_pipeline_disagreements=semantic_pipeline_disagreements,
     )
     if report.analysis_mode == "DETERMINISTIC":
         trace.append(AgentTraceStep.ok(

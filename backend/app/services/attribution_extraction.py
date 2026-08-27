@@ -48,6 +48,50 @@ _DID_NOT_KNOW_RE = re.compile(
 
 _ATTRIBUTION_PATTERNS = (_REPORT_VERB_RE, _AWARENESS_GAP_RE, _DID_NOT_KNOW_RE)
 
+# Passive-voice report construction: "<content> was/were/is/are/has been/
+# have been reported/stated/claimed/alleged/indicated (by <speaker>)?".
+# _REPORT_VERB_RE only recognizes ACTIVE voice ("X reported that Y") --
+# but "A supplier overpayment of INR 200,000 was reported during the
+# reconciliation review" is exactly as much an attribution/hedge as its
+# active-voice equivalent ("Finance reported that a supplier overpayment
+# of INR 200,000 occurred"), just without a named agent performing the
+# reporting. Missing this construction meant a REPORTED finding written
+# in passive voice fell through to plain FACT (-> VERIFIED by default),
+# silently upgrading its evidence status -- a defect entirely upstream of
+# financial semantics, which only ever preserves whatever status the
+# evidence ledger already assigned it.
+_PASSIVE_REPORT_RE = re.compile(
+    r"\b(?:was|were|is|are|has\s+been|have\s+been)\s+"
+    r"(?:reported|stated|claimed|alleged|indicated)\b",
+    re.IGNORECASE,
+)
+# A trailing named agent ("... was reported BY the warehouse supervisor.")
+# is a separate, optional sub-match -- kept independent of the marker
+# above so trailing modifier text with no agent at all ("... was reported
+# during the reconciliation review.") still matches the marker without
+# needing to also satisfy an end-of-string constraint right after the verb.
+_PASSIVE_REPORT_AGENT_RE = re.compile(r"\bby\s+(?P<speaker>[\w-]+(?:\s+[\w-]+){0,6})\s*[.,]?\s*$", re.IGNORECASE)
+
+# Every bare-form report verb _REPORT_VERB_RE can match as the predicate
+# (mirrors the third alternative group inside _REPORT_VERB_RE). "note" is
+# structurally ambiguous: it is also the second half of a compound noun
+# ("credit note", "delivery note", "cover note", "promissory note") that
+# names a financial/business document, not a person reporting something.
+# _REPORT_VERB_RE's non-greedy speaker group cannot tell these apart on
+# its own -- "Credit note confirms X" matches with speaker="Credit",
+# verb="note", claim="confirms X", silently discarding "note" and folding
+# the real verb ("confirms") into the claim text. Detected and corrected
+# below rather than in the regex, since the fix needs to inspect what
+# follows the matched verb, not just what precedes it.
+_BARE_REPORT_VERBS = frozenset({
+    "stated", "reported", "confirmed", "indicated", "noted", "mentioned",
+    "claimed", "said", "explained", "advised", "acknowledged", "cited",
+    "states", "reports", "confirms", "indicates", "notes", "mentions",
+    "claims", "says", "explains", "advises", "acknowledges",
+    "state", "report", "confirm", "indicate", "note", "mention", "claim",
+    "say", "explain", "advise", "acknowledge",
+})
+
 # A sentence that is neither an instruction, a stance, nor an attribution
 # still isn't automatically audit evidence -- social/expressive speech acts
 # (thanks, praise, greetings, well-wishes) carry no verifiable proposition
@@ -174,15 +218,65 @@ def classify_finding_segments(finding_text: str) -> list[FindingSegment]:
             m = pattern.match(sentence)
             if m:
                 claim = m.group("claim").strip().rstrip(".")
+                speaker = m.group("speaker").strip()
+                # A genuine speaker/entity never ends on a bare copula or
+                # auxiliary verb ("...40 units was", "...the shipment
+                # has") -- that shape means the match actually straddles
+                # a PASSIVE construction ("40 units was reported by X"),
+                # where "reported" (a recognized active-voice report verb)
+                # got matched against text that is really the tail of a
+                # passive clause, not an active speaker. Reject the match
+                # here so it falls through to the dedicated passive-voice
+                # check below instead of misattributing a name.
+                if pattern is _REPORT_VERB_RE and speaker.split()[-1:] and speaker.split()[-1].lower() in (
+                    "was", "is", "were", "are", "been", "be"
+                ):
+                    continue
                 if claim:
-                    segments.append(FindingSegment(
-                        text=sentence, kind="ATTRIBUTED",
-                        speaker=m.group("speaker").strip(), claim=claim,
-                        modality=mood.modality, modality_marker=mood.marker,
-                    ))
-                    attributed = True
+                    # "note" mis-consumed as the report verb, immediately
+                    # followed by the ACTUAL report verb -- reattach "note"
+                    # to the speaker (as the noun it really is: "Credit
+                    # note", "Delivery note", ...) and let the following
+                    # verb govern the claim instead. Harmless no-op for a
+                    # genuine "X noted that <claim>" sentence, since a real
+                    # claim practically never begins with another
+                    # attribution verb.
+                    claim_words = claim.split(None, 1)
+                    if (
+                        pattern is _REPORT_VERB_RE
+                        and claim_words
+                        and claim_words[0].lower() in _BARE_REPORT_VERBS
+                        and sentence[len(speaker):].lstrip().lower().startswith("note ")
+                    ):
+                        speaker = f"{speaker} note"
+                        claim = claim_words[1] if len(claim_words) > 1 else ""
+                    if claim:
+                        segments.append(FindingSegment(
+                            text=sentence, kind="ATTRIBUTED",
+                            speaker=speaker, claim=claim,
+                            modality=mood.modality, modality_marker=mood.marker,
+                        ))
+                        attributed = True
                 break
         if attributed:
+            continue
+
+        # 3b. Passive-voice report construction ("X was reported", with no
+        # named reporting agent) -- same epistemic weight as active-voice
+        # attribution, just a different surface form. The whole sentence
+        # is kept as the claim (unlike active-voice attribution, there is
+        # no clean "subject vs. embedded proposition" split to make
+        # without losing trailing context), and speaker is only set when
+        # an explicit "by <name>" is present.
+        m = _PASSIVE_REPORT_RE.search(sentence)
+        if m:
+            agent_m = _PASSIVE_REPORT_AGENT_RE.search(sentence)
+            speaker = agent_m.group("speaker").strip() if agent_m else None
+            segments.append(FindingSegment(
+                text=sentence, kind="ATTRIBUTED",
+                speaker=speaker, claim=sentence.rstrip("."),
+                modality=mood.modality, modality_marker=mood.marker,
+            ))
             continue
 
         # 5. Purely expressive/social content (thanks, praise, greetings)

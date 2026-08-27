@@ -403,3 +403,22 @@ def test_critical_case_4_training_conflict_revised_procedure():
     assert "training" in resolved.finding_subject.lower()
     assert "procedure" in resolved.finding_subject.lower()
 
+
+
+def test_bare_quantifier_alone_never_valid_subject():
+    """Real defect found via a live Ollama call: a summarizer can reduce
+    "Each resulted in a cost of X" down to just its leading quantifier
+    ("Each") with the actual subject lost -- a BARE single-word
+    quantifier is never a valid entity/subject regardless of domain, the
+    degenerate case of the existing 2-word "each event"/"several
+    failures" rejection rule."""
+    from app.services.semantic_subject import validate_semantic_subject
+    for word in ("Each", "Every", "Both", "Several", "Multiple", "All", "Some", "Any"):
+        assert not validate_semantic_subject(word), f"{word!r} alone must never be a valid subject"
+
+
+def test_quantifier_plus_real_entity_still_valid():
+    # The fix must not become overbroad -- "each" attached to a REAL
+    # entity (not a generic occurrence noun) remains a legitimate phrase.
+    from app.services.semantic_subject import validate_semantic_subject
+    assert validate_semantic_subject("each supplier contract")

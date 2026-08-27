@@ -649,19 +649,13 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     canonical_state.blocked_reasoning_steps = blk_steps
 
 
-    # Deterministic Cost & Financial Impact Analysis (Sections 26-42)
-    from app.services.cost_analysis import analyze_cost_and_financial_impact
-    cost_impact = analyze_cost_and_financial_impact(
-        request.finding_text,
-        ledger,
-        evidence_claims=evidence_claims,
-    )
-    canonical_state.cost_impact = cost_impact
-    if cost_impact and cost_impact.cost_factor_detected:
-        trace.append(AgentTraceStep.ok(
-            f"Cost & financial factor detected: status={cost_impact.financial_status}, "
-            f"exposure={cost_impact.potential_cost_exposure or 'REQUIRES_ASSESSMENT'}"
-        ))
+    # Cost & Financial Impact is no longer computed here. `report.cost_impact`
+    # is now a compatibility projection of the canonical `financial_analysis`
+    # (app.financial.models.FinancialAnalysisResult), derived once by
+    # final_evidence_verification_node via app.financial.compatibility --
+    # see that node for the single authoritative financial calculation
+    # point. Nothing between this node and final_evidence_verification_node
+    # reads state["cost_impact"], so no early computation is needed here.
 
     # Deterministically enforce Observation Quality Sufficiency (Section 1 & 2):
     # If a concrete affected object and observed deviation exist, quality is SUFFICIENT.
@@ -703,7 +697,6 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         "observation_quality": quality,
         "extraction": extraction,
         "canonical_finding_state": canonical_state,
-        "cost_impact": cost_impact,
         "trace": trace,
         "errors": errors,
         "iteration_count": state.get("iteration_count", 0),

@@ -29,10 +29,13 @@ trades a 404 for a "failed to decode font" error, which isn't actually
 cleaner. See the project README for how to fill those in.
 
 Usage:
-    python3 dev_server.py [port]   # defaults to 5500
+    python3 dev_server.py [port]   # defaults to 5510
 """
 
+import os
+import subprocess
 import sys
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 EMPTY_DATASET_RESPONSE = b'{"d": "<NewDataSet></NewDataSet>"}'
@@ -84,16 +87,42 @@ class DevRequestHandler(SimpleHTTPRequestHandler):
             super().log_message(format, *args)
 
 
+def start_backend_process():
+    """Start the FastAPI backend server on port 8010 if not already running."""
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    backend_dir = os.path.join(project_root, "backend")
+    venv_python = os.path.join(backend_dir, ".venv", "bin", "python")
+    
+    python_bin = venv_python if os.path.exists(venv_python) else sys.executable
+    cmd = [python_bin, "-m", "uvicorn", "app.main:app", "--reload", "--port", "8010"]
+    
+    try:
+        proc = subprocess.Popen(cmd, cwd=backend_dir)
+        print(f"🚀 Started Backend API server on http://localhost:8010 (PID: {proc.pid})")
+        return proc
+    except Exception as exc:
+        print(f"⚠️ Could not automatically start backend: {exc}")
+        return None
+
+
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5510
+    
+    # Automatically launch backend alongside frontend
+    backend_proc = start_backend_process()
+    
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("", port), DevRequestHandler)
-    print(f"Serving frontend on http://localhost:{port}/index.html")
+    print(f"✨ Serving frontend on http://localhost:{port}/index.html")
+    print(f"🔑 GitHub OAuth entry: http://localhost:8010/api/auth/github/login")
     print(f"Shimming {len(SHIMMED_PAGE_METHODS)} read-only ASP.NET PageMethod calls (see dev_server.py).")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        print("\nStopping dev server...")
+    finally:
+        if backend_proc:
+            backend_proc.terminate()
 
 
 if __name__ == "__main__":

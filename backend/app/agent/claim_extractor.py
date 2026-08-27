@@ -122,7 +122,7 @@ _AUDITOR_SPEAKER_RE = re.compile(
     re.IGNORECASE,
 )
 _SYSTEM_RECORD_SPEAKER_RE = re.compile(
-    r"\b(?:system|audit|server|dispatch|lms|training|distribution|calibration|maintenance|temperature|inspection|access|database|equipment|bank|accounting|scada|error|telemetry|sensor)\s+(?:system\s+|training\s+|error\s+|sensor\s+)?(?:logs?|records?|trail|history|memo|certificate|subledger|statement|telemetry)\b|"
+    r"\b(?:system|audit|server|dispatch|lms|training|distribution|calibration|maintenance|temperature|inspection|access|database|equipment|bank|accounting|credit|debit|scada|error|telemetry|sensor)\s+(?:system\s+|training\s+|error\s+|sensor\s+)?(?:logs?|records?|trail|history|memo|note|notes|certificate|subledger|statement|telemetry)\b|"
     r"\b(?:dispatch\s+system|scada\s+system|server\s+error\s+logs?|bank\s+credit\s+memo|sensor\s+telemetry|scada\s+sensor\s+telemetry)\b",
     re.IGNORECASE,
 )

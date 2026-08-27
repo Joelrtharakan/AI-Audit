@@ -77,6 +77,7 @@ def build_deterministic_investigation_plan(
     evidence_ledger: list[EvidenceItem],
     canonical_subject: str | None = None,
     canonical_state: Any = None,
+    semantic_context: Any = None,
 ) -> tuple[list[CandidateHypothesis], InvestigationPlan]:
     """Build dynamic, case-grounded hypotheses and discriminating investigation questions.
 
@@ -84,6 +85,23 @@ def build_deterministic_investigation_plan(
     (primary_uncertainty, causal_readiness, semantic_type, recurrence, financial)
     without needing re-derivation. `canonical_subject` is used for subject continuity.
     Defaults to None for full backward compatibility with legacy callers.
+
+    `semantic_context` (an `app.services.canonical_semantic_models.
+    CanonicalFindingContext`, already validated by `canonical_context_
+    validator.validate_canonical_context`) is the LLM canonical semantic
+    interpretation, promoted to authoritative over `canonical_subject`/
+    `canonical_state`/raw-text `resolve_deviation` re-derivation when
+    present. Three distinct states are preserved (never conflated):
+      A. semantic_context present with a resolved entity -> use it.
+      B. semantic_context present but explicitly has no resolved entity
+         (canonical says NOT_ESTABLISHED) -> use the same non-committal
+         generic placeholder used elsewhere in this function for "no
+         subject resolved", WITHOUT falling through to re-derive a guess
+         from raw text -- an explicit semantic "unknown" must never be
+         silently overwritten by a regex guess.
+      C. semantic_context is None (unavailable/not attempted) -> fully
+         unchanged legacy behavior (canonical_subject / canonical_state /
+         resolve_deviation), for complete backward compatibility.
     """
     hypotheses: list[CandidateHypothesis] = []
     questions: list[InvestigationQuestion] = []
@@ -100,13 +118,92 @@ def build_deterministic_investigation_plan(
     fact_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
     resolved = resolve_deviation(finding_text, fact_claims)
-    if canonical_subject and canonical_subject not in _DEGRADED_SUBJECTS:
+    if semantic_context is not None:
+        # States A/B (Section 17 of the promotion pass): the validated LLM
+        # canonical context is authoritative when present, whether or not
+        # it resolved an entity -- an explicit NOT_ESTABLISHED must never
+        # be overwritten by a raw-text regex guess.
+        from app.services.canonical_context_validator import get_affected_object_candidate
+        _canonical_affected = get_affected_object_candidate(semantic_context)
+        subject = _canonical_affected or "the affected process"
+    elif canonical_subject and canonical_subject not in _DEGRADED_SUBJECTS:
         subject = canonical_subject
     elif canonical_state and getattr(canonical_state, "finding_subject", None) and canonical_state.finding_subject not in _DEGRADED_SUBJECTS:
         subject = canonical_state.finding_subject
     else:
         subject = resolved.finding_subject or resolved.subject or "the affected process"
     actor = resolved.actor or (getattr(canonical_state, "actor", None) if canonical_state else None)
+
+    # FINANCIAL-ONLY FINDING GUARD (evidence-integrity hardening pass):
+    # a finding that states ONLY a financial figure -- no resolved entity,
+    # actor, or causal mechanism (resolved.subject is None) -- must not be
+    # routed through the generic process-governance branches below (which
+    # ask "what procedure/control governs {subject}", falling back to the
+    # meaningless "the affected process" placeholder) or through the
+    # recurrence branch (which fabricates a "previous CAPA effectiveness"
+    # narrative from the bare word "recurring"/"historical" with zero
+    # actual prior-CAPA evidence). A financial observation licenses
+    # economic-evidence verification questions, never a causal/control
+    # investigation the finding itself never raised.
+    if resolved.subject is None:
+        from app.services.cost_analysis import extract_explicit_amounts
+        from app.financial.extractor import is_historical_marker, is_remediation_marker
+        if extract_explicit_amounts(finding_text):
+            is_remediation = is_remediation_marker(finding_text)
+            is_historical = is_historical_marker(finding_text)
+            fin_areas: list[str] = []
+            fin_questions: list[InvestigationQuestion] = []
+            fin_evidence: list[str] = []
+            if is_remediation:
+                fin_areas.append("Remediation/CAPA cost estimate verification")
+                fin_questions.append(InvestigationQuestion(
+                    question_id="Q_FINANCIAL_REMEDIATION_COST_VERIFICATION", id="Q_FINANCIAL_REMEDIATION_COST_VERIFICATION",
+                    question="Does the approved CAPA/implementation estimate corroborate the proposed remediation cost stated in the finding?",
+                    purpose="Verify the proposed remediation cost against the approved CAPA/implementation estimate",
+                    objective="Verify the proposed remediation cost against the approved CAPA/implementation estimate",
+                    evidence="Approved CAPA/implementation cost estimate, vendor quotation, or budget approval record",
+                    evidence_required="Approved CAPA/implementation cost estimate, vendor quotation, or budget approval record",
+                    priority="P2",
+                    target_proposition_id="P_REMEDIATION_COST",
+                    status="ACTIVE",
+                    category="EVIDENCE_VERIFICATION",
+                ))
+                fin_evidence.append("Approved CAPA/implementation cost estimate and budget approval record")
+            if is_historical:
+                fin_areas.append("Historical loss recurrence and observation-period evidence")
+                fin_questions.append(InvestigationQuestion(
+                    question_id="Q_FINANCIAL_HISTORICAL_SOURCE_RECORDS", id="Q_FINANCIAL_HISTORICAL_SOURCE_RECORDS",
+                    question="What accounting or transaction records substantiate the stated historical loss amount and its observation period?",
+                    purpose="Verify historical source records, recurrence evidence, and the observation period underlying the stated amount",
+                    objective="Verify historical source records, recurrence evidence, and the observation period underlying the stated amount",
+                    evidence="Accounting records, transaction ledger, and the affected process/control identification for the observation period",
+                    evidence_required="Accounting records, transaction ledger, and the affected process/control identification for the observation period",
+                    priority="P2",
+                    target_proposition_id="P_HISTORICAL_EXPOSURE",
+                    status="ACTIVE",
+                    category="EVIDENCE_VERIFICATION",
+                ))
+                fin_evidence.extend(["Accounting/transaction records for the observation period", "Affected process/control identification for the recurring loss"])
+            if not fin_questions:
+                fin_areas.append("Financial evidence verification")
+                fin_questions.append(InvestigationQuestion(
+                    question_id="Q_FINANCIAL_AMOUNT_VERIFICATION", id="Q_FINANCIAL_AMOUNT_VERIFICATION",
+                    question="What source records substantiate the financial amount stated in the finding?",
+                    purpose="Verify the stated financial amount against underlying source records",
+                    objective="Verify the stated financial amount against underlying source records",
+                    evidence="Accounting, transaction, or supporting financial records",
+                    evidence_required="Accounting, transaction, or supporting financial records",
+                    priority="P2",
+                    target_proposition_id="P_FINANCIAL_AMOUNT",
+                    status="ACTIVE",
+                    category="EVIDENCE_VERIFICATION",
+                ))
+                fin_evidence.append("Accounting or transaction records supporting the stated financial amount")
+            return [], InvestigationPlan(
+                areas=fin_areas,
+                questions=fin_questions,
+                evidence_to_collect=fin_evidence,
+            )
 
     # Areas defaults to the generic phrasing used by every non-conflict
     # branch below; the conflict branch overrides it with three specific,
@@ -2609,7 +2706,26 @@ def build_deterministic_investigation_plan(
     # RECURRENCE: mandatory investigation questions and areas when recurrence is detected
     from app.agent.recurrence_guard import detect_recurrence
     recurrence = detect_recurrence(finding_text)
-    if recurrence.is_recurring:
+    # When a validated semantic context is present, its
+    # explicit_previous_capa_reference (already cross-checked against this
+    # SAME detect_recurrence() signal inside canonical_context_validator,
+    # so the two can never disagree once semantic_context exists) is
+    # authoritative; recurrence.is_recurring alone still gates whether
+    # recurrence is discussed at all.
+    _has_previous_capa = (
+        semantic_context.explicit_previous_capa_reference
+        if semantic_context is not None
+        else recurrence.has_previous_capa_reference
+    )
+    if recurrence.is_recurring and _has_previous_capa:
+        # Previous-CAPA-specific investigation questions (implementation,
+        # effectiveness, scope, mechanism equivalence) are licensed ONLY
+        # when the evidence itself references a previous CAPA -- recurring/
+        # historical wording ALONE ("recurring", "historical", "the same
+        # failure occurred") never implies a previous CAPA exists (Section
+        # F: recurring failure, historical recurrence, and previous CAPA
+        # are independent concepts). See the `elif recurrence.is_recurring`
+        # branch below for the recurrence-without-previous-CAPA case.
         recurrence_topic = topic_word(subject)
         # Prepended, not appended: when a finding already gives a specific,
         # decision-oriented investigation path (recurrence + previous CAPA),
@@ -2628,6 +2744,28 @@ def build_deterministic_investigation_plan(
             f"Previous {recurrence_topic} corrective action effectiveness review and verification records",
             f"Root cause analysis and scope documentation from previous {recurrence_topic} CAPA",
         ])
+    elif recurrence.is_recurring:
+        # Recurrence is established, but nothing in the evidence
+        # references a previous CAPA -- investigate the recurrence itself
+        # (historical source records, prior occurrences) without
+        # fabricating a previous-CAPA implementation/effectiveness inquiry
+        # the evidence never raised.
+        recurrence_topic = topic_word(subject)
+        plan_areas = [
+            *plan_areas,
+            f"Recurrence history and prior-occurrence records for {recurrence_topic}",
+        ]
+        questions.append(InvestigationQuestion(
+            id="Q_REC_HISTORY", question_id="Q_REC_HISTORY",
+            question=f"What records establish the prior occurrences and frequency of this {recurrence_topic} recurrence?",
+            purpose="Establish the objective basis for the stated recurrence before assuming any prior corrective action exists",
+            objective="Establish the objective basis for the stated recurrence before assuming any prior corrective action exists",
+            evidence=f"Historical incident/finding records for {recurrence_topic}",
+            evidence_required=f"Historical incident/finding records for {recurrence_topic}",
+            priority="P2",
+            category="EVIDENCE_VERIFICATION",
+        ))
+        evidence_items.append(f"Historical incident/finding records establishing recurrence of {recurrence_topic}")
 
     # -----------------------------------------------------------------------
     # Phase 4 Section 3/4: graph-grounded investigation question(s), derived

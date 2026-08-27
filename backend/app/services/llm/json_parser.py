@@ -18,6 +18,83 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 _TRAILING_COMMA_RE = re.compile(r",\s*([\]}])")
+_DANGLING_KEY_RE = re.compile(r',\s*"(?:[^"\\]|\\.)*"\s*:?\s*$')
+_TRAILING_KEY_RE = re.compile(r'\s*"(?:[^"\\]|\\.)*"\s*:\s*$')
+
+
+def _close_open_structs(text: str) -> str:
+    """Append the closing brackets/braces (and a closing quote, if a
+    string is open) needed to balance `text`. Does not trim `text`."""
+    stack: list[str] = []
+    in_str = False
+    escaped = False
+    for ch in text:
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    suffix = '"' if in_str else ""
+    return text + suffix + "".join(reversed(stack))
+
+
+def _repair_truncated_json(text: str) -> str:
+    """Best-effort recovery of a response cut off by the model's output
+    token limit (a real, provider-neutral failure mode: a semantically
+    correct interpretation whose JSON simply stopped mid-structure).
+
+    Walks truncation points backwards from the end; at each, strips a
+    trailing comma / dangling `"key":`, balances the open structures, and
+    tries to parse. Returns the first candidate that parses, else the
+    original text unchanged. Never invents field values -- a list/object
+    simply ends early, which the downstream schema + validator handle as a
+    partial interpretation.
+    """
+    if not text or text[0] not in "{[":
+        return text
+    limit = min(len(text), 6000)
+    for drop in range(0, limit):
+        end = len(text) - drop
+        cand = text[:end]
+        # inside a string? cut back to before its opening quote
+        m = re.search(r'"(?:[^"\\]|\\.)*$', cand)
+        if m and (cand.count('"') - _escaped_quote_count(cand)) % 2 == 1:
+            cand = cand[: m.start()]
+        prev = None
+        while prev != cand:
+            prev = cand
+            cand = cand.rstrip()
+            cand = _DANGLING_KEY_RE.sub("", cand)
+            cand = _TRAILING_KEY_RE.sub("", cand)
+            cand = _TRAILING_COMMA_RE.sub(r"\1", cand)
+            if cand.endswith(","):
+                cand = cand[:-1]
+        if not cand:
+            break
+        candidate = _close_open_structs(cand)
+        try:
+            obj = json.loads(candidate)
+        except Exception:
+            continue
+        # Only accept a repair that recovered real content: a truncated
+        # response keeps almost all of its text and at least one field. A
+        # near-total rewrite (e.g. "{bad" -> "{}") means the failure was
+        # malformed output, not truncation -- let that raise honestly.
+        if isinstance(obj, dict) and obj and len(candidate) >= 0.5 * len(text):
+            return candidate
+    return text
+
+
+def _escaped_quote_count(s: str) -> int:
+    return len(re.findall(r'\\"', s))
 
 
 def extract_json_str(raw: str) -> str:
@@ -79,6 +156,22 @@ def parse_llm_json(raw: str) -> dict[str, Any]:
                 return parsed[0]
             raise ValueError(f"Parsed JSON must be an object/dict, got {type(parsed).__name__}")
         return parsed
+    except json.JSONDecodeError:
+        repaired = _repair_truncated_json(extracted)
+        if repaired != extracted:
+            try:
+                parsed = json.loads(repaired)
+                if isinstance(parsed, dict):
+                    logger.info(
+                        "Recovered a truncated LLM JSON response (%d -> %d chars) by closing "
+                        "open structures; downstream schema/validator treats it as partial.",
+                        len(extracted),
+                        len(repaired),
+                    )
+                    return parsed
+            except Exception:
+                pass
+        raise
     except Exception as exc:
         logger.debug(
             "JSON parse failure: raw_length=%d extracted_length=%d error=%s first_200=%r last_200=%r",

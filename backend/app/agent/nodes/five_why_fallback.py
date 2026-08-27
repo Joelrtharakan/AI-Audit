@@ -18,6 +18,7 @@ def build_deterministic_five_why(
     evidence_ledger: list[EvidenceItem],
     canonical_subject: str | None = None,
     canonical_state: Any = None,
+    semantic_context: Any = None,
 ) -> FiveWhyAnalysis:
     """Build a deterministic, evidence-bound 5-Why chain from the case model.
 
@@ -25,6 +26,13 @@ def build_deterministic_five_why(
       - Never fabricates causal layers beyond available evidence.
       - Handles conflicting reports with explicit conflict recognition.
       - Stops at the evidence boundary with UNKNOWN status.
+
+    `semantic_context` (a validated `CanonicalFindingContext`) is
+    authoritative over `canonical_subject`/`canonical_state`/raw-text
+    re-derivation when present -- its `primary_deviation` anchors Why-1,
+    and its resolved affected-object entity (never a bare STATE word)
+    anchors the subject. When `semantic_context` is None, behavior is
+    fully unchanged from before this parameter existed.
     """
     from app.agent.causal_guard import extract_immediate_mechanism, repeats_previous_why_answer
     from app.agent.claim_extractor import detect_evidence_conflicts, extract_claims
@@ -41,27 +49,58 @@ def build_deterministic_five_why(
     fact_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
     resolved = resolve_deviation(finding_text, fact_claims)
-    if canonical_subject is not None:
+    # Generic degraded-subject fallback -- deliberately domain-agnostic
+    # ("the affected process") rather than guessing a specific entity from
+    # finding vocabulary. A keyword-triggered fabricated entity (e.g.
+    # inferring "email notification" merely because the finding mentions
+    # "email"/"dispatch") is exactly the kind of finding-specific guess
+    # that must never stand in for genuine extraction: an honest generic
+    # placeholder is always safer than a plausible-looking invention.
+    _GENERIC_SUBJECT_FALLBACK = "the affected process"
+    _semantic_primary_deviation: str | None = None
+    if semantic_context is not None:
+        # States A/B: the validated LLM canonical context is authoritative
+        # when present. An explicit NOT_ESTABLISHED affected-object (state
+        # B) still uses the generic placeholder, never a raw-text guess.
+        # Five-Why's subject is the DEVIATION under investigation (which
+        # may be an EVENT, e.g. "packaging failure" -- not restricted to
+        # ENTITY-kind the way the investigation planner's "what controls
+        # this entity" questions are), so primary_deviation takes priority
+        # over the entity-only affected-object candidate here.
+        from app.services.canonical_context_validator import get_affected_object_candidate
+        _semantic_primary_deviation = getattr(semantic_context, "primary_deviation", None)
+        _canonical_affected = get_affected_object_candidate(semantic_context)
+        noun_sub = _semantic_primary_deviation or _canonical_affected or _GENERIC_SUBJECT_FALLBACK
+    elif canonical_subject is not None:
         if isinstance(canonical_subject, str):
             if canonical_subject not in _DEGRADED_SUBJECTS:
                 noun_sub = canonical_subject
             else:
-                noun_sub = resolved.finding_subject or resolved.subject or (
-                    "email notification" if any(w in finding_text.lower() for w in ("email", "notification", "dispatch")) else "the affected process"
-                )
+                noun_sub = resolved.finding_subject or resolved.subject or _GENERIC_SUBJECT_FALLBACK
         else:
             subj_val = getattr(canonical_subject, "finding_subject", getattr(canonical_subject, "subject", None))
             if subj_val and subj_val not in _DEGRADED_SUBJECTS:
                 noun_sub = subj_val
             else:
-                noun_sub = resolved.finding_subject or resolved.subject or (
-                    "email notification" if any(w in finding_text.lower() for w in ("email", "notification", "dispatch")) else "the affected process"
-                )
+                noun_sub = resolved.finding_subject or resolved.subject or _GENERIC_SUBJECT_FALLBACK
     else:
-        noun_sub = resolved.finding_subject or resolved.subject or (
-            "email notification" if any(w in finding_text.lower() for w in ("email", "notification", "dispatch")) else "the affected process"
-        )
-    deviation_desc = resolved.deviation or f"{noun_sub} condition noted in finding"
+        noun_sub = resolved.finding_subject or resolved.subject or _GENERIC_SUBJECT_FALLBACK
+    # The canonical primary_deviation (Why-1's actual subject, per Section
+    # 6 of the promotion pass) takes priority over the raw-text resolver's
+    # `deviation` whenever a validated semantic context supplied one --
+    # this is what stops Why-1 from being anchored on whichever evidence
+    # sentence resolve_deviation happened to match (e.g. a recovery or
+    # historical statement) instead of the actual deviation under
+    # investigation.
+    deviation_desc = _semantic_primary_deviation or resolved.deviation or f"{noun_sub} condition noted in finding"
+    # When a validated semantic context is present, its resolved subject
+    # (noun_sub) must win over the raw-text resolver's own `resolved.
+    # subject` in every question-formatting call below -- otherwise a
+    # regex fabrication (e.g. "active") would silently override the
+    # canonical entity merely because `resolved.subject` happens to be
+    # truthy. Legacy behavior (`effective_subject`) is fully
+    # preserved when no semantic context was supplied.
+    effective_subject = noun_sub if semantic_context is not None else (resolved.subject or noun_sub)
 
     claims = extract_claims(finding_text, evidence_ledger)
     conflicts = detect_evidence_conflicts(claims)
@@ -83,6 +122,37 @@ def build_deterministic_five_why(
             _alt_mechanism = extract_immediate_mechanism(reported_claims, fact_claims[1:])
             if _alt_mechanism.statement:
                 mechanism = _alt_mechanism
+
+    # CAUSAL SAFETY VETO (promotion pass, Section 7/11): extract_immediate_
+    # mechanism has no notion of financial/recovery/remediation/historical
+    # CONSEQUENCE vs CAUSE -- it will happily select a REPORTED recovery or
+    # historical-recurrence sentence as "the mechanism" merely because its
+    # verb shape looks like an attributed explanation. When a validated
+    # semantic context is present, veto any mechanism whose text matches a
+    # claim the canonical context explicitly marked non-causal (a
+    # FINANCIAL_METRIC/RECOVERY/REMEDIATION/HISTORICAL_CONTEXT/CONSEQUENCE
+    # fact, or any causal_claim with is_causal=False) -- a vetoed mechanism
+    # is treated as absent, so the chain falls through to the evidence-
+    # boundary branches below instead of presenting a financial consequence
+    # as if it explained the deviation.
+    if semantic_context is not None and mechanism.statement:
+        _non_causal_kinds = {"FINANCIAL_METRIC", "RECOVERY", "REMEDIATION", "PREVENTION", "HISTORICAL_CONTEXT", "CONSEQUENCE"}
+        _non_causal_texts: set[str] = set()
+        _evidence_by_id = {f"E{i}": e.claim for i, e in enumerate(evidence_ledger)}
+        for cc in getattr(semantic_context, "causal_claims", []) or []:
+            if not getattr(cc, "is_causal", False):
+                for eid in getattr(cc, "source_evidence_ids", []) or []:
+                    if eid in _evidence_by_id:
+                        _non_causal_texts.add(_evidence_by_id[eid].strip().lower())
+        for ent in getattr(semantic_context, "entities", []) or []:
+            if getattr(ent, "kind", None) in _non_causal_kinds:
+                for eid in getattr(ent, "source_evidence_ids", []) or []:
+                    if eid in _evidence_by_id:
+                        _non_causal_texts.add(_evidence_by_id[eid].strip().lower())
+        _mech_norm = mechanism.statement.strip().lower()
+        if any(_mech_norm == t or _mech_norm in t or t in _mech_norm for t in _non_causal_texts):
+            from app.agent.causal_guard import MechanismInfo
+            mechanism = MechanismInfo()
 
     # 0. Document referenced but unavailable — underlying event is not objectively verified
     import re
@@ -112,8 +182,17 @@ def build_deterministic_five_why(
     # structural detection, not a keyword list for this specific finding.
     from app.agent.recurrence_guard import detect_recurrence as _detect_recurrence_for_5why
     _recurrence_info = _detect_recurrence_for_5why(finding_text)
-    if _recurrence_info.is_recurring and _recurrence_info.has_previous_capa_reference:
-        _rec_subject = resolved.subject or noun_sub
+    # As with the investigation planner: when a validated semantic context
+    # exists, its explicit_previous_capa_reference (already cross-checked
+    # against this same detect_recurrence signal during canonical
+    # validation) is authoritative.
+    _has_previous_capa = (
+        semantic_context.explicit_previous_capa_reference
+        if semantic_context is not None
+        else _recurrence_info.has_previous_capa_reference
+    )
+    if _recurrence_info.is_recurring and _has_previous_capa:
+        _rec_subject = effective_subject
         why_q = f"Why did the {_rec_subject} recur after the prior corrective action?"
         why_answer = (
             f"The evidence confirms recurrence of the {_rec_subject} and documents a prior corrective "
@@ -234,21 +313,42 @@ def build_deterministic_five_why(
             status_note="EVIDENCE BOUNDARY — Missing record is verified; underlying activity performance and cause require investigation.",
         )
 
-    # 0b. Duplicate Payment / Transaction Finding (Section 6 Hardening)
-    if re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment|overpayment)\b", finding_text, re.IGNORECASE):
+    # 0b. Duplicate Payment / Overpayment Finding (Section 6 Hardening)
+    #
+    # "Overpayment" and "duplicate payment" are NOT the same financial
+    # claim -- a duplicate payment specifically means the same obligation
+    # was paid twice, while an overpayment could equally arise from a
+    # pricing error, a quantity/tax miscalculation, or a currency
+    # conversion mistake, with no second transaction involved at all.
+    # Asserting "two payment transactions... identified as duplicate" as
+    # VERIFIED whenever the evidence only says "overpayment" fabricates a
+    # specific causal mechanism (double payment) the evidence never
+    # actually established -- exactly the "financial claim silently
+    # becomes a causal hypothesis" failure mode this fallback must avoid.
+    _dup_match = re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment)\b", finding_text, re.IGNORECASE)
+    _overpay_match = re.search(r"\boverpayment\b", finding_text, re.IGNORECASE)
+    if _dup_match or _overpay_match:
+        if _dup_match:
+            term, article = "duplicate payment", "a"
+            first_answer = "Two payment transactions associated with the same supplier obligation were identified as duplicate."
+            first_status = "VERIFIED"
+        else:
+            term, article = "overpayment", "an"
+            first_answer = "The evidence identifies an overpayment, but does not by itself establish whether it resulted from a duplicate transaction, a pricing or quantity error, or another mechanism."
+            first_status = "UNKNOWN"
         steps.append(FiveWhyStep(
-            question="Why was a duplicate payment identified?",
-            answer="Two payment transactions associated with the same supplier obligation were identified as duplicate.",
-            status="VERIFIED",
+            question=f"Why was {article} {term} identified?",
+            answer=first_answer,
+            status=first_status,
         ))
         steps.append(FiveWhyStep(
-            question="Why was the duplicate payment processed?",
-            answer="The available evidence confirms that a duplicate payment occurred, but does not establish the mechanism that resulted in the second payment.",
+            question=f"Why did the {term} occur?",
+            answer=f"The available evidence confirms that {article} {term} occurred, but does not establish the mechanism that produced it.",
             status="UNKNOWN",
         ))
         steps.append(FiveWhyStep(
-            question="Which control condition allowed the duplicate payment?",
-            answer="The underlying control condition that allowed the second transaction is not established from available evidence — objective records from payment workflow, duplicate-detection, approval, and reconciliation logs are required.",
+            question=f"Which control condition allowed the {term}?",
+            answer=f"The underlying control condition that allowed the {term} is not established from available evidence — objective records from the payment workflow, verification, approval, and reconciliation process are required.",
             status="UNKNOWN",
         ))
         return FiveWhyAnalysis(
@@ -273,7 +373,7 @@ def build_deterministic_five_why(
             resolved.comparison_type, resolved.comparison_left, resolved.comparison_right,
             left_qualifier=resolved.comparison_left_qualifier,
         ) or format_deviation_why_question(
-            resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+            effective_subject, resolved.condition, extract_temporal_clause(finding_text)
         )
         if resolved.measurement_value is not None:
             qual = f"{resolved.measurement_qualifier} " if resolved.measurement_qualifier else ""
@@ -315,7 +415,7 @@ def build_deterministic_five_why(
 
         # Step 1: Why did the deviation occur? -> Verified observation
         why1_q = format_deviation_why_question(
-            resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+            effective_subject, resolved.condition, extract_temporal_clause(finding_text)
         )
         # deviation_clause is always already a full clause with its own verb
         # (it comes from a verified fact/sentence, e.g. "the required
@@ -494,7 +594,7 @@ def build_deterministic_five_why(
         if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
             deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
         why1_question = format_deviation_why_question(
-            resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+            effective_subject, resolved.condition, extract_temporal_clause(finding_text)
         )
         # See the identical fix/comment in the reported-explanations branch
         # above: deviation_clause already contains its own verb, so
@@ -527,7 +627,7 @@ def build_deterministic_five_why(
     if mechanism.status == "VERIFIED" and mechanism.statement:
         steps.append(FiveWhyStep(
             question=format_deviation_why_question(
-                resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+                effective_subject, resolved.condition, extract_temporal_clause(finding_text)
             ),
             answer=mechanism.statement,
             status="VERIFIED",
@@ -549,22 +649,14 @@ def build_deterministic_five_why(
     if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
         deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
 
-    import re
-    if re.search(r"\b(?:notification|dispatch|alert|email|message)\b", finding_text, re.IGNORECASE):
-        why_boundary_answer = (
-            "The available evidence establishes that notification delivery did not occur, but does not "
-            "establish whether the failure occurred during event generation, job creation, queue processing, "
-            "recipient resolution, or delivery."
-        )
-    else:
-        why_boundary_answer = (
-            f"The available evidence establishes that {deviation_clause}, but does not establish the specific "
-            "underlying mechanism or root cause responsible."
-        )
+    why_boundary_answer = (
+        f"The available evidence establishes that {deviation_clause}, but does not establish the specific "
+        "underlying mechanism or root cause responsible."
+    )
 
     steps.append(FiveWhyStep(
         question=format_deviation_why_question(
-            resolved.subject or noun_sub, resolved.condition, extract_temporal_clause(finding_text)
+            effective_subject, resolved.condition, extract_temporal_clause(finding_text)
         ),
         answer=why_boundary_answer,
         status="UNKNOWN",
