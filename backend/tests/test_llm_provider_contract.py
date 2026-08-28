@@ -1,4 +1,4 @@
-"""Provider Contract Tests for Ollama and GitHub Copilot SDK.
+"""Provider Contract Tests for Ollama and Microsoft 365 Copilot.
 
 Validates that all LLM providers conform to the standardized LLMProvider contract:
 1. Provider initialization & factory selection
@@ -34,8 +34,11 @@ from app.services.llm.json_parser import (
     parse_llm_json,
     validate_llm_schema,
 )
-from app.services.llm.providers.github_copilot_provider import GitHubCopilotProvider
+from app.services.llm.providers.microsoft_copilot_provider import MicrosoftCopilotProvider
 from app.services.llm.providers.ollama_provider import OllamaProvider
+
+import httpx
+import respx
 
 
 class TestProviderFactory:
@@ -48,14 +51,19 @@ class TestProviderFactory:
             assert isinstance(provider, OllamaProvider)
             assert provider._model == "qwen3:8b"
 
-    def test_factory_returns_copilot_provider(self):
+    def test_factory_returns_microsoft_copilot_provider(self):
         with patch("app.services.llm.factory.get_settings") as mock_settings:
             mock_settings.return_value = Settings(
-                llm_provider="copilot", copilot_model="auto", copilot_github_token="mock_token"
+                llm_provider="microsoft_copilot", microsoft_copilot_access_token="mock_token"
             )
             provider = get_llm_provider()
-            assert isinstance(provider, GitHubCopilotProvider)
-            assert provider._model == "auto"
+            assert isinstance(provider, MicrosoftCopilotProvider)
+            assert provider._model == "m365-chat"
+
+    def test_factory_copilot_alias_maps_to_microsoft(self):
+        with patch("app.services.llm.factory.get_settings") as mock_settings:
+            mock_settings.return_value = Settings(llm_provider="copilot")
+            assert isinstance(get_llm_provider(), MicrosoftCopilotProvider)
 
     def test_factory_rejects_unsupported_provider(self):
         with patch("app.services.llm.factory.get_settings") as mock_settings:
@@ -144,94 +152,105 @@ class TestOllamaProviderContract:
                 await provider.generate(node="critic", prompt="Critic review")
 
 
-class TestGitHubCopilotProviderContract:
-    """Test GitHubCopilotProvider behavior and error mapping."""
+def _conv_route(rsx, *, chat_status=200, chat_json=None, conv_status=201):
+    rsx.post("https://graph.microsoft.com/beta/copilot/conversations").mock(
+        return_value=httpx.Response(conv_status, json={"id": "c1", "status": "active"}, headers={"request-id": "r1"})
+    )
+    rsx.post(url__regex=r".*/conversations/c1/chat").mock(
+        return_value=httpx.Response(chat_status, json=chat_json or {}, headers={"request-id": "r2"})
+    )
+    rsx.delete(url__regex=r".*/conversations/c1").mock(return_value=httpx.Response(204))
+
+
+class TestMicrosoftCopilotProviderContract:
+    """Test MicrosoftCopilotProvider behavior and error mapping (Graph Chat API mocked)."""
 
     @pytest.mark.asyncio
-    async def test_copilot_successful_generation_normalization(self):
-        provider = GitHubCopilotProvider(model="auto", github_token="mock_gh_token", timeout_seconds=10.0)
-
-        mock_event_data = MagicMock()
-        mock_event_data.content = '{"root_cause_status": "NOT_ESTABLISHED", "category": "OTHER"}'
-        mock_event = MagicMock()
-        mock_event.data = mock_event_data
-
-        mock_session = AsyncMock()
-        mock_session.send_and_wait.return_value = mock_event
-
-        mock_client = AsyncMock()
-        mock_client.create_session.return_value = mock_session
-
-        with patch(
-            "app.services.llm.providers.github_copilot_provider._get_shared_copilot_client",
-            return_value=mock_client,
-        ):
+    async def test_successful_generation_normalization(self):
+        provider = MicrosoftCopilotProvider(ms_access_token="mock_token", timeout_seconds=10.0)
+        chat = {
+            "messages": [
+                {"text": "Analyze finding", "attributions": []},
+                {
+                    "text": '{"root_cause_status": "NOT_ESTABLISHED", "category": "OTHER"} [^1^]',
+                    "attributions": [{"attributionType": "citation", "attributionSource": "grounding"}],
+                },
+            ]
+        }
+        with respx.mock(assert_all_called=False) as rsx:
+            _conv_route(rsx, chat_json=chat)
             response = await provider.generate(
                 node="core_synthesis",
                 prompt="Analyze finding",
                 system_prompt="System prompt",
                 response_format="json",
             )
-
-            assert isinstance(response, LLMResponse)
-            assert response.provider == "copilot"
-            assert response.model == "auto"
-            assert response.content == '{"root_cause_status": "NOT_ESTABLISHED", "category": "OTHER"}'
-            assert response.finish_reason == "stop"
-            assert response.raw_metadata["node"] == "core_synthesis"
-
-    @pytest.mark.asyncio
-    async def test_copilot_timeout_error_mapping(self):
-        provider = GitHubCopilotProvider(model="auto", timeout_seconds=2.0)
-
-        mock_session = AsyncMock()
-        mock_session.send_and_wait.side_effect = asyncio.TimeoutError("Timeout waiting for idle")
-
-        mock_client = AsyncMock()
-        mock_client.create_session.return_value = mock_session
-
-        with patch(
-            "app.services.llm.providers.github_copilot_provider._get_shared_copilot_client",
-            return_value=mock_client,
-        ):
-            with pytest.raises(LLMTimeoutError):
-                await provider.generate(node="core_synthesis", prompt="Analyze finding")
+        assert isinstance(response, LLMResponse)
+        assert response.provider == "microsoft_copilot"
+        assert response.model == "m365-chat"
+        assert response.content == '{"root_cause_status": "NOT_ESTABLISHED", "category": "OTHER"}'
+        assert response.finish_reason == "stop"
+        assert response.raw_metadata["node"] == "core_synthesis"
+        assert response.raw_metadata["graph_request_id"] == "r2"
 
     @pytest.mark.asyncio
-    async def test_copilot_auth_error_mapping(self):
-        provider = GitHubCopilotProvider(model="auto", github_token="invalid_token")
+    async def test_missing_token_raises_auth_error(self):
+        provider = MicrosoftCopilotProvider(ms_access_token="")
+        with pytest.raises(LLMAuthenticationError):
+            await provider.generate(node="extraction", prompt="Extract finding")
 
-        mock_client = AsyncMock()
-        mock_client.create_session.side_effect = Exception("Unauthorized: invalid GitHub token")
-
-        with patch(
-            "app.services.llm.providers.github_copilot_provider._get_shared_copilot_client",
-            return_value=mock_client,
-        ):
+    @pytest.mark.asyncio
+    async def test_auth_error_mapping(self):
+        provider = MicrosoftCopilotProvider(ms_access_token="invalid")
+        with respx.mock(assert_all_called=False) as rsx:
+            rsx.post("https://graph.microsoft.com/beta/copilot/conversations").mock(
+                return_value=httpx.Response(401, json={"error": "unauthorized"})
+            )
             with pytest.raises(LLMAuthenticationError):
                 await provider.generate(node="extraction", prompt="Extract finding")
 
     @pytest.mark.asyncio
-    async def test_copilot_empty_response_error_mapping(self):
-        provider = GitHubCopilotProvider(model="auto")
+    async def test_rate_limit_error_mapping(self):
+        provider = MicrosoftCopilotProvider(ms_access_token="tok")
+        with respx.mock(assert_all_called=False) as rsx:
+            rsx.post("https://graph.microsoft.com/beta/copilot/conversations").mock(
+                return_value=httpx.Response(429, headers={"Retry-After": "5"}, json={})
+            )
+            from app.services.llm.exceptions import LLMRateLimitError
 
-        mock_event_data = MagicMock()
-        mock_event_data.content = ""
-        mock_event = MagicMock()
-        mock_event.data = mock_event_data
+            with pytest.raises(LLMRateLimitError):
+                await provider.generate(node="rca", prompt="analyze")
 
-        mock_session = AsyncMock()
-        mock_session.send_and_wait.return_value = mock_event
+    @pytest.mark.asyncio
+    async def test_service_unavailable_error_mapping(self):
+        provider = MicrosoftCopilotProvider(ms_access_token="tok")
+        with respx.mock(assert_all_called=False) as rsx:
+            rsx.post("https://graph.microsoft.com/beta/copilot/conversations").mock(
+                return_value=httpx.Response(504, json={})
+            )
+            from app.services.llm.exceptions import LLMUnavailableError
 
-        mock_client = AsyncMock()
-        mock_client.create_session.return_value = mock_session
+            with pytest.raises(LLMUnavailableError):
+                await provider.generate(node="rca", prompt="analyze")
 
-        with patch(
-            "app.services.llm.providers.github_copilot_provider._get_shared_copilot_client",
-            return_value=mock_client,
-        ):
-            with pytest.raises(LLMInvalidResponseError):
+    @pytest.mark.asyncio
+    async def test_empty_response_error_mapping(self):
+        provider = MicrosoftCopilotProvider(ms_access_token="tok")
+        with respx.mock(assert_all_called=False) as rsx:
+            _conv_route(rsx, chat_json={"messages": [{"text": "analyze", "attributions": []}, {"text": "   "}]})
+            with pytest.raises((LLMInvalidResponseError, LLMProviderError)):
                 await provider.generate(node="critic", prompt="Critic review")
+
+    @pytest.mark.asyncio
+    async def test_unsupported_params_accepted_and_ignored(self):
+        provider = MicrosoftCopilotProvider(ms_access_token="tok")
+        chat = {"messages": [{"text": "p"}, {"text": '{"ok": true}'}]}
+        with respx.mock(assert_all_called=False) as rsx:
+            _conv_route(rsx, chat_json=chat)
+            response = await provider.generate(
+                node="n", prompt="p", temperature=0.9, max_output_tokens=999, num_ctx=8192
+            )
+        assert response.content == '{"ok": true}'
 
 
 class TestProviderNeutralJsonParser:
@@ -268,19 +287,24 @@ class TestProviderNeutralJsonParser:
 
 
 @pytest.mark.live_copilot
+@pytest.mark.skipif(
+    not __import__("os").getenv("MICROSOFT_COPILOT_ACCESS_TOKEN"),
+    reason="requires a delegated Microsoft Graph token in MICROSOFT_COPILOT_ACCESS_TOKEN",
+)
 @pytest.mark.asyncio
-async def test_live_github_copilot_integration():
-    """Live integration test against GitHub Copilot.
+async def test_live_microsoft_copilot_integration():
+    """Live integration test against the Microsoft 365 Copilot Chat API.
 
-    Runs only when explicitly invoked and authenticated:
+    Runs only when explicitly invoked with a delegated token available
+    (MICROSOFT_COPILOT_ACCESS_TOKEN) and:
         pytest -m live_copilot
     """
-    provider = GitHubCopilotProvider(model="auto")
+    provider = MicrosoftCopilotProvider()
     response = await provider.generate(
         node="test_live",
-        prompt="Respond with valid JSON: {\"status\": \"copilot_live_ready\"}",
+        prompt='Respond with valid JSON: {"status": "copilot_live_ready"}',
         response_format="json",
     )
-    assert response.provider == "copilot"
+    assert response.provider == "microsoft_copilot"
     parsed = parse_llm_json(response.content)
     assert parsed.get("status") == "copilot_live_ready"

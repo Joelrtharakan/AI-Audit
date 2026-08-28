@@ -1,6 +1,6 @@
 """LLM Provider Implementations."""
 
+from app.services.llm.providers.microsoft_copilot_provider import MicrosoftCopilotProvider
 from app.services.llm.providers.ollama_provider import OllamaProvider
-from app.services.llm.providers.github_copilot_provider import GitHubCopilotProvider
 
-__all__ = ["OllamaProvider", "GitHubCopilotProvider"]
+__all__ = ["OllamaProvider", "MicrosoftCopilotProvider"]

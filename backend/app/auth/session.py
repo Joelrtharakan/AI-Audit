@@ -1,4 +1,9 @@
-"""Server-side session management for authenticated LQMS users with encrypted GitHub tokens."""
+"""Server-side session management for authenticated LQMS users.
+
+Stores the delegated Microsoft Graph access token (and refresh token) encrypted
+at rest; the plaintext token is only decrypted on demand for a Microsoft 365
+Copilot Chat API call and is never returned to the frontend.
+"""
 
 from __future__ import annotations
 
@@ -14,14 +19,15 @@ from app.config import get_settings
 @dataclasses.dataclass
 class LQMSUserSession:
     session_id: str
-    github_user_id: int
-    github_login: str
+    user_id: str
+    user_principal_name: str
     name: str
     email: str
     avatar_url: str
-    organization: str
+    organization: str  # tenant id (or friendly tenant name)
     copilot_enabled: bool
-    encrypted_github_token: str
+    encrypted_access_token: str
+    encrypted_refresh_token: str
     created_at: float
     expires_at: float
 
@@ -30,16 +36,29 @@ class LQMSUserSession:
         return time.time() > self.expires_at
 
     def get_decrypted_token(self) -> str:
-        """Obtain decrypted GitHub user access token for isolated Copilot SDK execution."""
-        return decrypt_token(self.encrypted_github_token)
+        """Decrypt the delegated Microsoft Graph access token for a Copilot Chat API call."""
+        return decrypt_token(self.encrypted_access_token)
+
+    def get_decrypted_refresh_token(self) -> str:
+        """Decrypt the delegated refresh token for a silent token refresh."""
+        return decrypt_token(self.encrypted_refresh_token)
+
+    def update_tokens(self, *, access_token: str, refresh_token: str = "") -> None:
+        """Re-encrypt and store a freshly refreshed token pair in place."""
+        self.encrypted_access_token = encrypt_token(access_token)
+        if refresh_token:
+            self.encrypted_refresh_token = encrypt_token(refresh_token)
 
     def to_safe_dict(self) -> dict[str, Any]:
-        """Return safe user profile for frontend consumption -- NEVER returns the token."""
+        """Return safe user profile for frontend consumption -- NEVER returns a token."""
         return {
             "authenticated": True,
-            "github_user_id": self.github_user_id,
-            "github_login": self.github_login,
-            "name": self.name or self.github_login,
+            "user_id": self.user_id,
+            "user_principal_name": self.user_principal_name,
+            # `github_login` retained as an alias so the existing dashboard UI
+            # (which still keys on it) keeps rendering the signed-in identity.
+            "github_login": self.user_principal_name,
+            "name": self.name or self.user_principal_name,
             "email": self.email,
             "avatar_url": self.avatar_url,
             "organization": self.organization,
@@ -57,31 +76,32 @@ class SessionStore:
     def create_session(
         self,
         *,
-        github_user_id: int,
-        github_login: str,
+        user_id: str,
+        user_principal_name: str,
         name: str,
         email: str,
         avatar_url: str,
         organization: str,
         copilot_enabled: bool,
-        plain_github_token: str,
+        plain_access_token: str,
+        plain_refresh_token: str = "",
     ) -> LQMSUserSession:
         settings = get_settings()
         session_id = secrets.token_urlsafe(32)
         now = time.time()
         expires_at = now + (settings.session_expiry_hours * 3600)
-        encrypted_token = encrypt_token(plain_github_token)
 
         session = LQMSUserSession(
             session_id=session_id,
-            github_user_id=github_user_id,
-            github_login=github_login,
+            user_id=user_id,
+            user_principal_name=user_principal_name,
             name=name,
             email=email,
             avatar_url=avatar_url,
             organization=organization,
             copilot_enabled=copilot_enabled,
-            encrypted_github_token=encrypted_token,
+            encrypted_access_token=encrypt_token(plain_access_token),
+            encrypted_refresh_token=encrypt_token(plain_refresh_token),
             created_at=now,
             expires_at=expires_at,
         )

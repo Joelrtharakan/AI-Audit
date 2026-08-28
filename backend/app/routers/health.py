@@ -8,11 +8,23 @@ from app.services.llm import get_llm_provider
 
 router = APIRouter(tags=["health"])
 
+_MICROSOFT_PROVIDER_ALIASES = ("microsoft_copilot", "microsoft-copilot", "m365_copilot", "m365-copilot", "copilot")
+
 
 class SwitchProviderRequest(BaseModel):
     provider: str
     model: str | None = None
     token: str | None = None
+
+
+def _active_model(settings) -> str:
+    if settings.llm_provider in _MICROSOFT_PROVIDER_ALIASES:
+        return "m365-copilot"
+    return settings.ollama_model
+
+
+def _is_microsoft(provider: str) -> bool:
+    return provider.strip().lower() in _MICROSOFT_PROVIDER_ALIASES
 
 
 @router.get("/health")
@@ -25,14 +37,15 @@ async def health_llm() -> dict:
     settings = get_settings()
     provider = get_llm_provider()
     status = await provider.check_health()
-    active_model = settings.copilot_model if settings.llm_provider == "copilot" else settings.ollama_model
+    has_token = bool(settings.microsoft_copilot_access_token)
 
     return {
         "status": "ok" if status.get("available") else "degraded",
         "provider": settings.llm_provider,
-        "model": active_model,
+        "model": _active_model(settings),
         "available": status.get("available", False),
-        "has_copilot_token": bool(settings.copilot_github_token),
+        "has_microsoft_token": has_token,
+        "has_copilot_token": has_token,  # backwards-compatible alias for the dashboard UI
         **status,
     }
 
@@ -43,26 +56,19 @@ async def get_provider_status(request: Request) -> dict[str, Any]:
     """Get active LLM provider, current model, readiness, and list of supported providers."""
     settings = get_settings()
 
-    from app.routers.auth import get_current_user_session
-    user_session = get_current_user_session(
-        lqms_session=request.cookies.get(settings.session_cookie_name),
-        authorization=request.headers.get("authorization"),
-    )
-    if user_session:
-        user_token = user_session.get_decrypted_token()
-        if user_token:
-            settings.copilot_github_token = user_token
+    from app.routers.auth import apply_user_copilot_token
+    user_session = apply_user_copilot_token(request)
 
     provider = get_llm_provider()
     status = await provider.check_health()
-    active_model = settings.copilot_model if settings.llm_provider == "copilot" else settings.ollama_model
-    has_token = bool(settings.copilot_github_token or (user_session and user_session.copilot_enabled))
+    has_token = bool(settings.microsoft_copilot_access_token or (user_session and user_session.copilot_enabled))
 
     return {
         "status": "ok",
         "provider": settings.llm_provider,
-        "model": active_model,
+        "model": _active_model(settings),
         "available": status.get("available", False) if settings.llm_provider == "ollama" else has_token,
+        "has_microsoft_token": has_token,
         "has_copilot_token": has_token,
         "authenticated": bool(user_session),
         "details": status,
@@ -74,10 +80,10 @@ async def get_provider_status(request: Request) -> dict[str, Any]:
                 "model": settings.ollama_model,
             },
             {
-                "id": "copilot",
-                "name": "GitHub Copilot SDK (Production)",
-                "description": "Official GitHub Copilot agent runtime",
-                "model": settings.copilot_model,
+                "id": "microsoft_copilot",
+                "name": "Microsoft 365 Copilot (Production)",
+                "description": "Microsoft Graph Copilot Chat API via LiteLLM (delegated, Entra ID sign-in)",
+                "model": "m365-copilot",
                 "has_token": has_token,
             },
         ],
@@ -87,52 +93,39 @@ async def get_provider_status(request: Request) -> dict[str, Any]:
 @router.post("/api/v1/provider")
 @router.post("/health/provider")
 async def switch_provider(payload: SwitchProviderRequest, request: Request) -> dict[str, Any]:
-    """Dynamically switch the active LLM provider (Ollama vs Copilot) and optionally set token."""
-    from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
+    """Dynamically switch the active LLM provider (Ollama vs Microsoft 365 Copilot)."""
     settings = get_settings()
     requested = payload.provider.strip().lower()
 
-    if requested not in ("ollama", "copilot", "github_copilot", "github-copilot", "groq", "openrouter", "gemini"):
+    if requested not in ("ollama", *_MICROSOFT_PROVIDER_ALIASES, "groq", "openrouter", "gemini"):
         return {
             "status": "error",
-            "message": f"Unsupported provider: '{payload.provider}'. Must be 'ollama' or 'copilot'.",
+            "message": f"Unsupported provider: '{payload.provider}'. Must be 'ollama' or 'microsoft_copilot'.",
             "provider": settings.llm_provider,
         }
 
-    target = "copilot" if requested in ("github_copilot", "github-copilot") else requested
+    target = "microsoft_copilot" if _is_microsoft(requested) else requested
     settings.llm_provider = target
 
-    from app.routers.auth import get_current_user_session
-    user_session = get_current_user_session(
-        lqms_session=request.cookies.get(settings.session_cookie_name),
-        authorization=request.headers.get("authorization"),
-    )
-    if user_session:
-        user_token = user_session.get_decrypted_token()
-        if user_token:
-            settings.copilot_github_token = user_token
-            reset_copilot_clients()
-    elif payload.token is not None:
-        settings.copilot_github_token = payload.token.strip()
-        reset_copilot_clients()
+    from app.routers.auth import apply_user_copilot_token
+    user_session = apply_user_copilot_token(request)
+    if user_session is None and payload.token is not None and _is_microsoft(target):
+        settings.microsoft_copilot_access_token = payload.token.strip()
 
-    if payload.model:
-        if target == "copilot":
-            settings.copilot_model = payload.model
-        elif target == "ollama":
-            settings.ollama_model = payload.model
+    if payload.model and target == "ollama":
+        settings.ollama_model = payload.model
 
     provider = get_llm_provider()
     status = await provider.check_health()
-    active_model = settings.copilot_model if settings.llm_provider == "copilot" else settings.ollama_model
-    has_token = bool(settings.copilot_github_token or (user_session and user_session.copilot_enabled))
+    has_token = bool(settings.microsoft_copilot_access_token or (user_session and user_session.copilot_enabled))
 
     return {
         "status": "ok",
         "message": f"Successfully switched active LLM provider to '{target}'",
         "provider": target,
-        "model": active_model,
+        "model": _active_model(settings),
         "available": status.get("available", False) if target == "ollama" else has_token,
+        "has_microsoft_token": has_token,
         "has_copilot_token": has_token,
         "authenticated": bool(user_session),
         "details": status,

@@ -4933,18 +4933,18 @@
                 <span class="sr-only">Toggle navigation</span> <span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></a>
             <div class="navbar-right">
                 <ul class="nav navbar-nav">
-                    <!-- GitHub OAuth User & Copilot Enterprise Status Indicator -->
+                    <!-- Microsoft Entra User & M365 Copilot Status Indicator -->
                     <li id="liGithubAuthUnauthenticated" style="display:flex; align-items:center; padding:9px 10px 9px 0;">
-                        <a id="btnSignInGithubTop" href="login.html" class="btn btn-sm" style="border-radius:20px; font-size:12px; font-weight:700; padding:5px 14px; border:1px solid rgba(255,255,255,0.35); background:#24292e; color:#ffffff; box-shadow:0 2px 5px rgba(0,0,0,0.2); transition:all 0.2s; display:inline-flex; align-items:center; gap:6px; text-decoration:none;" title="Sign in with Company GitHub Account">
+                        <a id="btnSignInGithubTop" href="login.html" class="btn btn-sm" style="border-radius:20px; font-size:12px; font-weight:700; padding:5px 14px; border:1px solid rgba(255,255,255,0.35); background:#24292e; color:#ffffff; box-shadow:0 2px 5px rgba(0,0,0,0.2); transition:all 0.2s; display:inline-flex; align-items:center; gap:6px; text-decoration:none;" title="Sign in with your Microsoft work account">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="#ffffff" style="flex-shrink:0;"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
-                            <span>Sign in with GitHub</span>
+                            <span>Sign in with Microsoft</span>
                         </a>
                     </li>
                     <li id="liGithubAuthAuthenticated" class="dropdown" style="display:none; padding:8px 10px 8px 0;">
                         <a href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false" style="display:inline-flex; align-items:center; gap:8px; background:rgba(16,185,129,0.22); border:1px solid rgba(52,211,153,0.6); padding:5px 14px; border-radius:20px; color:#ffffff !important; font-size:12px; font-weight:700; text-decoration:none; cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,0.15);">
                             <img id="navGithubAvatar" src="" style="width:22px; height:22px; border-radius:50%; display:none; object-fit:cover;" alt="User" />
                             <svg id="navGithubIcon" width="15" height="15" viewBox="0 0 24 24" fill="#34d399" style="flex-shrink:0;"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
-                            <span id="navGithubLogin">@User (Copilot Enterprise ✓)</span>
+                            <span id="navGithubLogin">@User (M365 Copilot ✓)</span>
                             <span class="caret" style="margin-left:4px;"></span>
                         </a>
                         <ul class="dropdown-menu dropdown-menu-right" style="border-radius:12px; box-shadow:0 10px 25px rgba(0,0,0,0.15); border:1px solid #e2e8f0; padding:8px 0; min-width:240px; margin-top:8px; background:#ffffff;">
@@ -4957,13 +4957,13 @@
                             </li>
                             <li style="padding:10px 16px; font-size:12px; color:#10b981; font-weight:600; display:flex; align-items:center; gap:8px;">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                                <span>GitHub Copilot Enterprise Active</span>
+                                <span>Microsoft 365 Copilot Active</span>
                             </li>
                             <li class="divider" style="margin:4px 0;"></li>
                             <li style="padding:4px 8px;">
                                 <a href="javascript:void(0);" onclick="window.lqmsLogout && window.lqmsLogout();" style="display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:6px; color:#dc2626; font-weight:600; font-size:12px; text-decoration:none; transition:background 0.15s;" onmouseover="this.style.background='#fef2f2';" onmouseout="this.style.background='transparent';">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-                                    <span>Sign out of GitHub</span>
+                                    <span>Sign out</span>
                                 </a>
                             </li>
                         </ul>
@@ -6467,7 +6467,7 @@ system. </label>
                                                     </button>
                                                     <button type="button" class="btn btn-sm lqms-provider-btn" data-provider="copilot" id="btnProviderCopilot" onclick="window.selectLlmProvider && window.selectLlmProvider('copilot')" style="border-radius:6px; font-weight:600; font-size:12px; padding:6px 14px; border:none; transition:all 0.2s; background:transparent; color:#64748b; cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
                                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
-                                                        <span>GitHub Copilot (Prod)</span>
+                                                        <span>M365 Copilot (Prod)</span>
                                                     </button>
                                                 </div>
                                                 <span id="lqmsProviderStatusBadge" style="font-size:11px; font-weight:600; color:#0369a1; background:#e0f2fe; border:1px solid #bae6fd; padding:4px 10px; border-radius:12px; display:inline-flex; align-items:center; gap:5px;">

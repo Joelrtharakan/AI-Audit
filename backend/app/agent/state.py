@@ -176,6 +176,10 @@ class AgentState(TypedDict, total=False):
     impact_assessment: ImpactAssessment | None
     cost_impact: CostImpact | None
     financial_analysis: Any | None
+    # Canonical RemediationCostResult (app.remediation) -- expected cost to
+    # correct/prevent the finding. Computed lazily in report_generator_node
+    # (like financial_analysis). Declared here so LangGraph persists it.
+    remediation_cost: Any | None
     capa_analysis: CapaAnalysis | None
     # "LLM" (normal path) or "DEGRADED" (core_synthesis's LLM call failed and
     # a deterministic fallback ran) -- must be surfaced to the final report

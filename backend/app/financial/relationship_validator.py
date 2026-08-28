@@ -204,6 +204,16 @@ def _validate_cost_factor(interpretation: SemanticFindingInterpretation, claims:
     cf = interpretation.cost_factor
     if cf.selected_factor in ("NOT_ESTABLISHED", "OTHER"):
         return None
+    # REMEDIATION_COST / PREVENTION_COST are IMPLEMENTATION-cost concepts -- what
+    # it will cost to fix the finding -- not financial-exposure/loss factors.
+    # They must never become the headline financial factor of the Cost &
+    # Financial Exposure section (which answers "what has the finding already
+    # cost?"). A finding whose only monetary content is a remediation quotation
+    # yields Financial Factor: NOT ESTABLISHED here; the amount is analysed
+    # separately by app.remediation (spec sections 1, 2, 15). The claims are
+    # still materialized (via fact_type) for CAPA-payback economics.
+    if cf.selected_factor in ("REMEDIATION_COST", "PREVENTION_COST"):
+        return None
     if cf.confidence == "LOW":
         return None
     if not cf.supporting_claim_ids:

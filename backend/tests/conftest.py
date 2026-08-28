@@ -16,3 +16,10 @@ os.environ.setdefault("OPENROUTER_API_KEY", "test-openrouter-key")
 # Dedicated real-Ollama financial tests (tests/test_financial_semantic_
 # real_ollama.py) explicitly re-enable this for themselves.
 os.environ.setdefault("FINANCIAL_SEMANTIC_REASONING_ENABLED", "false")
+
+# Same rationale for Remediation Cost Estimation (app.remediation): its
+# report_generator.py call would otherwise attempt a real LLM request on every
+# test that reaches report generation. Dedicated remediation tests
+# (tests/test_remediation_cost_*.py) call the engine directly with a
+# FakeLLMClient and are unaffected by this flag.
+os.environ.setdefault("REMEDIATION_COST_ESTIMATION_ENABLED", "false")

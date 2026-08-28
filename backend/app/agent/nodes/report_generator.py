@@ -8,6 +8,7 @@ All the reasoning has already happened in upstream nodes.
 from __future__ import annotations
 
 import logging
+import time
 
 from app.agent.grounding_guard import build_source_text, filter_list_field, ungrounded_entities
 from app.agent.state import AgentState
@@ -287,56 +288,66 @@ async def generate_report_node(state: AgentState) -> AgentState:
         untraced_concepts=[],
     )
 
-    # Evidence-Grounded Financial Exposure & Cost-of-Recurrence Analysis.
+    # ------------------------------------------------------------------
+    # Cost analysis.
     #
-    # LLM semantic understanding -> deterministic validation -> the SAME
-    # deterministic calculator is tried FIRST when enabled: it can
-    # correctly interpret evidence wording the regex extractor has never
-    # seen (see app.financial.semantic_engine). It fails closed on any
-    # problem (no provider, network error, invalid output, nothing
-    # validatable) and falls back unconditionally to the existing,
-    # fully-regression-tested regex-extraction engine, which remains the
-    # authoritative safety net.
+    # REMEDIATION COST ESTIMATE is the single AUTHORITATIVE, auditor-facing
+    # cost analysis ("what will it cost to correct/prevent the finding?").
+    # It owns its own canonical result, validator, and deterministic
+    # calculator, and fails closed to an honest professional NOT_ASSESSABLE
+    # result on any error -- never a fabricated number, never an internal
+    # diagnostic string.
+    #
+    # The legacy Cost & Financial Exposure analysis ("what has the finding
+    # already cost?") is NO LONGER rendered to the auditor and no longer runs
+    # its LLM semantic-interpretation stage. Only the fast, deterministic
+    # regex engine still runs, purely to derive the internal `cost_impact` /
+    # `financial_amount` fields that the Risk & Impact Assessment narrative
+    # consumes (app.agent.nodes.final_evidence_verification). It is fully
+    # isolated from the remediation pipeline and from the report renderer.
+    # ------------------------------------------------------------------
     from app.financial.engine import analyze_financial_exposure
     finding_text = state["request"].finding_text if state.get("request") else ""
+    settings = get_settings()
+    evidence_ledger = state.get("evidence_ledger", [])
+
+    # -- Internal-only financial context (never rendered as its own section).
     financial_analysis = state.get("financial_analysis")
-    if not financial_analysis:
-        settings = get_settings()
-        evidence_ledger = state.get("evidence_ledger", [])
-        semantic_result = None
-        # The LLM semantic path OWNS financial meaning whenever it is
-        # enabled AND there is an evidence ledger for it to interpret. It
-        # returns an explicit result in every case (including honest
-        # failure, with financial_semantic_status set) EXCEPT when there is
-        # no evidence ledger -- the one case where the deterministic
-        # text-reading engine is the only option. It is NEVER silently
-        # replaced by a keyword/regex interpretation on a genuine failure.
-        if settings.financial_semantic_reasoning_enabled and evidence_ledger:
-            try:
-                from app.financial.semantic_engine import analyze_financial_exposure_semantic
-                semantic_outcome = await analyze_financial_exposure_semantic(
-                    finding_text=finding_text,
-                    evidence_ledger=evidence_ledger,
-                )
-                if semantic_outcome is not None:
-                    semantic_result, _semantic_audit = semantic_outcome
-            except Exception as exc:  # noqa: BLE001 - last-resort crash guard only
-                logger.warning("Semantic financial analysis crashed unexpectedly (%s); reporting honestly.", exc)
-                from app.financial.semantic_engine import _honest_failure_result
-                semantic_result = _honest_failure_result(
-                    "LLM_UNAVAILABLE",
-                    "The financial semantic analysis stage failed unexpectedly; no automated figure was produced.",
-                )
-        if semantic_result is not None:
-            financial_analysis = semantic_result
-            financial_analysis.reasoning_source = "LLM_SEMANTIC"
-        else:
-            financial_analysis = analyze_financial_exposure(
+    if financial_analysis is None:
+        financial_analysis = analyze_financial_exposure(
+            finding_text=finding_text,
+            evidence_ledger=evidence_ledger,
+            evidence_claims=evidence_claims,
+        )
+        financial_analysis.reasoning_source = "DETERMINISTIC_REGEX"
+
+    # -- Remediation Cost Estimate: the authoritative auditor-facing cost section.
+    remediation_cost = state.get("remediation_cost")
+    _rem_reused = remediation_cost is not None
+    _rem_ms = None
+    if remediation_cost is None and settings.remediation_cost_estimation_enabled:
+        _t = time.monotonic()
+        try:
+            from app.remediation.engine import estimate_remediation_cost
+            remediation_cost = await estimate_remediation_cost(
                 finding_text=finding_text,
                 evidence_ledger=evidence_ledger,
-                evidence_claims=evidence_claims,
+                root_cause=root_cause,
+                capa=capa,
+                impact=impact,
             )
-            financial_analysis.reasoning_source = "DETERMINISTIC_REGEX"
+        except Exception as exc:  # noqa: BLE001 - last-resort crash guard only
+            logger.warning("Remediation cost estimation crashed unexpectedly (%s); reporting honestly.", exc)
+            from app.remediation.engine import honest_not_assessable
+            remediation_cost = honest_not_assessable("LLM_UNAVAILABLE")
+        _rem_ms = int((time.monotonic() - _t) * 1000)
+
+    logger.info(
+        "REMEDIATION COST TIMING ms=%s reused=%s status=%s semantic_status=%s",
+        _rem_ms, _rem_reused,
+        getattr(getattr(remediation_cost, "status", None), "value", None),
+        getattr(remediation_cost, "remediation_semantic_status", None),
+    )
 
     # Canonical semantic finding context -- promoted to authoritative
     # downstream input (investigation planner / Five-Why, see
@@ -386,6 +397,7 @@ async def generate_report_node(state: AgentState) -> AgentState:
         impact_assessment=impact,
         cost_impact=cost_impact,
         financial_analysis=financial_analysis,
+        remediation_cost=remediation_cost,
         evidence_gaps=state.get("evidence_gaps", []),
         evidence=state.get("evidence_ledger", []),
         propositions=propositions,
@@ -418,6 +430,7 @@ async def generate_report_node(state: AgentState) -> AgentState:
     return {
         **state,
         "report": report,
+        "remediation_cost": remediation_cost,
         "final_state": final_state,
         "trace": trace,
         "errors": errors,

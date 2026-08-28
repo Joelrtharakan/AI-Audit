@@ -6,7 +6,7 @@ It adheres to strict epistemic boundaries: **the AI never writes to the producti
 
 - **Entry Point**: `POST /api/v1/investigate` ([backend/app/routers/investigate.py](backend/app/routers/investigate.py))
 - **Financial Analysis API**: `POST /api/v1/financial/analyze` ([backend/app/routers/financial.py](backend/app/routers/financial.py))
-- **Authentication & Security**: GitHub OAuth 2.0 + Org Membership Gate ([backend/app/auth/github_oauth.py](backend/app/auth/github_oauth.py))
+- **Authentication & Security**: Microsoft Entra ID delegated OAuth 2.0 + optional tenant gate ([backend/app/auth/microsoft_entra.py](backend/app/auth/microsoft_entra.py))
 - **Graph Orchestration**: [`app/agent/graph.py`](backend/app/agent/graph.py)
 - **Financial & Cost Factor Engine**: [`app/financial/`](backend/app/financial/)
 
@@ -30,7 +30,7 @@ cd frontend
 python3 dev_server.py
 ```
 - **Application Dashboard**: `http://localhost:5510/index.html`
-- **Enterprise GitHub Login**: `http://localhost:5510/login.html` (or `http://localhost:8010/api/auth/github/login`)
+- **Microsoft Entra Sign-in**: `http://localhost:5510/login.html` (or `http://localhost:8010/api/auth/microsoft/login`)
 
 ---
 
@@ -40,7 +40,7 @@ python3 dev_server.py
                                   USER BROWSER / AUDITOR WORKFLOW
                   ┌─────────────────────────────────────────────────────────────┐
                   │ • Legacy ASP.NET Master UI + Modern Responsive Tailwind CSS │
-                  │ • GitHub OAuth Login Button & Org Access Boundary           │
+                  │ • Microsoft Entra Sign-in Button & Tenant Access Boundary   │
                   │ • Live Investigation Dashboard, RCA Visualizer, CAPA Draft  │
                   │ • Cost Factor & Financial Exposure Breakdown (PAF/Scenarios)│
                   └──────────────────────────────┬──────────────────────────────┘
@@ -51,8 +51,8 @@ python3 dev_server.py
 │                                                                                                  │
 │ ┌────────────────────────────────────┐         ┌───────────────────────────────────────────────┐ │
 │ │  AUTH & SECURITY BOUNDARIES        │         │  AUDIT INVESTIGATION ORCHESTRATION (LangGraph)│ │
-│ │  • GitHub OAuth 2.0 Web Flow       │         │  1. understand_finding (Intake & Claims)      │ │
-│ │  • Strict Org Membership Gate      │         │  2. plan_investigation (Read-only tools)      │ │
+│ │  • Microsoft Entra ID (delegated)  │         │  1. understand_finding (Intake & Claims)      │ │
+│ │  • Optional Tenant Allow-list Gate │         │  2. plan_investigation (Read-only tools)      │ │
 │ │  • HMAC Signed Nonce Cookies       │         │  3. execute_tool (Allowlist GET queries)      │ │
 │ │  • X-Internal-API-Key Gateway      │         │  4. record_evidence (Hallucination Firewall)  │ │
 │ └────────────────────────────────────┘         │  5. core_synthesis (Unified RCA + 5-Why)     │ │
@@ -67,8 +67,8 @@ python3 dev_server.py
 │                                                │  • Dual-Engine: Semantic LLM + Regex Fallback │ │
 │ ┌────────────────────────────────────┐         │  • Grounded Cost Factor Classifier (PAF)      │ │
 │ │  PLUGGABLE LLM PROVIDER ADAPTER    │         │  • Epistemic Separation (Verified vs Reported)│ │
-│ │  • Ollama (Local qwen3:8b)         │         │  • Recovery Safety & Scenario Analysis        │ │
-│ │  • GitHub Copilot Python SDK       │         │  • Deterministic Arithmetic (No LLM Math)     │ │
+│ │  • Ollama (local / fallback)       │         │  • Recovery Safety & Scenario Analysis        │ │
+│ │  • Microsoft 365 Copilot (LiteLLM) │         │  • Deterministic Arithmetic (No LLM Math)     │ │
 │ │  • Multi-Provider Cloud Failover   │         │  • CAPA Payback & Return on Investment        │ │
 │ └────────────────────────────────────┘         └───────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -259,64 +259,124 @@ The final analytical firewall before the auditor views the report:
 | **Tool Allowlist** | `APPROVED_TOOLS` in [`tools/registry.py`](backend/app/agent/tools/registry.py) re-checked at runtime before execution. |
 | **Strict 5-Field CA Draft** | `AI_WRITABLE_FIELDS` in [`permissions.py`](backend/app/agent/permissions.py) forbids AI writes to approval, status, or assignment fields. |
 | **Human Review Lock** | Pydantic validator enforces `human_review_required = True` on all reports. |
-| **GitHub Enterprise OAuth** | OAuth 2.0 PKCE/State flow + optional organization membership enforcement. |
+| **Microsoft Entra ID sign-in** | Delegated OAuth 2.0 authorization-code flow (HMAC-signed state) + optional single-tenant enforcement. Delegated Graph token encrypted at rest. |
 | **Internal API Gateway** | `X-Internal-Api-Key` enforced on all programmatic endpoints. |
 
 ---
 
 ## 6. Pluggable LLM Provider Decoupling
 
-The platform supports local-first development and enterprise production inference with zero changes to the LangGraph core:
+The platform supports local-first development and enterprise production inference with zero changes to the LangGraph core. Production inference is **Microsoft 365 Copilot**, reached through **LiteLLM** so future provider swaps are configuration-only.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                       LangGraph                         │
-│                 SAME FOR ALL PROVIDERS                  │
+│                       LangGraph                          │
+│      nodes call get_llm_client().chat_completion(...)    │
 └────────────────────────────┬────────────────────────────┘
-                             │
                              ▼
                  ┌───────────────────────┐
-                 │ LLMProvider Interface │
-                 │ (app/services/llm)    │
+                 │ LLMProvider Interface │   app/services/llm/base.py
                  └───────────┬───────────┘
-                             │
-                ┌────────────┴────────────┐
-                ▼                         ▼
-      ┌───────────────────┐     ┌───────────────────┐
-      │  Ollama Provider  │     │ Copilot Provider  │
-      │ (Local Inference) │     │(github-copilot-sdk│
-      └─────────┬─────────┘     └─────────┬─────────┘
-                │                         │
-                └────────────┬────────────┘
+                ┌────────────┴───────────────────────┐
+                ▼                                    ▼
+      ┌───────────────────┐        ┌──────────────────────────────────┐
+      │  Ollama Provider  │        │   MicrosoftCopilotProvider       │
+      │ (local / fallback)│        │              │                   │
+      └─────────┬─────────┘        │              ▼                   │
+                │                  │   LiteLLM  (custom_provider_map)  │
+                │                  │              │                   │
+                │                  │              ▼                   │
+                │                  │  M365 Copilot Chat handler       │
+                │                  │  (_m365_copilot_litellm_handler) │
+                │                  │              │                   │
+                │                  │              ▼                   │
+                │                  │  Microsoft Graph /beta/copilot   │
+                │                  │  Microsoft Entra ID (delegated)  │
+                │                  └──────────────┬───────────────────┘
+                └────────────┬────────────────────┘
                              ▼
-                    Normalized LLMResponse
-                             │
-                             ▼
-                    SAME ANALYSIS STATE
-                             │
-                             ▼
-                     SAME CAUSAL ENGINE
-                             │
-                             ▼
-                    SAME FINAL VALIDATOR
-                             │
-                             ▼
-                      SAME LQMS REPORT
+                    Normalized LLMResponse  →  SAME analysis state,
+                    causal engine, validators, and LQMS report
 ```
 
 ### Configuration (`backend/.env`)
 ```bash
-# Local Development (Ollama + Qwen3:8b)
+# Local development / degraded fallback (Ollama + Qwen3:8b)
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
-OLLAMA_NUM_CTX=8192
 
-# Production (GitHub Copilot Python SDK)
-LLM_PROVIDER=copilot
-COPILOT_MODEL=auto
-COPILOT_GITHUB_TOKEN=<secure-token>
+# Production (Microsoft 365 Copilot via LiteLLM)
+LLM_PROVIDER=microsoft_copilot
+MICROSOFT_TENANT_ID=<tenant-guid>
+MICROSOFT_CLIENT_ID=<app-registration-client-id>
+MICROSOFT_CLIENT_SECRET=<app-registration-secret>
+MICROSOFT_REDIRECT_URI=http://localhost:8010/api/auth/microsoft/callback
+# Local-dev only: paste a delegated Graph token to skip the browser sign-in
+MICROSOFT_COPILOT_ACCESS_TOKEN=
 ```
+
+### 6.1 Microsoft 365 Copilot integration
+
+**Access mechanism.** The organization's Microsoft 365 Copilot add-on license is consumed
+through the **Microsoft 365 Copilot Chat API** on Microsoft Graph:
+
+| Step | Request |
+|---|---|
+| Create conversation | `POST https://graph.microsoft.com/beta/copilot/conversations` (empty body) |
+| Send prompt | `POST https://graph.microsoft.com/beta/copilot/conversations/{id}/chat` |
+| Cleanup | `DELETE https://graph.microsoft.com/beta/copilot/conversations/{id}` (best effort) |
+
+There is **no generic model endpoint** and no model identifier — Copilot selects the
+underlying model internally. `LLMResponse.model` is the fixed label `m365-chat`.
+
+**Authentication — delegated only.** The Chat API supports **delegated permissions only**
+(no application/daemon flow, no personal accounts). A work/school user signs in via
+Microsoft Entra ID (MSAL authorization-code flow, `app/auth/microsoft_entra.py`); the
+resulting delegated Graph token is encrypted into the server-side session
+(`app/auth/session.py`) and passed per-request to the provider.
+
+**Required delegated Microsoft Graph permissions** (all are `.All` scopes → **tenant admin
+consent required**):
+
+```
+Sites.Read.All   Mail.Read   People.Read.All   OnlineMeetingTranscript.Read.All
+Chat.Read   ChannelMessage.Read.All   ExternalItem.Read.All
+```
+
+plus `offline_access` (refresh token) and the OIDC scopes.
+
+**Entra app registration.**
+1. entra.microsoft.com → App registrations → New registration.
+2. Redirect URI (platform **Web**): value of `MICROSOFT_REDIRECT_URI`
+   (`.../api/auth/microsoft/callback` — add the production URL for deployment).
+3. Certificates & secrets → new client secret → `MICROSOFT_CLIENT_SECRET`.
+4. API permissions → Microsoft Graph → **Delegated** → add the seven scopes above →
+   **Grant admin consent**.
+5. Every user of the app must hold a **Microsoft 365 Copilot** add-on license.
+
+**Capabilities & limitations (verified against Microsoft Learn, 2026):**
+
+| Capability | Status | Handling |
+|---|---|---|
+| Streaming | Supported (SSE) | Not wired — nodes use non-streaming synthesis |
+| Structured output / JSON mode | **Not supported** | System instructions + a "return only JSON" directive are folded into `message.text`; parsed by the existing `parse_llm_json` salvage path; unparseable output **fails closed** |
+| Tool / function calling | **Not supported** | Not used by any node |
+| Temperature / max tokens | **Not supported** | Accepted and ignored |
+| System-prompt field | **Not supported** | Folded into `message.text` |
+| Token usage metrics | Not returned | `input_tokens` / `output_tokens` = `None` |
+| API maturity | **`/beta`** — "not supported for production" per Microsoft | Ollama remains the configured degraded fallback; every failure mode fails closed, never fabricates a result |
+| Long prompts | Prone to Graph gateway timeouts | `MICROSOFT_COPILOT_TIMEOUT_SECONDS` default 90s; timeout → `LLMTimeoutError` |
+
+**Guardrails unchanged.** The provider is a pure pass-through: it returns the model's text
+(minus Copilot inline markup such as `<Person>` / `[^1^]`) and performs **no** numeric,
+status, evidence, or relationship interpretation. All deterministic values continue to come
+from `app/financial/*`, `app/services/confidence.py`, the 6M taxonomy, rule engines, and
+invariant/grounding validators.
+
+**Local development without a browser.** Set `MICROSOFT_COPILOT_ACCESS_TOKEN` to a delegated
+Graph token (e.g. from Graph Explorer consented to the seven scopes) and run with
+`LLM_PROVIDER=microsoft_copilot`.
 
 ---
 

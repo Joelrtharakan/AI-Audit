@@ -122,22 +122,12 @@ async def investigate_finding(
     if payload.llm_provider:
         settings.llm_provider = payload.llm_provider.strip().lower()
 
-    # Resolve token from authenticated session first, fallback to payload token
-    from app.routers.auth import get_current_user_session
-    user_session = get_current_user_session(
-        lqms_session=request.cookies.get(settings.session_cookie_name),
-        authorization=request.headers.get("authorization"),
-    )
-    if user_session:
-        user_token = user_session.get_decrypted_token()
-        if user_token:
-            from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
-            settings.copilot_github_token = user_token
-            reset_copilot_clients()
-    elif payload.copilot_github_token:
-        from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
-        settings.copilot_github_token = payload.copilot_github_token.strip()
-        reset_copilot_clients()
+    # Resolve delegated Microsoft Graph token from the authenticated session first,
+    # falling back to an explicit token in the payload (local-dev convenience).
+    from app.routers.auth import apply_user_copilot_token
+    user_session = apply_user_copilot_token(request)
+    if user_session is None and payload.microsoft_copilot_access_token:
+        settings.microsoft_copilot_access_token = payload.microsoft_copilot_access_token.strip()
 
     # Check cache first for duplicate request instant response. Keyed on
     # model + prompt_version too, so a model swap or prompt edit can't
@@ -145,8 +135,10 @@ async def investigate_finding(
     depts_str = ",".join(payload.departments) if payload.departments else ""
     if settings.llm_provider == "ollama":
         cache_model = settings.ollama_model
-    elif settings.llm_provider == "copilot":
-        cache_model = settings.copilot_model
+    elif settings.llm_provider in ("microsoft_copilot", "microsoft-copilot", "m365_copilot", "copilot"):
+        # The M365 Copilot Chat API exposes no model identifier; use a stable
+        # literal so the cache key still changes if the provider changes.
+        cache_model = "m365-copilot"
     else:
         cache_model = settings.openrouter_model
     cache_key = compute_cache_key(

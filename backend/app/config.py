@@ -58,6 +58,40 @@ class Settings(BaseSettings):
     canonical_semantic_shadow_enabled: bool = False
     canonical_semantic_shadow_timeout_seconds: float = 8.0
 
+    # Remediation Cost Estimation (app.remediation): a SEPARATE semantic
+    # analysis from financial exposure -- "what will it cost to correct/
+    # prevent the finding?" rather than "what did the finding cost?". The
+    # LLM infers the remediation strategy, implementation activities, and
+    # cost drivers from the finding context; deterministic code validates
+    # structure and executes arithmetic; a single canonical
+    # RemediationCostResult is attached to the report.
+    #
+    # Same off-by-failure rationale as financial_semantic_reasoning_enabled:
+    # an unreachable LLM provider does not fail fast, and every failure mode
+    # fails closed to a professional NOT_ASSESSABLE result -- never a
+    # fabricated number, never an internal diagnostic string. The cost of
+    # leaving this on with no provider reachable is added latency per
+    # investigation, never a wrong result. Set to False to skip the section
+    # entirely in a deployment with no LLM provider.
+    remediation_cost_estimation_enabled: bool = True
+    remediation_cost_estimation_timeout_seconds: float = 90.0
+    # A compact remediation interpretation for a typical finding (2-4 cost
+    # components + activities, optional/null fields omitted per the prompt) is
+    # ~700-1100 output tokens against real qwen3:8b. 1400 covers that with
+    # headroom; a genuinely large multi-component finding that truncates is
+    # still recovered piece-by-piece by interpreter._salvage (valid
+    # components/activities/proposals are kept, only the malformed tail is
+    # dropped) -- never an all-or-nothing failure. Was 2200, which the model
+    # tended to fill (done_reason=length) and was the single largest latency
+    # contributor (~74s).
+    remediation_cost_max_tokens: int = 1400
+    # Input for this call is the compacted system prompt (~1400 tok) + schema
+    # hint (~600 tok) + the trimmed structured context block (~400-900 tok);
+    # 4096 covers input + a 1400-token response without the KV-cache cost of
+    # the former 8192 (which also matched no other node -- ollama_num_ctx
+    # itself is 4096).
+    remediation_cost_num_ctx: int = 4096
+
     # Production Local Ollama Inference Server
     llm_provider: str = "ollama"
     ollama_base_url: str = "http://localhost:11434"
@@ -98,11 +132,18 @@ class Settings(BaseSettings):
     # finding against real qwen3:8b. 900 was truncating the JSON mid-
     # structure -> unparseable -> LLM_INVALID -> the entire financial
     # analysis discarded, even when the model's semantics were correct.
-    # 2200 covers the observed complete output with headroom; the parser
-    # additionally salvages a near-complete truncated response (see
-    # json_parser.extract_json_str) rather than failing all-or-nothing.
-    ollama_financial_semantic_max_tokens: int = 2200
-    ollama_financial_semantic_num_ctx: int = 8192
+    # 2000 covers the observed complete output (~1300 for 5 claims) with
+    # ~54% headroom; the parser additionally salvages a near-complete
+    # truncated response (see json_parser.extract_json_str) rather than
+    # failing all-or-nothing.
+    ollama_financial_semantic_max_tokens: int = 2000
+    # 6144 (was 8192): the financial system prompt + schema hint is ~3200
+    # tokens and the evidence context is typically <500; 6144 covers input +
+    # a 2000-token response while cutting KV-cache allocation ~25%. A very
+    # large evidence ledger that would exceed this shifts the oldest context
+    # (system prompt is preserved) -- a rare, graceful degradation, not a
+    # correctness break, and salvage still handles a truncated response.
+    ollama_financial_semantic_num_ctx: int = 6144
 
     # Optional provider timeouts & keys (for fallback router tests)
     google_api_key: str = ""
@@ -115,18 +156,47 @@ class Settings(BaseSettings):
     openrouter_timeout_seconds: float = 20.0
     gemini_timeout_seconds: float = 25.0
 
-    # GitHub Copilot SDK (Production)
-    copilot_model: str = "auto"
-    copilot_github_token: str = ""
-    copilot_timeout_seconds: float = 30.0
-    copilot_log_level: str = "info"
+    # -------------------------------------------------------------------------
+    # Microsoft 365 Copilot (Production) -- accessed through the Microsoft
+    # Graph beta Copilot Chat API (POST /beta/copilot/conversations then
+    # .../{id}/chat). Reached via LiteLLM through a registered custom
+    # provider ("microsoft_copilot"). See
+    # app/services/llm/providers/microsoft_copilot_provider.py and
+    # app/services/llm/providers/_m365_copilot_litellm_handler.py.
+    #
+    # The Chat API is DELEGATED-ONLY (no application/daemon auth), requires
+    # a per-user Microsoft 365 Copilot add-on license, exposes no model
+    # selection, and returns free text only (no native JSON mode / tool
+    # calling / temperature). It is currently a /beta API.
+    # -------------------------------------------------------------------------
+    microsoft_copilot_enabled: bool = True
+    # Dev/testing bypass: a delegated Graph access token pasted directly so
+    # the provider can run without the interactive Entra sign-in flow. In
+    # production this is populated per-request from the authenticated user
+    # session (routers/investigate.py etc.), never set statically.
+    microsoft_copilot_access_token: str = ""
+    # The Chat API is prone to gateway timeouts on long prompts; give the
+    # honest synthesis room to finish. A genuinely unreachable Graph
+    # endpoint still fails closed (just later).
+    microsoft_copilot_timeout_seconds: float = 90.0
+    microsoft_copilot_max_retries: int = 2
+    # locationHint.timeZone is a required Chat API request parameter.
+    microsoft_copilot_timezone: str = "UTC"
+    # Audit reasoning should not pull public web content into grounded
+    # answers; enterprise search grounding is always on regardless.
+    microsoft_copilot_web_grounding: bool = False
+    # Graph base URL (national-cloud override point, e.g. US Gov L4/L5).
+    microsoft_graph_base_url: str = "https://graph.microsoft.com"
 
-    # GitHub OAuth & Enterprise Configuration
-    github_client_id: str = ""
-    github_client_secret: str = ""
-    github_redirect_uri: str = "http://localhost:8010/api/auth/github/callback"
-    github_allowed_org: str = ""  # Configurable: e.g. "my-company"
-    github_enterprise: str = ""   # Optional GitHub Enterprise slug/domain
+    # Microsoft Entra ID (delegated OAuth 2.0 authorization-code flow) --
+    # replaces the former GitHub OAuth sign-in. See app/auth/microsoft_entra.py.
+    microsoft_tenant_id: str = ""
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_redirect_uri: str = "http://localhost:8010/api/auth/microsoft/callback"
+    # Optional tenant allow-list gate (parallels the former github_allowed_org):
+    # when set, only users whose token tenant id (tid claim) matches are admitted.
+    microsoft_allowed_tenant_id: str = ""
     session_secret: str = "dev-secret-key-change-in-production-min-32-chars"
     session_cookie_name: str = "lqms_session"
     session_expiry_hours: int = 24

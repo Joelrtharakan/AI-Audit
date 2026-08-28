@@ -20,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.financial.models import FinancialAnalysisResult
+from app.remediation.models import RemediationCostResult
 
 
 # ---------------------------------------------------------------------------
@@ -1726,6 +1727,11 @@ class InvestigationReport(BaseModel):
     cost_impact: CostImpact | None = None
     financial_amount: FinancialAmount | None = None
     financial_analysis: FinancialAnalysisResult | None = None
+    # Remediation Cost Estimation (app.remediation) -- a SEPARATE analysis from
+    # financial_analysis: expected cost to correct/prevent the finding, not
+    # incurred loss. Always populated with a canonical result (an honest
+    # NOT_ASSESSABLE when it cannot be estimated); never an internal diagnostic.
+    remediation_cost: RemediationCostResult | None = None
     evidence_gaps: list[EvidenceGap] = []
     evidence: list[EvidenceItem] = []
     propositions: list[Proposition] = []
@@ -1855,7 +1861,9 @@ class InvestigateRequest(BaseModel):
     likelihood: str = ""
     risk_result: str = ""
     llm_provider: str = ""
-    copilot_github_token: str = ""
+    # Local-dev convenience: a delegated Microsoft Graph access token supplied
+    # directly on the request instead of via the Entra sign-in session.
+    microsoft_copilot_access_token: str = ""
 
     @field_validator("finding_text")
     @classmethod

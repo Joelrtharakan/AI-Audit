@@ -31,18 +31,9 @@ async def analyze_finding(
     if payload.llm_provider:
         settings.llm_provider = payload.llm_provider.strip().lower()
 
-    # Check user session for Copilot token
-    from app.routers.auth import get_current_user_session
-    user_session = get_current_user_session(
-        lqms_session=request.cookies.get(settings.session_cookie_name),
-        authorization=request.headers.get("authorization"),
-    )
-    if user_session:
-        user_token = user_session.get_decrypted_token()
-        if user_token:
-            from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
-            settings.copilot_github_token = user_token
-            reset_copilot_clients()
+    # Load the signed-in user's delegated Microsoft Graph token for Copilot calls
+    from app.routers.auth import apply_user_copilot_token
+    apply_user_copilot_token(request)
     try:
         return await service.analyze(payload)
     except LLMError as exc:

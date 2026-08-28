@@ -168,6 +168,24 @@ class TestCostFactorFailsClosed:
         _, outcome = validate_and_materialize(interp, evidence_count=1)
         assert outcome.validated_cost_factor is None
 
+    def test_remediation_cost_factor_never_becomes_a_financial_exposure_factor(self):
+        # A finding whose only monetary content is an implementation/remediation
+        # quotation must NOT produce a financial-exposure factor -- remediation
+        # cost is analysed separately (spec sections 1, 2, 15). Financial
+        # Factor: NOT ESTABLISHED here.
+        for factor in ("REMEDIATION_COST", "PREVENTION_COST"):
+            interp = SemanticFindingInterpretation.model_validate({
+                "claims": [{"claim_id": "C1", "source_evidence_ids": ["E0"], "fact_type": "REMEDIATION_COST",
+                            "value": 50000, "currency": "INR", "population": "REMEDIATION",
+                            "evidence_status": "VERIFIED"}],
+                "relationships": [],
+                "calculation_proposals": [],
+                "cost_factor": {"selected_factor": factor, "supporting_claim_ids": ["C1"],
+                                 "confidence": "HIGH", "rationale": "supplier quotation"},
+            })
+            _, outcome = validate_and_materialize(interp, evidence_count=1)
+            assert outcome.validated_cost_factor is None
+
     def test_not_established_selection_is_ignored(self):
         interp = SemanticFindingInterpretation.model_validate({
             "claims": [{"claim_id": "C1", "source_evidence_ids": ["E0"], "fact_type": "AMOUNT",

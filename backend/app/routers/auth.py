@@ -1,4 +1,10 @@
-"""FastAPI Authentication & GitHub OAuth Router for LQMS."""
+"""FastAPI Authentication router -- Microsoft Entra ID delegated sign-in for LQMS.
+
+Replaces the former GitHub OAuth flow. A work/school user signs in with Microsoft
+Entra ID; the resulting delegated Microsoft Graph token (carrying the scopes
+required by the Microsoft 365 Copilot Chat API) is encrypted into the server-side
+session and used per-request for Copilot calls.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +12,10 @@ import logging
 import urllib.parse
 from typing import Any
 
-from fastapi import APIRouter, Cookie, Header, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import APIRouter, Cookie, Header, Request, Response, status
+from fastapi.responses import RedirectResponse
 
-from app.auth.github_oauth import (
-    GitHubOAuthError,
-    GitHubOrgUnauthorizedError,
-    get_github_oauth_service,
-)
+from app.auth.microsoft_entra import MicrosoftAuthError, get_microsoft_entra_service
 from app.auth.security import generate_oauth_state, validate_oauth_state
 from app.auth.session import LQMSUserSession, get_session_store
 from app.config import get_settings
@@ -27,7 +29,7 @@ def get_current_user_session(
     lqms_session: str | None = Cookie(default=None),
     authorization: str | None = Header(default=None),
 ) -> LQMSUserSession | None:
-    """Dependency to retrieve the active LQMS user session from cookie or Authorization header."""
+    """Retrieve the active LQMS user session from cookie or Authorization header."""
     session_id = lqms_session
     if not session_id and authorization and authorization.startswith("Bearer "):
         session_id = authorization[7:].strip()
@@ -35,25 +37,65 @@ def get_current_user_session(
     if not session_id:
         return None
 
-    store = get_session_store()
-    return store.get_session(session_id)
+    return get_session_store().get_session(session_id)
 
 
-@router.get("/github/login")
-async def github_login(request: Request, return_to: str = "") -> Response:
-    """Initiate GitHub OAuth 2.0 web flow with signed CSRF state."""
+def apply_user_copilot_token(request: Request) -> LQMSUserSession | None:
+    """Load the signed-in user's delegated Graph token into settings for this request.
+
+    Mirrors the former GitHub-token plumbing: the per-user token from the session
+    is placed on ``settings.microsoft_copilot_access_token`` so the factory-built
+    ``MicrosoftCopilotProvider`` picks it up. Returns the session (or ``None``).
+    """
     settings = get_settings()
-    oauth_service = get_github_oauth_service()
+    user_session = get_current_user_session(
+        lqms_session=request.cookies.get(settings.session_cookie_name),
+        authorization=request.headers.get("authorization"),
+    )
+    if user_session is not None:
+        token = user_session.get_decrypted_token()
+        if token:
+            settings.microsoft_copilot_access_token = token
+    return user_session
+
+
+async def refresh_user_copilot_token(user_session: LQMSUserSession) -> bool:
+    """Attempt one silent delegated-token refresh; re-store on the session. Returns success."""
+    refresh_token = user_session.get_decrypted_refresh_token()
+    if not refresh_token:
+        return False
+    try:
+        result = get_microsoft_entra_service().acquire_token_by_refresh_token(refresh_token)
+    except MicrosoftAuthError as exc:
+        logger.warning("Silent Microsoft token refresh failed: %s", exc)
+        return False
+    user_session.update_tokens(
+        access_token=result["access_token"],
+        refresh_token=result.get("refresh_token", ""),
+    )
+    get_settings().microsoft_copilot_access_token = result["access_token"]
+    return True
+
+
+@router.get("/microsoft/login")
+async def microsoft_login(request: Request, return_to: str = "") -> Response:
+    """Initiate the Microsoft Entra ID delegated authorization-code flow."""
+    settings = get_settings()
+    entra = get_microsoft_entra_service()
 
     ret_url = return_to or settings.frontend_dashboard_url
     state = generate_oauth_state(return_to=ret_url)
 
     try:
-        auth_url = oauth_service.get_authorization_url(state=state)
-    except GitHubOAuthError as exc:
-        logger.warning("GitHub OAuth not configured: %s", exc)
-        redirect_target = f"{settings.frontend_login_url}?auth=error&error=missing_config&message={urllib.parse.quote('GitHub OAuth is not yet configured. Please set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in backend/.env')}"
-        return RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
+        auth_url = entra.get_authorization_url(state=state)
+    except MicrosoftAuthError as exc:
+        logger.warning("Microsoft Entra sign-in not configured: %s", exc)
+        msg = (
+            "Microsoft sign-in is not yet configured. Set MICROSOFT_TENANT_ID, "
+            "MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET in backend/.env"
+        )
+        target = f"{settings.frontend_login_url}?auth=error&error=missing_config&message={urllib.parse.quote(msg)}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
 
     response = RedirectResponse(url=auth_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
     response.set_cookie(
@@ -67,8 +109,8 @@ async def github_login(request: Request, return_to: str = "") -> Response:
     return response
 
 
-@router.get("/github/callback")
-async def github_callback(
+@router.get("/microsoft/callback")
+async def microsoft_callback(
     request: Request,
     code: str | None = None,
     state: str | None = None,
@@ -76,89 +118,71 @@ async def github_callback(
     error_description: str | None = None,
     lqms_oauth_state: str | None = Cookie(default=None),
 ) -> Response:
-    """Handle GitHub OAuth authorization callback, exchange code, verify organization, and establish session."""
+    """Handle the Entra redirect: exchange code, verify tenant, establish a session."""
     settings = get_settings()
-    oauth_service = get_github_oauth_service()
+    entra = get_microsoft_entra_service()
     session_store = get_session_store()
 
     login_page = settings.frontend_login_url
     dashboard_page = settings.frontend_dashboard_url
 
-    # Check if user cancelled or GitHub returned error
     if error:
         err_msg = error_description or error
-        logger.warning("GitHub OAuth authorization error: %s", err_msg)
-        redirect_target = f"{login_page}?auth=error&error=oauth_denied&message={urllib.parse.quote(err_msg)}"
-        return RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
+        logger.warning("Microsoft Entra authorization error: %s", err_msg)
+        target = f"{login_page}?auth=error&error=oauth_denied&message={urllib.parse.quote(err_msg)}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
 
-    # Validate state parameter for CSRF prevention
     if not state or not validate_oauth_state(state)[0]:
         logger.warning("Invalid or expired OAuth state parameter rejected.")
-        redirect_target = f"{login_page}?auth=error&error=invalid_state&message={urllib.parse.quote('Invalid or expired OAuth state')}"
-        return RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
+        target = f"{login_page}?auth=error&error=invalid_state&message={urllib.parse.quote('Invalid or expired OAuth state')}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
 
     if not code:
         logger.warning("OAuth callback missing code parameter.")
-        redirect_target = f"{login_page}?auth=error&error=missing_code&message={urllib.parse.quote('Missing authorization code')}"
-        return RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
+        target = f"{login_page}?auth=error&error=missing_code&message={urllib.parse.quote('Missing authorization code')}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
 
-    # Server-side code exchange
     try:
-        access_token = await oauth_service.exchange_code_for_token(code=code)
-        profile = await oauth_service.get_user_profile(access_token=access_token)
-    except Exception as exc:
-        logger.error("GitHub OAuth exchange or profile fetch failed: %s", exc)
-        redirect_target = f"{login_page}?auth=error&error=exchange_failed&message={urllib.parse.quote('Failed to authenticate with GitHub')}"
-        return RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
+        token_result = entra.acquire_token_by_authorization_code(code=code)
+        profile = entra.get_user_profile(token_result["id_token_claims"])
+    except MicrosoftAuthError as exc:
+        logger.error("Microsoft Entra token exchange failed: %s", exc)
+        target = f"{login_page}?auth=error&error=exchange_failed&message={urllib.parse.quote('Failed to authenticate with Microsoft')}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
 
-    username = str(profile.get("login", "")).strip()
-    user_id = int(profile.get("id", 0))
-    display_name = str(profile.get("name") or username).strip()
-    avatar_url = str(profile.get("avatar_url", "")).strip()
-    email = str(profile.get("email") or "").strip()
-
-    if not email:
-        emails = await oauth_service.get_user_emails(access_token=access_token)
-        primary = next((e.get("email") for e in emails if e.get("primary")), None)
-        email = primary or (emails[0].get("email") if emails else "")
-
-    # Company Organization Verification
-    is_member, org_name = await oauth_service.verify_org_membership(
-        access_token=access_token,
-        username=username,
-    )
-    if not is_member:
+    is_allowed, tenant = entra.verify_tenant(profile.get("tenant_id", ""))
+    if not is_allowed:
         logger.warning(
-            "Access denied: User '%s' is not a member of approved organization '%s'",
-            username,
-            settings.github_allowed_org,
+            "Access denied: user '%s' tenant '%s' not in allowed tenant '%s'",
+            profile.get("user_principal_name"),
+            profile.get("tenant_id"),
+            settings.microsoft_allowed_tenant_id,
         )
-        msg = f"Your GitHub account (@{username}) is not authorized for this application (must belong to {settings.github_allowed_org})."
-        redirect_target = f"{login_page}?auth=error&error=unauthorized_org&message={urllib.parse.quote(msg)}"
-        return RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
+        msg = f"Your Microsoft account ({profile.get('user_principal_name')}) is not authorized for this application."
+        target = f"{login_page}?auth=error&error=unauthorized_tenant&message={urllib.parse.quote(msg)}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
 
-    # Create Authenticated Session with Encrypted Token
     session = session_store.create_session(
-        github_user_id=user_id,
-        github_login=username,
-        name=display_name,
-        email=email,
-        avatar_url=avatar_url,
-        organization=org_name,
-        copilot_enabled=True,
-        plain_github_token=access_token,
+        user_id=profile.get("user_id", ""),
+        user_principal_name=profile.get("user_principal_name", ""),
+        name=profile.get("name", ""),
+        email=profile.get("email", ""),
+        avatar_url="",
+        organization=tenant,
+        copilot_enabled=settings.microsoft_copilot_enabled,
+        plain_access_token=token_result["access_token"],
+        plain_refresh_token=token_result.get("refresh_token", ""),
     )
 
     logger.info(
-        "GitHub OAuth successful: user='%s' org='%s' session_id=%s",
-        username,
-        org_name,
+        "Microsoft Entra sign-in successful: user='%s' tenant='%s' session_id=%s",
+        profile.get("user_principal_name"),
+        tenant,
         session.session_id[:8],
     )
 
-    # Redirect to dashboard with session cookie
-    redirect_target = f"{dashboard_page}?auth=success"
-    response = RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
+    target = f"{dashboard_page}?auth=success"
+    response = RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
     response.set_cookie(
         key=settings.session_cookie_name,
         value=session.session_id,
@@ -173,11 +197,10 @@ async def github_callback(
 
 @router.get("/me")
 async def get_current_user_profile(
-    session: LQMSUserSession | None = Cookie(default=None),
     lqms_session: str | None = Cookie(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Return safe public user session information -- NEVER exposes GitHub access token."""
+    """Return safe public user session information -- NEVER exposes the access token."""
     user_session = get_current_user_session(
         lqms_session=lqms_session,
         authorization=authorization,
@@ -185,6 +208,7 @@ async def get_current_user_profile(
     if user_session is None:
         return {
             "authenticated": False,
+            "user_principal_name": "",
             "github_login": "",
             "name": "",
             "avatar_url": "",
@@ -200,7 +224,7 @@ async def logout(
     response: Response,
     lqms_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
-    """Destroy local LQMS user session and clear authentication cookies."""
+    """Destroy the local LQMS user session and clear authentication cookies."""
     settings = get_settings()
     store = get_session_store()
     if lqms_session:
@@ -209,3 +233,9 @@ async def logout(
     response.delete_cookie(key=settings.session_cookie_name)
     response.delete_cookie(key="lqms_oauth_state")
     return {"status": "ok", "message": "Successfully logged out of LQMS"}
+
+
+# Backwards-compatible aliases: the previous GitHub routes now point at Microsoft.
+@router.get("/github/login", include_in_schema=False)
+async def _legacy_github_login(request: Request, return_to: str = "") -> Response:
+    return await microsoft_login(request, return_to=return_to)

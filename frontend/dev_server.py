@@ -114,7 +114,7 @@ def main() -> None:
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("", port), DevRequestHandler)
     print(f"✨ Serving frontend on http://localhost:{port}/index.html")
-    print(f"🔑 GitHub OAuth entry: http://localhost:8010/api/auth/github/login")
+    print(f"🔑 Microsoft Entra sign-in: http://localhost:8010/api/auth/microsoft/login")
     print(f"Shimming {len(SHIMMED_PAGE_METHODS)} read-only ASP.NET PageMethod calls (see dev_server.py).")
     try:
         server.serve_forever()
