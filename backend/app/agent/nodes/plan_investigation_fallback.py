@@ -24,6 +24,7 @@ from app.services.semantic_subject import (
     _clean_subject,
     extract_conflict_topic,
     extract_temporal_clause,
+    is_established_subject,
     resolve_deviation,
     split_topic_and_tail,
     strip_leading_article,
@@ -72,6 +73,148 @@ def _extract_transmission_object(text: str) -> str | None:
     return None
 
 
+def _plan_from_canonical_structure(
+    semantic_context: Any, canonical_subject: str | None,
+) -> tuple[list[CandidateHypothesis], InvestigationPlan]:
+    """Build the investigation plan ENTIRELY from the validated canonical
+    semantic context's structured fields (spec §3/§5/§6/§29). A structural
+    transformation of canonical data -- never a re-reading of the finding.
+    The number of questions follows the actual canonical evidence needs
+    (§4): no fixed five-question tree.
+
+    Precedence:
+      A. explicit `investigation_plan` steps -> used directly.
+      B. else derived from `information_gaps` / `comparison` / stated causal
+         alternatives / missing-record ambiguity / recurrence.
+      C. nothing structured -> ONE minimal fail-closed evidence question.
+    Hypotheses come ONLY from `candidate_hypotheses` -- never invented.
+    """
+    sc = semantic_context
+    from app.services.canonical_context_validator import get_affected_object_candidate
+
+    _cand = get_affected_object_candidate(sc)
+    subject = (
+        _cand if is_established_subject(_cand)
+        else canonical_subject if is_established_subject(canonical_subject)
+        else getattr(sc, "finding_subject", None) if is_established_subject(getattr(sc, "finding_subject", None))
+        else "the affected process"
+    )
+
+    hyps: list[CandidateHypothesis] = []
+    _status_map = {"POSSIBLE": "POSSIBLE", "SUPPORTED": "SUPPORTED", "REFUTED": "REFUTED", "UNKNOWN": "UNRESOLVED"}
+    for h in list(getattr(sc, "candidate_hypotheses", []) or []):
+        hyps.append(CandidateHypothesis(
+            id=h.hypothesis_id, name=h.hypothesis_id, statement=h.statement,
+            status=_status_map.get(h.epistemic, "POSSIBLE"),
+            evidence_needed=h.discriminating_evidence or "Evidence that would confirm or refute this explanation",
+            discrimination_evidence=h.discriminating_evidence, rationale=h.rationale,
+            relevance_rank="HIGH",
+            source_type="FINDING_STATED_ALTERNATIVE" if h.from_finding_text else "INFERRED_INVESTIGATION_HYPOTHESIS",
+        ))
+    _hyp_ids = [h.id for h in hyps]
+
+    questions: list[InvestigationQuestion] = []
+    evidence: list[str] = []
+
+    def _q(qid: str, text: str, purpose: str, ev: str = "not specified",
+           prio: str = "P2", decision: str | None = None, hyp_ids: list[str] | None = None) -> None:
+        questions.append(InvestigationQuestion(
+            id=qid, question_id=qid, question=text, purpose=purpose, evidence=ev,
+            decision_rule=decision, priority=prio, status="ACTIVE",
+            category="EVIDENCE_VERIFICATION", target_hypothesis_ids=hyp_ids or [],
+        ))
+        if ev and ev != "not specified":
+            evidence.append(ev)
+
+    _steps = list(getattr(sc, "investigation_plan", []) or [])
+    if _steps:
+        _pri = {"HIGH": "P1", "MEDIUM": "P2", "LOW": "P3"}
+        for i, s in enumerate(_steps):
+            t = (s.unknown or "").strip()
+            if not t.endswith("?"):
+                t = f"What does the evidence establish about: {t.rstrip('.')}?"
+            _q(f"Q_LLM_{i + 1}", t,
+               s.why_it_matters or "Resolve an open question this finding raises",
+               s.evidence_that_would_resolve or "not specified",
+               _pri.get(s.priority, "P2"), s.decision_enabled,
+               [x for x in s.related_hypothesis_ids if x in _hyp_ids])
+    else:
+        # B. derive from other canonical structured fields.
+        _gaps = [str(g).strip() for g in (getattr(sc, "information_gaps", []) or []) if str(g).strip()]
+        _ambigs = [str(g).strip() for g in (getattr(sc, "unresolved_ambiguities", []) or []) if str(g).strip()]
+        for i, g in enumerate(_gaps or _ambigs):
+            _q(f"Q_GAP_{i + 1}", f"What objective evidence would establish: {g.rstrip('.')}?",
+               "Resolve an information gap identified in the canonical interpretation")
+
+        cmp_ = getattr(sc, "comparison", None)
+        if cmp_ is not None and (getattr(cmp_, "left", None) or getattr(cmp_, "right", None)):
+            _l = getattr(cmp_, "left", None) or "the first value"
+            _r = getattr(cmp_, "right", None) or getattr(cmp_, "reference", None) or "the second value"
+            _q("Q_COMPARABILITY",
+               f"What evidence establishes whether {_l} and {_r} are directly comparable "
+               "(same scope, basis, period, definitions and method)?",
+               "Establish comparability before the difference is treated as a genuine variance",
+               f"The scope / basis definition underlying {_l} and {_r}", "P1",
+               "If the bases differ the difference may be legitimate; if they match, the discrepancy is real.")
+
+        _alts = list(getattr(sc, "stated_causal_alternatives", []) or [])
+        if getattr(sc, "causal_alternatives_unresolved", False) and _alts:
+            _q("Q_DISCRIMINATE",
+               "What evidence would distinguish which of the stated possible mechanisms actually applies: "
+               + "; ".join(a.strip().rstrip(".") for a in _alts) + "?",
+               "Discriminate between the competing mechanisms the finding itself states",
+               "not specified", "P1", hyp_ids=_hyp_ids)
+
+        if getattr(sc, "activity_performance_ambiguity", False) or getattr(
+            sc, "missing_record_status", None
+        ) not in (None, "RECORD_EXISTS"):
+            _q("Q_ACTIVITY_PERFORMED",
+               f"What objective evidence establishes whether the underlying activity for {subject} "
+               "was actually performed (in full, in part, late, or by a compensating means), "
+               "independent of the record?",
+               "A missing or incomplete record is not itself evidence that the activity did not occur",
+               "not specified", "P1")
+
+        rec = getattr(sc, "recurrence", None)
+        if rec is not None and getattr(rec, "count", None):
+            _q("Q_RECURRENCE_COMMON_CAUSE",
+               f"What evidence establishes whether the {rec.count} "
+               f"{getattr(rec, 'event', None) or 'occurrences'} share a common cause?",
+               "Determine whether the repetition is systemic or independent")
+
+    if not questions:
+        # C. genuinely nothing structured -> one minimal, honest question.
+        _q("Q_EVIDENCE_REQUIRED",
+           f"What objective evidence would establish the cause of, and applicable requirement for, "
+           f"the observed condition affecting {subject}?",
+           "The canonical interpretation established the condition but not its cause or governing requirement",
+           "not specified", "P1",
+           "Until this evidence is obtained, no root cause or systemic corrective action can be concluded.")
+
+    areas = [f"Verify compliance and control records for {subject}"]
+    _gaps_all = [str(g).strip().rstrip(".") for g in (getattr(sc, "information_gaps", []) or []) if str(g).strip()]
+    if _gaps_all:
+        areas = _gaps_all[:4]
+
+    return hyps, InvestigationPlan(
+        areas=areas,
+        questions=questions,
+        evidence_to_collect=_dedup_str(evidence + _gaps_all),
+        status="QUESTIONS_GENERATED",
+    )
+
+
+def _dedup_str(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for it in items:
+        k = (it or "").strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(it.strip())
+    return out
+
+
 def build_deterministic_investigation_plan(
     finding_text: str,
     evidence_ledger: list[EvidenceItem],
@@ -107,6 +250,22 @@ def build_deterministic_investigation_plan(
     questions: list[InvestigationQuestion] = []
     evidence_items: list[str] = []
 
+    # ------------------------------------------------------------------
+    # CANONICAL LLM IS THE SEMANTIC AUTHORITY (spec §2/§3/§5/§29). When a
+    # VALID canonical semantic context exists, the investigation plan is
+    # derived ENTIRELY from its structured fields -- explicit investigation
+    # plan / hypotheses / information gaps / comparison / stated alternatives
+    # / missing-record ambiguity / recurrence. The deterministic template
+    # machinery below (entity-tag regexes, fixed 5-question trees, domain
+    # branches) is a SECOND semantic engine and is NEVER reached while a
+    # canonical context is available -- it is the OFFLINE / FAIL-CLOSED FLOOR
+    # for `semantic_context is None` only (provider outage / flag off /
+    # malformed LLM output). This is a structural transformation of canonical
+    # data, not re-interpretation: no verbs, no keywords, no domain rules.
+    # ------------------------------------------------------------------
+    if semantic_context is not None:
+        return _plan_from_canonical_structure(semantic_context, canonical_subject)
+
     # Entity extraction (IDs, SOPs, BMRs, Lots, Equipment Tags, System Codes, Rooms, Lines)
     extracted_entities = re.findall(
         r"\b([A-Z]{2,5}-[A-Z0-9-]+|Lot\s+[A-Z0-9-]+|Batch\s+[A-Z0-9-]+|Line\s+\d+|Room\s+\d+|Cleanroom\s+[A-Za-z0-9\s]+|Autoclave\s+#?\d+|AHU-\d+|CR-\d+|LF-\d+|VI-\d+|CP-\d+|PP-\d+|Lyo-\d+|FH-\d+|SP-\d+|BAL-\d+|W-\d+|NC-\d+-\d+|CAPA-\d+-\d+|BRD-\d+|MBR-[A-Z0-9-]+|WSC-\d+|API-[0-9]+|RM-[0-9]+|QC-REF-\d+|EQ-\d+)\b",
@@ -125,13 +284,15 @@ def build_deterministic_investigation_plan(
         # be overwritten by a raw-text regex guess.
         from app.services.canonical_context_validator import get_affected_object_candidate
         _canonical_affected = get_affected_object_candidate(semantic_context)
-        subject = _canonical_affected or "the affected process"
-    elif canonical_subject and canonical_subject not in _DEGRADED_SUBJECTS:
+        subject = _canonical_affected if is_established_subject(_canonical_affected) else "the affected process"
+    elif is_established_subject(canonical_subject):
         subject = canonical_subject
-    elif canonical_state and getattr(canonical_state, "finding_subject", None) and canonical_state.finding_subject not in _DEGRADED_SUBJECTS:
+    elif canonical_state and is_established_subject(getattr(canonical_state, "finding_subject", None)):
         subject = canonical_state.finding_subject
+    elif is_established_subject(resolved.finding_subject or resolved.subject):
+        subject = resolved.finding_subject or resolved.subject
     else:
-        subject = resolved.finding_subject or resolved.subject or "the affected process"
+        subject = "the affected process"
     actor = resolved.actor or (getattr(canonical_state, "actor", None) if canonical_state else None)
 
     # FINANCIAL-ONLY FINDING GUARD (evidence-integrity hardening pass):
@@ -249,13 +410,126 @@ def build_deterministic_investigation_plan(
             evidence_items.extend([f"{ent_clean} operational record", f"{ent_clean} verification record", f"{ent_clean} audit trail"])
 
     from app.agent.claim_extractor import detect_evidence_conflicts, extract_claims
-    from app.agent.causal_guard import extract_immediate_mechanism
+    from app.agent.causal_guard import (
+        extract_immediate_mechanism,
+        extract_stated_causal_alternatives,
+    )
 
     claims = extract_claims(finding_text, evidence_ledger)
     conflicts = detect_evidence_conflicts(claims)
     mechanism = extract_immediate_mechanism(reported_claims, fact_claims)
 
     text_low = finding_text.lower()
+
+    # 0. EXPLICITLY STATED COMPETING CAUSAL MECHANISMS.
+    # The finding hands the investigation its own causal differential
+    # ("could have resulted from A, B, or C"). Preserve every alternative as
+    # a POSSIBLE / unranked hypothesis with a discrimination question -- never
+    # collapse it to a generic "root cause unknown" (spec 2C / 6 / 8). No
+    # ranking and no leading hypothesis: the finding says the evidence has
+    # not discriminated them. This bypasses the entity-specific branches
+    # below, which would otherwise invent unrelated mechanisms.
+    _stated_alts = (
+        list(getattr(canonical_state, "stated_causal_alternatives", []) or [])
+        or extract_stated_causal_alternatives(finding_text)
+    )
+    if len(_stated_alts) >= 2:
+        _disc_ev = (
+            "Objective records uniquely consistent with this mechanism and not the "
+            "others: contemporaneous execution or transaction records, system audit "
+            "trail and timestamps, independent verification or recount, or secondary "
+            "records covering the affected period."
+        )
+        for _i, _alt in enumerate(_stated_alts, start=1):
+            _a = _alt.rstrip(". ").strip()
+            _a_l = _a[0].lower() + _a[1:] if _a[:1].isupper() and not _a.split()[0].isupper() else _a
+            hypotheses.append(CandidateHypothesis(
+                id=f"H{_i}",
+                name=f"STATED_MECHANISM_{_i}",
+                statement=f"The observed condition affecting {subject} may have resulted from {_a_l}.",
+                status="POSSIBLE",
+                evidence_needed=_disc_ev,
+                confirms_if=(
+                    f"Objective records establish {_a_l} and are inconsistent with the "
+                    "other stated mechanisms."
+                ),
+                refutes_if=f"Objective records are inconsistent with {_a_l}.",
+                discrimination_evidence=_disc_ev,
+                rationale="Enumerated as a candidate mechanism by the finding itself; not yet supported or refuted by objective evidence.",
+                relevance_rank="MEDIUM",
+                causal_role="PRIMARY_CAUSE",
+                evidence_strength="INDICATIVE",
+            ))
+        _alts_join = "; ".join(a.rstrip(". ").strip() for a in _stated_alts)
+        questions.append(InvestigationQuestion(
+            question_id="Q_MECHANISM_DISCRIMINATION",
+            id="Q_MECHANISM_DISCRIMINATION",
+            question=(
+                f"What objective evidence would distinguish which of the mechanisms the "
+                f"finding states is responsible for the condition affecting {subject} "
+                f"({_alts_join})? Identify contemporaneous execution or transaction "
+                f"records, system audit trails and timestamps, independent verification "
+                f"or recount, or secondary records that would be uniquely consistent with "
+                f"one mechanism and not the others."
+            ),
+            purpose="Discriminate between the competing causal mechanisms the finding states are unresolved",
+            objective="Discriminate between the competing causal mechanisms the finding states are unresolved",
+            evidence="Contemporaneous execution/transaction records; system audit trail and timestamps; independent verification/recount; secondary records for the affected period",
+            evidence_required="Contemporaneous execution/transaction records; system audit trail and timestamps; independent verification/recount; secondary records for the affected period",
+            target_type="HYPOTHESIS",
+            target_proposition_id="P_MECHANISM_DISCRIMINATION",
+            priority="P1",
+        ))
+        questions.append(InvestigationQuestion(
+            question_id="Q_GOVERNING_REQUIREMENT",
+            id="Q_GOVERNING_REQUIREMENT",
+            question=f"What approved requirement, specification, or control defines the expected state for {subject}, and what does it require for the affected period?",
+            purpose="Establish the applicable requirement against which the observed condition is assessed",
+            objective="Establish the applicable requirement against which the observed condition is assessed",
+            evidence="Approved procedure / specification / control document and its revision applicable to the period",
+            evidence_required="Approved procedure / specification / control document and its revision applicable to the period",
+            target_type="PROPOSITION",
+            target_proposition_id="P_GOVERNING_REQUIREMENT",
+            priority="P2",
+        ))
+        questions.append(InvestigationQuestion(
+            question_id="Q_SCOPE",
+            id="Q_SCOPE",
+            question=f"What is the full extent of the condition affecting {subject} -- other periods, records, units, or transactions potentially involved?",
+            purpose="Establish scope and downstream exposure independently of the cause",
+            objective="Establish scope and downstream exposure independently of the cause",
+            evidence="Population/transaction listing and comparison records for the surrounding periods",
+            evidence_required="Population/transaction listing and comparison records for the surrounding periods",
+            target_type="PROPOSITION",
+            target_proposition_id="P_SCOPE",
+            priority="P3",
+        ))
+        for _qi, _q in enumerate(questions):
+            _q.id = _q.id or f"Q{_qi + 1}"
+            _q.target_proposition_id = _q.target_proposition_id or f"P{_qi + 1}"
+            _q.resolves = _q.resolves or _q.purpose
+            _q.evidence_required = _q.evidence_required or _q.evidence
+            _q.decision_rule = _q.decision_rule or "Evaluate objective evidence to confirm or refute the target proposition"
+        _claim_ids = [i.claim_id for i in evidence_ledger if getattr(i, "claim_id", None)] or ["C1"]
+        for _h in hypotheses:
+            if not _h.supporting_claim_ids:
+                _h.supporting_claim_ids = _claim_ids[:1]
+        return hypotheses, InvestigationPlan(
+            questions=questions,
+            evidence_to_collect=[
+                "Contemporaneous execution/transaction records",
+                "System audit trail and timestamps",
+                "Independent verification / recount records",
+                "Secondary records covering the affected period",
+                "Approved requirement / specification applicable to the period",
+            ],
+            areas=[
+                f"Discrimination between the stated mechanisms for {subject}",
+                f"Governing requirement and expected state for {subject}",
+                f"Scope and downstream exposure of the condition affecting {subject}",
+            ],
+            interviews=[f"Personnel and system owners associated with {subject}"],
+        )
 
     # 1. Multiple Competing Reported Explanations Branch (e.g. training vs workload vs discipline)
     reported_claims_list = [c for c in claims if getattr(c, "status", None) == EvidenceStatus.REPORTED]
@@ -1529,15 +1803,23 @@ def build_deterministic_investigation_plan(
         # extract_semantic_subject's comparison block, re-checked here since
         # this function derives its own hypotheses/questions independently
         # from raw finding_text.
-        is_comparison_mismatch_finding = bool(re.search(
-            r"\b(?:did\s+not\s+match|didn't\s+match|does\s+not\s+match|differed\s+from|differs\s+from|"
-            r"was\s+inconsistent\s+with|were\s+inconsistent\s+with|is\s+inconsistent\s+with|"
-            r"exceeded|exceeds|was\s+below|were\s+below|is\s+below|"
-            r"did\s+not\s+reconcile\s+with|does\s+not\s+reconcile\s+with|"
-            r"did\s+not\s+agree\s+with|does\s+not\s+agree\s+with|"
-            r"conflicted\s+with|conflicts\s+with)\b",
-            finding_text, re.IGNORECASE,
-        ))
+        is_comparison_mismatch_finding = bool(
+            getattr(resolved, "comparison_type", None)
+            or getattr(resolved, "semantic_type", None) == "COMPARISON"
+            or re.search(
+                r"\b(?:did\s+not\s+match|didn't\s+match|does\s+not\s+match|differed\s+from|differs\s+from|"
+                r"was\s+inconsistent\s+with|were\s+inconsistent\s+with|is\s+inconsistent\s+with|"
+                r"exceeded|exceeds|was\s+below|were\s+below|is\s+below|"
+                r"did\s+not\s+reconcile\s+with|does\s+not\s+reconcile\s+with|"
+                r"did\s+not\s+agree\s+with|does\s+not\s+agree\s+with|"
+                r"conflicted\s+with|conflicts\s+with|"
+                r"showed\s+a\s+(?:shortfall|surplus|variance|difference|discrepancy|excess|gap|deficit)|"
+                r"\bby\s+\d+(?:\.\d+)?\s*(?:%|percent|units?)|"
+                r"was\s+\d+(?:\.\d+)?\s*(?:%|percent|units?|degrees?)?\s*(?:above|below|over|under|short\s+of)|"
+                r"fell\s+(?:short\s+of|below)|dropped\s+below)\b",
+                finding_text, re.IGNORECASE,
+            )
+        )
         # Comparison SUBTYPE routing (Section 4/5): a PARAMETER_MISMATCH
         # (recorded value vs an approved parameter/specification/setting)
         # needs an entirely different investigation framework than a
@@ -1547,8 +1829,22 @@ def build_deterministic_investigation_plan(
         is_parameter_mismatch_finding = (
             is_comparison_mismatch_finding and resolved.comparison_subtype == "PARAMETER_MISMATCH"
         )
+        # UNRESOLVED COMPARABILITY (Section 4/31): two independently-sourced
+        # assessments whose comparability the finding itself states is NOT
+        # established. There is no computed value to re-derive and no
+        # approved parameter to check against -- the open question is
+        # whether the two cover an equivalent scope/basis. Routing this
+        # through the calculation tree would invent a "formula", "source
+        # entries", "transcription", and "disposition review" that the
+        # finding never mentions.
+        is_scope_comparability_finding = (
+            getattr(resolved, "comparison_type", None) == "UNRESOLVED_COMPARABILITY"
+            or getattr(resolved, "comparison_subtype", None) == "SCOPE_COMPARABILITY_UNRESOLVED"
+        )
         is_calculation_shaped_comparison_finding = (
-            is_comparison_mismatch_finding and resolved.comparison_subtype != "PARAMETER_MISMATCH"
+            is_comparison_mismatch_finding
+            and resolved.comparison_subtype != "PARAMETER_MISMATCH"
+            and not is_scope_comparability_finding
         )
 
         _control_proof_pattern = re.compile(
@@ -1625,6 +1921,38 @@ def build_deterministic_investigation_plan(
                 relevance_rank="HIGH",
             )
             hypotheses.append(h1)
+        elif is_scope_comparability_finding:
+            # UNRESOLVED COMPARABILITY (Section 4/9/31/33): the finding
+            # establishes only that two independently-sourced assessments
+            # have not been confirmed to cover an equivalent scope/basis.
+            # It states NO causal mechanism, so none is manufactured -- the
+            # single POSSIBLE hypothesis is the one the finding's own
+            # "scope ... not confirmed to match" wording licenses (the
+            # assessments may not cover equivalent scope). Root cause
+            # remains NOT_ESTABLISHED with no leading hypothesis; the
+            # investigation targets scope equivalence, not a recalculation.
+            hypotheses.append(
+                CandidateHypothesis(
+                    id="H1", name="ASSESSMENT_SCOPE_DIVERGENCE",
+                    statement=(
+                        f"The two assessments of {subject} may not cover an equivalent "
+                        f"scope or basis, which would account for the difference between them."
+                    ),
+                    status="POSSIBLE", evidence_strength="NONE", causal_role="CONTRIBUTING_CAUSE",
+                    evidence_needed=(
+                        "The scope/basis definition underlying each assessment "
+                        "(inclusions, exclusions, assumptions, and boundaries)"
+                    ),
+                    confirms_if="The two assessments are shown to define different scope/basis",
+                    refutes_if="The two assessments are confirmed to cover an equivalent scope/basis",
+                    discrimination_evidence=(
+                        "Distinguished by a side-by-side comparison of each assessment's stated scope/basis."
+                    ),
+                    relevance_rank="MEDIUM",
+                    supporting_evidence=fact_claims[:1] if fact_claims else [],
+                    resolves_investigation="P1",
+                )
+            )
         elif is_parameter_mismatch_finding:
             # A recorded value differing from an APPROVED PARAMETER/
             # specification/setting (Section 3/4/15) is a distinct
@@ -2192,6 +2520,90 @@ def build_deterministic_investigation_plan(
                 "Equipment historian, PLC/SCADA logs, and batch execution records",
                 "Reviewer sign-off and disposition/release records",
             ])
+        elif is_scope_comparability_finding:
+            # UNRESOLVED COMPARABILITY (Section 11/31): the information gap
+            # is whether the two independently-sourced assessments cover an
+            # equivalent scope/basis -- NOT whether a computed value
+            # re-derives. Questions target comparison reconciliation and
+            # scope equivalence; no "formula", "transcription" or
+            # "disposition review" question is generated because the
+            # finding establishes none of those.
+            plan_areas = [
+                f"{subject_cap} assessment scope and basis reconciliation",
+                f"{subject_cap} comparison reconciliation",
+            ]
+            questions.extend([
+                InvestigationQuestion(
+                    question_id="Q_SCOPE_EQUIVALENCE",
+                    id="Q_SCOPE_EQUIVALENCE",
+                    question=(
+                        f"Do the two assessments of {subject} cover an equivalent scope and "
+                        f"basis (same inclusions, exclusions, assumptions, and boundaries)?"
+                    ),
+                    purpose="Establish whether the two figures are directly comparable before interpreting the difference",
+                    objective="Establish whether the two figures are directly comparable before interpreting the difference",
+                    evidence=f"The stated scope/basis, assumptions, and line items underlying each assessment of {subject}",
+                    evidence_required=f"The stated scope/basis, assumptions, and line items underlying each assessment of {subject}",
+                    priority="P1",
+                    target_proposition_id="P_SCOPE_EQUIVALENCE",
+                    status="ACTIVE",
+                    category="COMPARISON_RECONCILIATION",
+                    decision_rule=(
+                        "IF the scopes are equivalent → the difference is a genuine variance; proceed to Q_DIFFERENCE_BASIS. "
+                        "IF the scopes differ → normalise to a common scope before any further interpretation."
+                    ),
+                    possible_outcomes=[
+                        "Scopes are equivalent → the difference is a genuine variance to be investigated.",
+                        "Scopes differ → the difference is at least partly a scope difference, not a variance.",
+                    ],
+                ),
+                InvestigationQuestion(
+                    question_id="Q_DIFFERENCE_BASIS",
+                    id="Q_DIFFERENCE_BASIS",
+                    question=(
+                        f"Once the assessments of {subject} are placed on a common scope, what "
+                        f"specific items or assumptions account for the remaining difference?"
+                    ),
+                    purpose="Attribute the residual difference to specific, evidenced items rather than assuming a cause",
+                    objective="Attribute the residual difference to specific, evidenced items rather than assuming a cause",
+                    evidence="Itemised breakdown of each assessment and the rate/quantity assumptions used",
+                    evidence_required="Itemised breakdown of each assessment and the rate/quantity assumptions used",
+                    priority="P2",
+                    target_proposition_id="P_DIFFERENCE_BASIS",
+                    depends_on="Q_SCOPE_EQUIVALENCE",
+                    status="CONDITIONAL",
+                    category="COMPARISON_RECONCILIATION",
+                    possible_outcomes=[
+                        "Specific items/assumptions explain the difference → no further cause investigation needed.",
+                        "The difference is not fully explained by items/assumptions → a cause investigation is warranted.",
+                    ],
+                ),
+                InvestigationQuestion(
+                    question_id="Q_WHICH_BASIS_APPLIES",
+                    id="Q_WHICH_BASIS_APPLIES",
+                    question=(
+                        f"Which assessment basis for {subject} is the applicable one for the decision "
+                        f"at hand, and on what authority?"
+                    ),
+                    purpose="Identify the governing basis without assuming either figure is 'correct'",
+                    objective="Identify the governing basis without assuming either figure is 'correct'",
+                    evidence="The decision the assessments support and any policy/authority defining the required basis",
+                    evidence_required="The decision the assessments support and any policy/authority defining the required basis",
+                    priority="P3",
+                    target_proposition_id="P_APPLICABLE_BASIS",
+                    status="ACTIVE",
+                    category="REQUIREMENT_VERIFICATION",
+                    possible_outcomes=[
+                        "A governing basis is defined → use it as the reference.",
+                        "No governing basis is defined → the choice of basis is itself an open item.",
+                    ],
+                ),
+            ])
+            evidence_items.extend([
+                f"Scope/basis definition underlying each assessment of {subject}",
+                "Itemised breakdown and assumptions for each assessment",
+                "Any policy or authority defining the applicable assessment basis",
+            ])
         elif is_calculation_shaped_comparison_finding:
             # Generalized comparison/mismatch investigation dimensions
             # (Section 7/8): verify both compared values -> verify the
@@ -2371,42 +2783,100 @@ def build_deterministic_investigation_plan(
                     InvestigationQuestion(
                         question_id="Q_GOVERNING_REQUIREMENT",
                         id="Q_GOVERNING_REQUIREMENT",
-                        question=f"What approved procedure, specification, or control defines the requirement for {subject} during the relevant period?",
-                        purpose="Establish the governing source document and execution criteria",
-                        objective="Establish the governing source document and execution criteria",
+                        question=(
+                            f"What approved procedure, specification, or control, if any, defines the "
+                            f"expected state for {subject} during the relevant period, or is the "
+                            f"applicable requirement itself unestablished?"
+                        ),
+                        purpose="Establish whether a governing requirement exists and what it requires",
+                        objective="Establish whether a governing requirement exists and what it requires",
                         evidence=f"Applicable procedure, specification, or control governing {subject}",
                         evidence_required=f"Applicable procedure, specification, or control governing {subject}",
                         priority="P1",
                         target_proposition_id="P_GOV",
-                        decision_rule="If governing procedure is located → compare observed status against specified limits; if no procedure exists → investigate requirement definition gap.",
+                        category="REQUIREMENT_VERIFICATION",
+                        decision_rule="If a governing procedure exists → compare the observed state against it; if none exists → the requirement itself is an open item, not a confirmed violation.",
                     )
                 )
 
-            questions.extend([
-                InvestigationQuestion(
-                    question_id="Q_STATUS_HISTORY",
-                    id="Q_STATUS_HISTORY",
-                    question=f"What objective records establish the operational status and execution logs for {subject_bare} at the time of the finding?",
-                    purpose="Establish the objective operational status and execution logs from primary evidence",
-                    objective="Establish the objective operational status and execution logs from primary evidence",
-                    evidence=f"Status, maintenance, calibration, or execution logs for {subject}",
-                    evidence_required=f"Status, maintenance, calibration, or execution logs for {subject}",
-                    priority="P2",
-                    target_proposition_id="P_STATUS",
-                    decision_rule="If execution logs confirm nonconformity → proceed to mechanism investigation; if logs show compliant execution → investigate record reconciliation.",
-                ),
-                InvestigationQuestion(
-                    question_id="Q_AUTHORIZED_EXCEPTION",
-                    id="Q_AUTHORIZED_EXCEPTION",
-                    question=f"Did any approved waiver, planned deviation, or authorized exception apply to {subject} during the affected period?",
-                    purpose="Determine whether an authorized departure or change control was in effect",
-                    objective="Determine whether an authorized departure or change control was in effect",
-                    evidence=f"Approved waiver, deviation, or change control records for {subject}",
-                    evidence_required=f"Approved waiver, deviation, or change control records for {subject}",
-                    priority="P3",
-                    target_proposition_id="P_EXCEPTION",
-                    decision_rule="If authorized waiver exists → evaluate scope and validity of waiver; if no waiver exists → proceed to control failure analysis.",
-                ),
+            # §11/§14: the generic question set is filtered by what the
+            # canonical state actually establishes -- a record/document
+            # finding gets the performed-vs-recorded distinction (not
+            # "execution logs for the record"); the downstream-impact
+            # question is emitted only when the finding establishes
+            # downstream relevance, otherwise a neutral scope question.
+            _sem = (getattr(canonical_state, "semantic_type", None) or "").upper() if canonical_state else ""
+            _is_record_finding = _sem in ("RECORD", "MISSING_RECORD") or bool(
+                getattr(canonical_state, "missing_record_status", None)
+            )
+            _downstream_relevant = bool(
+                canonical_state and (
+                    getattr(canonical_state, "downstream_action_present", False)
+                    or getattr(canonical_state, "downstream_action_text", None)
+                    or getattr(canonical_state, "consequence", None)
+                )
+            )
+
+            if _is_record_finding:
+                questions.append(
+                    InvestigationQuestion(
+                        question_id="Q_PERFORMED_VS_RECORDED",
+                        id="Q_PERFORMED_VS_RECORDED",
+                        question=(
+                            f"Does independent evidence show that the activity underlying "
+                            f"{subject_bare} was performed (so the gap is a recording/retention "
+                            f"gap), or that it was not performed?"
+                        ),
+                        purpose="Distinguish 'performed but not recorded' from 'not performed' -- the finding establishes only that the record is missing",
+                        objective="Distinguish 'performed but not recorded' from 'not performed'",
+                        evidence=f"Independent/secondary evidence of the underlying activity for {subject_bare} (system logs, related records, personnel confirmation)",
+                        evidence_required=f"Independent/secondary evidence of the underlying activity for {subject_bare}",
+                        priority="P2",
+                        target_proposition_id="P_PERFORMED_VS_RECORDED",
+                        category="EXECUTION_VERIFICATION",
+                        decision_rule="If independent evidence shows the activity was performed → treat as a recording/retention gap. If it shows non-performance → treat as an execution gap. If neither → both remain open.",
+                        possible_outcomes=[
+                            "Independent evidence confirms the activity was performed → recording/retention gap.",
+                            "Independent evidence shows non-performance → execution gap.",
+                            "No independent evidence either way → both possibilities remain open.",
+                        ],
+                    )
+                )
+            else:
+                questions.append(
+                    InvestigationQuestion(
+                        question_id="Q_STATUS_HISTORY",
+                        id="Q_STATUS_HISTORY",
+                        question=f"What objective primary records establish the actual state of {subject_bare} at the time of the finding?",
+                        purpose="Establish the objective state from primary evidence rather than the finding's summary alone",
+                        objective="Establish the objective state from primary evidence",
+                        evidence=f"Primary status, maintenance, calibration, or execution records for {subject}",
+                        evidence_required=f"Primary status, maintenance, calibration, or execution records for {subject}",
+                        priority="P2",
+                        target_proposition_id="P_STATUS",
+                        category="OBSERVATION_VERIFICATION",
+                        decision_rule="If primary records confirm the observed state → proceed to mechanism investigation; if they differ → reconcile the records.",
+                    )
+                )
+
+            if req_status != "UNKNOWN" or _sem in ("COMPARISON", "DEVIATION", "EVENT_SEQUENCE_CONTROL"):
+                questions.append(
+                    InvestigationQuestion(
+                        question_id="Q_AUTHORIZED_EXCEPTION",
+                        id="Q_AUTHORIZED_EXCEPTION",
+                        question=f"Did any approved waiver, planned deviation, or authorized exception apply to {subject} during the affected period?",
+                        purpose="Determine whether an authorized departure or change control was in effect",
+                        objective="Determine whether an authorized departure or change control was in effect",
+                        evidence=f"Approved waiver, deviation, or change control records for {subject}",
+                        evidence_required=f"Approved waiver, deviation, or change control records for {subject}",
+                        priority="P3",
+                        target_proposition_id="P_EXCEPTION",
+                        category="EXCEPTION_VERIFICATION",
+                        decision_rule="If an authorized waiver exists → evaluate its scope and validity; if none exists → proceed to control-effectiveness analysis.",
+                    )
+                )
+
+            questions.append(
                 InvestigationQuestion(
                     question_id="Q_PROCESS_RESPONSIBILITY",
                     id="Q_PROCESS_RESPONSIBILITY",
@@ -2417,21 +2887,43 @@ def build_deterministic_investigation_plan(
                     evidence_required=f"Process responsibility matrix and control assignment records for {subject}",
                     priority="P3",
                     target_proposition_id="P_RESPONSIBILITY",
-                    decision_rule="If control point is identified → evaluate whether control design or control execution failed.",
-                ),
-                InvestigationQuestion(
-                    question_id="Q_DOWNSTREAM_DEPENDENCIES",
-                    id="Q_DOWNSTREAM_DEPENDENCIES",
-                    question=f"What downstream batches, systems, or operational outputs were potentially affected by {subject}?",
-                    purpose="Determine actual downstream impact without presupposing widespread loss",
-                    objective="Determine actual downstream impact without presupposing widespread loss",
-                    evidence=f"Downstream traceability, release records, and batch/system logs for {subject}",
-                    evidence_required=f"Downstream traceability, release records, and batch/system logs for {subject}",
-                    priority="P4",
-                    target_proposition_id="P_SCOPE",
-                    decision_rule="If downstream items are identified → quarantine and evaluate; if no downstream dependencies → close impact boundary.",
-                ),
-            ])
+                    category="AUTHORIZATION_VERIFICATION",
+                    decision_rule="If a control point is identified → evaluate whether control design or control execution failed.",
+                )
+            )
+
+            if _downstream_relevant:
+                questions.append(
+                    InvestigationQuestion(
+                        question_id="Q_DOWNSTREAM_DEPENDENCIES",
+                        id="Q_DOWNSTREAM_DEPENDENCIES",
+                        question=f"What downstream outputs or decisions that the finding connects to {subject} were potentially affected?",
+                        purpose="Determine actual downstream impact without presupposing widespread loss",
+                        objective="Determine actual downstream impact without presupposing widespread loss",
+                        evidence=f"Downstream traceability and dependency records the finding links to {subject}",
+                        evidence_required=f"Downstream traceability and dependency records for {subject}",
+                        priority="P4",
+                        target_proposition_id="P_SCOPE",
+                        category="IMPACT_DETERMINATION",
+                        decision_rule="If downstream items are identified → evaluate them; if none → close the impact boundary.",
+                    )
+                )
+            else:
+                questions.append(
+                    InvestigationQuestion(
+                        question_id="Q_CONDITION_EXTENT",
+                        id="Q_CONDITION_EXTENT",
+                        question=f"What is the full extent of this condition -- are other periods, records, or units of the same type as {subject_bare} also affected?",
+                        purpose="Establish the scope of the observed condition without assuming a downstream consequence the finding does not state",
+                        objective="Establish the scope of the observed condition",
+                        evidence=f"Records of the same type/period as {subject_bare}",
+                        evidence_required=f"Records of the same type/period as {subject_bare}",
+                        priority="P4",
+                        target_proposition_id="P_SCOPE",
+                        category="SCOPE_VERIFICATION",
+                        decision_rule="If the condition is isolated → scope is bounded; if it recurs → widen the review population.",
+                    )
+                )
         evidence_items.extend([
             f"Applicable procedure/requirement governing {subject}",
             f"Status/history records for {subject}",

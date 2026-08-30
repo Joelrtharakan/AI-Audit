@@ -37,11 +37,39 @@ _FINITE_VERB_PATTERNS = [
     re.compile(r"\b(?:had|have|has|did|do|does|was|were|is|are)\s+not\b", re.IGNORECASE),
     re.compile(r"\b(?:had|have|has)\s+(?:been|received|completed|performed|conducted|attended|seen|missed|followed)\b", re.IGNORECASE),
     re.compile(r"\b(?:was|were|is|are)\b", re.IGNORECASE),
+    # Interior COPULAR / LINKING / EXISTENTIAL / POSSESSION-NEGATION verb --
+    # "X remains open", "X stays unresolved", "X becomes overdue", "X appears
+    # incomplete", "X lacks an audit trail", "X exists". This is a closed
+    # grammatical class of English linking verbs, not a domain vocabulary: a
+    # candidate built around one of them is a PREDICATION (subject + state),
+    # not an entity, so subject and condition were conflated during
+    # extraction and the whole clause must be rejected as a subject.
+    re.compile(
+        r"\b(?:remains?|remained|stays?|stayed|becomes?|became|appears?|appeared|"
+        r"seems?|seemed|exists?|existed|lacks?|lacked|contains?|contained)"
+        r"(?:\s+\S|\s*$)",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(?:did|do|does)\s+not\s+(?:receive|complete|perform|conduct|attend|follow|know|have)\b", re.IGNORECASE),
     re.compile(r"\b(?:could|should|would|might|may|must|cannot|can)\s+(?:not\s+)?(?:have|be|receive|complete)\b", re.IGNORECASE),
     re.compile(r"\b(?:stated|claimed|reported|said|mentioned|noted|indicated|confirmed|acknowledged)\b", re.IGNORECASE),
     re.compile(r"\b(?:they|he|she|we|i|you)\s+(?:had|have|has|was|were|did|could|should|would|stated|reported|claimed|said|received|completed|missed|failed|were|was|are|is)\b", re.IGNORECASE),
     re.compile(r"\b(?:but|however|although|whereas|because|while|since)\b", re.IGNORECASE),
+    # A reporting / cognition clause: "<verb>ed that <...>" ("the review
+    # concluded that ...", "the audit found that ...", "it determined that
+    # ...") -- structurally a proposition, never a noun-phrase entity.
+    re.compile(r"\b[a-z]{3,}ed\s+that\s+\S", re.IGNORECASE),
+    # Starts with a bare negation -- "not followed correctly", "not
+    # performed" -- a negated predicate, not a subject.
+    re.compile(r"^\s*not\s+\S", re.IGNORECASE),
+    # Starts with a bare past participle + preposition -- "implemented on
+    # Line 7", "moved to a new location", "granted to three contractors" --
+    # a stranded verb phrase from a stripped subject, never a noun phrase.
+    re.compile(r"^\s*[a-z]+(?:ed|en)\s+(?:on|in|at|to|from|by|for|with|into|onto|during|after|before|without)\b", re.IGNORECASE),
+    # Starts with a manner adverb followed by a preposition / subordinator --
+    # "correctly during the last quarter", "properly before release" -- an
+    # adverbial fragment left after the verb and subject were stripped.
+    re.compile(r"^\s*[a-z]+ly\s+(?:during|before|after|when|while|in|on|at|by|for|as|until|since)\b", re.IGNORECASE),
 ]
 
 # Single authoritative pattern for a "self-referential evidence" clause
@@ -75,10 +103,193 @@ _ACCORDING_TO_EVIDENCE_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Generic EVIDENCE-PROPOSITION / REPORTING-CLAUSE detection.
+#
+# An audit finding routinely contains a sentence of the shape
+#   "<evidence source> <reporting verb> [that] <proposition>"
+#   e.g. "Maintenance records show that temporary repairs were performed",
+#        "System logs indicate repeated authentication failures",
+#        "Inspection found corrosion on Tank T-14",
+#        "It was observed that the valve was left open".
+# That clause describes something ABOUT the finding's subject -- it is never
+# itself the subject. This is detected STRUCTURALLY (an evidence/observation
+# -source head noun + a reporting verb), not by blacklisting specific
+# phrases, so it generalises to wording not seen here. The two sets below
+# are deliberately generic (sources of evidence / verbs of reporting) and
+# contain no domain vocabulary.
+# ---------------------------------------------------------------------------
+_EVIDENCE_SOURCE_NOUNS = (
+    r"records?|logs?|documentation|documents?|data|history|evidence|reports?|"
+    r"reviews?|inspections?|audits?|analys[ie]s|assessments?|monitoring|"
+    r"findings?|results?|examinations?|investigations?|sampling|"
+    r"reconciliations?|walkthroughs?|surveys?|observations?|testing|tests?|"
+    r"metrics?|dashboards?|trends?|trail|trails?|registers?|files?|"
+    r"statements?|entries|checks?|readings?|measurements?|footage|imagery"
+)
+# Tight subset: nouns that are UNAMBIGUOUSLY a passive record/document store
+# (never an audit ACTIVITY like "review" / "reconciliation" / "inspection").
+# Used for the NEGATED reporting frame ("<X> did not show that ..."), where
+# the broad set would wrongly match "The reconciliation did not show a
+# variance" (reconciliation is the audited activity there, not a source).
+_EVIDENCE_RECORD_NOUN = (
+    r"records?|logs?|log|documentation|documents?|data|audit\s+trail|"
+    r"trail|registers?|register|file\s+records?|history\s+records?"
+)
+# Only UNAMBIGUOUS verbs of reporting/attestation. Deliberately EXCLUDES:
+#  - "contain(s)", "list(s)", "record(s)", "document(s)": in "the batch
+#    record contained an incomplete entry" the source noun is the subject;
+#  - "report(s)/reported": collides with the noun in "the audit report",
+#    "the inspection report", "the incident report" -- all valid subjects.
+_REPORTING_VERBS = (
+    r"show|shows|showed|indicate|indicates|indicated|confirm|confirms|confirmed|"
+    r"reveal|reveals|revealed|establish|establishes|established|demonstrate|"
+    r"demonstrates|demonstrated|prove|proves|proved|proven|"
+    r"state|states|stated|found|finds|identify|"
+    r"identifies|identified|suggest|suggests|suggested|disclose|discloses|"
+    r"disclosed|highlight|highlights|highlighted|determine|determines|"
+    r"determined"
+)
+# "<up-to-4-word NP ending in an evidence-source noun> <reporting verb> [that]"
+_EVIDENCE_PROPOSITION_RE = re.compile(
+    r"^\s*(?:(?:the|a|an|our|their|its|his|her|these|those|this|that|available|"
+    r"current|historical|prior|previous|recent|all|both)\s+)?"
+    r"(?:[A-Za-z][\w-]*\s+){0,3}"
+    rf"(?:{_EVIDENCE_SOURCE_NOUNS})\s+"
+    rf"(?:{_REPORTING_VERBS})\b\s*(?:that\s+|:\s*|,\s*)?",
+    re.IGNORECASE,
+)
+# Passive / pronoun reporting frame: "it was observed/found/noted/... that".
+_PRONOUN_REPORTING_FRAME_RE = re.compile(
+    r"^\s*(?:it|there)\s+(?:was|were|is|are|has\s+been|had\s+been)\s+"
+    r"(?:been\s+)?(?:observed|found|noted|identified|determined|discovered|"
+    r"noticed|established|confirmed|reported|revealed|shown|seen)\b\s*(?:that\s+)?",
+    re.IGNORECASE,
+)
+
+
+def looks_like_evidence_proposition(text: str | None) -> bool:
+    """True when `text` STARTS with an evidence-proposition / reporting frame
+    ("<evidence source> <reporting verb> [that] ...", "it was observed
+    that ..."). Such a clause reports something about the finding subject;
+    it is never the subject itself. Structural, domain-agnostic."""
+    if not text or not text.strip():
+        return False
+    s = text.strip()
+    return bool(
+        _EVIDENCE_PROPOSITION_RE.match(s)
+        or _PRONOUN_REPORTING_FRAME_RE.match(s)
+        or _SELF_REFERENTIAL_EVIDENCE_PREFIX_RE.match(s)
+    )
+
+
+# ---------------------------------------------------------------------------
+# EVIDENCE-REQUEST / EVIDENCE-ARTIFACT detection.
+#
+# Core invariant:  EVIDENCE ARTIFACT  !=  FINDING SUBJECT.
+#
+# A phrase is not a valid affected subject merely because it is grammatically
+# noun-like. When a phrase is functioning as REQUESTED / REQUIRED EVIDENCE --
+# evidence needed to prove or disprove a claim, evidence needed to establish
+# a cause, records/documents the investigation planner is asking for, an
+# "Evidence needed: …" placeholder, or an evidence-adequacy nominal
+# ("sufficient evidence to support …") -- it describes what would be needed
+# to investigate the finding, not the substantive object the finding is
+# about.
+#
+# Detected by GRAMMATICAL FRAME, never by a vocabulary blacklist:
+#   * an evidence / record / documentation head noun governed by a REQUEST
+#     predicate ("needed", "required", "requested", "necessary", "to be
+#     obtained / provided / gathered");
+#   * an interrogative evidence request ("what records establish X?",
+#     "which evidence confirms Y?");
+#   * an evidence-adequacy / purpose nominal ("sufficient evidence to
+#     support X", "a basis to justify Y", "documentation to establish Z").
+#
+# It deliberately does NOT fire on a bare record / document / log noun with
+# no request frame: "the investigation record", "maintenance record",
+# "calibration certificate CC-7" stay valid subjects, because the SAME
+# vocabulary is a legitimate subject when the record itself is the deficient
+# object of the finding.
+# ---------------------------------------------------------------------------
+_EVIDENCE_ARTIFACT_HEAD = (
+    r"evidence|proof|documentation|substantiation|corroboration|"
+    r"justification|rationale|records?|logs?|data|information|documents?"
+)
+_EVIDENCE_REQUEST_PREDICATE = (
+    r"needed|required|requested|sought|necessary|wanted|missing|lacking|"
+    r"outstanding|awaited|pending|to\s+be\s+(?:obtained|provided|gathered|"
+    r"collected|supplied|furnished|produced)|that\s+(?:is|would\s+be)\s+"
+    r"(?:needed|required|necessary)"
+)
+_EVIDENCE_REQUEST_RE = re.compile(
+    rf"^\s*(?:the\s+|any\s+|some\s+|additional\s+|further\s+|more\s+|"
+    rf"specific\s+|relevant\s+|supporting\s+|objective\s+)?"
+    rf"(?:{_EVIDENCE_ARTIFACT_HEAD})\s+(?:{_EVIDENCE_REQUEST_PREDICATE})\b",
+    re.IGNORECASE,
+)
+_EVIDENCE_INTERROGATIVE_RE = re.compile(
+    rf"^\s*(?:what|which|whose)\s+(?:{_EVIDENCE_ARTIFACT_HEAD})\s+"
+    r"(?:would\s+|could\s+|can\s+|will\s+|are\s+needed\s+to\s+)?"
+    r"(?:establish|establishes|confirm|confirms|show|shows|prove|proves|"
+    r"demonstrate|demonstrates|verif\w+|support|supports|substantiate|"
+    r"substantiates|determine|determines|identif\w+|resolve|resolves)\b",
+    re.IGNORECASE,
+)
+_EVIDENCE_ADEQUACY_NOMINAL_RE = re.compile(
+    r"^\s*(?:a\s+|an\s+|the\s+|no\s+)?"
+    r"(?:sufficient|adequate|appropriate|insufficient|inadequate|additional|"
+    r"further|objective|documented|supporting|corroborating|conclusive|"
+    r"definitive|reasonable|credible|independent)?\s*"
+    rf"(?:{_EVIDENCE_ARTIFACT_HEAD}|basis|grounds)\s+"
+    r"(?:to|that\s+would|sufficient\s+to|necessary\s+to|needed\s+to|"
+    r"required\s+to|capable\s+of|establishing|supporting|proving|confirming)\s+"
+    r"\S",
+    re.IGNORECASE,
+)
+# An explicit "Evidence needed:/required:/to establish X:" lead-in followed
+# by the artifact -- strip it so only the trailing phrase is judged (and it
+# will itself usually be a bare record noun that must ALSO not become the
+# subject on its own, since it was named only as requested evidence).
+_EVIDENCE_REQUEST_LEADIN_RE = re.compile(
+    r"^\s*(?:the\s+)?(?:evidence|proof|documentation|records?|logs?|data|"
+    r"information|documents?)\s+"
+    r"(?:needed|required|requested|necessary|sought)"
+    r"(?:\s+to\s+[^:]+?)?\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
+
+
+def looks_like_evidence_request(text: str | None) -> bool:
+    """True when `text` is functioning as REQUESTED / REQUIRED EVIDENCE or an
+    evidence-adequacy artifact rather than naming the finding's affected
+    subject (core invariant: EVIDENCE ARTIFACT != FINDING SUBJECT).
+
+    Structural -- keys on the grammatical request frame, domain-agnostic,
+    reusable by every subject-validation path and run BEFORE candidate
+    promotion. Does NOT fire on a bare record / document / log noun with no
+    request frame: "the investigation record" / "maintenance record" stay
+    valid subjects."""
+    if not text or not text.strip():
+        return False
+    s = text.strip().strip('"“”‘’').rstrip(".").strip()
+    if not s:
+        return False
+    lead = _EVIDENCE_REQUEST_LEADIN_RE.match(s)
+    if lead:
+        return True
+    return bool(
+        _EVIDENCE_REQUEST_RE.match(s)
+        or _EVIDENCE_INTERROGATIVE_RE.match(s)
+        or _EVIDENCE_ADEQUACY_NOMINAL_RE.match(s)
+    )
+
 # Reporting verbs & discourse preamble prefix patterns
 _FRAMING_PREFIXES = [
     _SELF_REFERENTIAL_EVIDENCE_PREFIX_RE,
     _ACCORDING_TO_EVIDENCE_PREFIX_RE,
+    _EVIDENCE_PROPOSITION_RE,
+    _PRONOUN_REPORTING_FRAME_RE,
     re.compile(r"^\s*(?:just\s+)?wanted\s+to\s+(?:let\s+everyone\s+know|notify|inform\s+you)\s+(?:that\s+)?", re.IGNORECASE),
     re.compile(r"^\s*(?:please\s+note\s+that|note\s+that|be\s+advised\s+that)\s+", re.IGNORECASE),
     re.compile(r"^\s*during\s+.+?,\s*", re.IGNORECASE),
@@ -95,8 +306,9 @@ _FRAMING_PREFIXES = [
     ),
     re.compile(r"^\s*a\s+deviation\s+was\s+observed\s+(?:involving|regarding|in|with)\s+", re.IGNORECASE),
     re.compile(
-        r"^\s*(?:the\s+)?(?:responsible\s+)?(?:technician|operator|staff|employee|supervisor|analyst|manager|trainer)\s+"
-        r"(?:stated|confirmed|reported|said|noted|claimed|indicated)\s+(?:that\s+)?",
+        r"^\s*(?:the\s+)?(?:responsible\s+)?(?:technician|operator|staff|employee|supervisor|analyst|manager|trainer|auditor|inspector|reviewer|approver)\s+"
+        r"(?:stated|confirmed|reported|said|noted|claimed|indicated|"
+        r"believed|thought|suspected|assumed|felt|considered|presumed|speculated|understood)\s+(?:that\s+)?",
         re.IGNORECASE,
     ),
     re.compile(r"^\s*(?:under|per|as\s+per|in\s+accordance\s+with|pursuant\s+to)\s+(?:statutory\s+|regulatory\s+|applicable\s+)?(?:safety\s+|quality\s+|environmental\s+|compliance\s+|security\s+)?(?:standard|regulation|procedure|policy|rule|directive|guideline)\s+[A-Z0-9-]+\s*,\s*", re.IGNORECASE),
@@ -124,6 +336,27 @@ def reject_subject_if_clause(subject: str | None) -> bool:
     if words[0] in _PRONOUNS:
         return True
 
+    # 1b. The candidate IS an evidence-proposition / reporting clause
+    # ("maintenance records show that temporary repairs", "system logs
+    # indicate repeated failures", "it was observed that ..."). Detected
+    # structurally (evidence-source head noun + reporting verb), never by a
+    # phrase blacklist -- see looks_like_evidence_proposition. Such a clause
+    # reports something ABOUT the subject and is never the subject itself.
+    if looks_like_evidence_proposition(s):
+        return True
+
+    # 1c. The candidate is functioning as REQUESTED / REQUIRED EVIDENCE or an
+    # evidence-adequacy artifact -- "evidence needed to establish the cause",
+    # "records required to verify completion", "sufficient evidence to
+    # support invalidation", "Evidence needed: X". Core invariant: an
+    # evidence artifact is never the finding subject merely because it is
+    # noun-like. Structural (grammatical request frame) -- see
+    # looks_like_evidence_request; a bare record/document noun with no
+    # request frame ("the investigation record") is untouched and stays a
+    # valid subject.
+    if looks_like_evidence_request(s):
+        return True
+
     # 2. Pronoun anywhere followed by a verb or finite verb pattern
     for pattern in _FINITE_VERB_PATTERNS:
         if pattern.search(s):
@@ -131,6 +364,18 @@ def reject_subject_if_clause(subject: str | None) -> bool:
 
     # 3. Starts with common finite past-tense / auxiliary / reporting verbs
     if words[0] in {"had", "have", "has", "was", "were", "did", "could", "should", "would", "is", "are", "stated", "claimed", "reported", "said"}:
+        return True
+
+    # 3b. CONDITION-NOMINALIZATION with an embedded object: "<evaluative>
+    # <relational-noun> <of/with/to> <object>" ("inconsistent compliance
+    # with X", "poor adherence to Y", "lack of oversight of Z"). This is an
+    # OBSERVED CONDITION whose prepositional complement is the real subject
+    # -- the resolver's branch 0aa should have extracted that object, so any
+    # candidate still in this shape is a role-conflation and is rejected.
+    # A concrete modified noun with NO of/with/to complement ("incomplete
+    # document", "missing record", "nonconforming product") does NOT match
+    # this pattern and remains a valid subject.
+    if _CONDITION_NOMINALIZATION_RE.match(s):
         return True
 
     # 4. Long sentences with punctuation or subordinate connectors
@@ -160,6 +405,42 @@ def reject_subject_if_clause(subject: str | None) -> bool:
     # determiner subset is rejected in the bare, 1-word case.
     if len(words) == 1 and words[0] in _BARE_DETERMINER_WORDS:
         return True
+
+    # 4d. EVERY token is a grammatical function word -- a bare article
+    # ("the"/"a"/"an"), a bare determiner, or a pronoun -- with no content
+    # word attached at all ("The", "a", "this", "these", "that", "it").
+    # This is the exact reported production failure (affected_object "The");
+    # articles were never in _PRONOUNS or _BARE_DETERMINER_WORDS, so a bare
+    # "The" slipped through every prior rule. A pure function-word string
+    # can never name an auditable object, in any domain.
+    if all(w in _CONTENTLESS_WORDS for w in words):
+        return True
+
+    # 4e. After dropping leading articles / determiners / pronouns, the
+    # candidate is a SINGLE bare generic category noun ("the process", "an
+    # activity", "this condition", "issue", "the matter", "an area"). It
+    # names a CATEGORY of things, never the specific process / record /
+    # system / transaction / document the observation is actually about --
+    # structurally identical in spirit to rules 5-6, one word instead of a
+    # quantifier + word. A real subject that merely CONTAINS such a noun
+    # alongside a distinguishing modifier or identifier ("access control
+    # system CC-4", "payment reconciliation process") has >1 content word
+    # and is untouched.
+    _content = [w for w in words if w not in _CONTENTLESS_WORDS]
+    if len(_content) == 1:
+        _w = _content[0]
+        _forms = {_w}
+        if _w.endswith("ies") and len(_w) > 4:
+            _forms.add(_w[:-3] + "y")
+        if _w.endswith("es") and not _w.endswith("sses") and len(_w) > 3:
+            _forms.add(_w[:-2])
+        if _w.endswith("s") and not _w.endswith("ss") and len(_w) > 3:
+            _forms.add(_w[:-1])
+        if _forms & (
+            _GENERIC_SUBJECT_NOUNS | _GENERIC_OCCURRENCE_NOUNS
+            | _FINANCIAL_META_NOUNS | _BARE_FINANCIAL_TERMS
+        ):
+            return True
 
     # 5. A bare quantifier attached to nothing but a generic
     # occurrence/meta noun (e.g. "each event", "several failures",
@@ -274,6 +555,22 @@ _GENERIC_OCCURRENCE_NOUNS = {
     "issue", "deviation", "defect", "error", "discrepancy", "problem",
 }
 
+# Generic category / abstraction nouns that describe a KIND of auditable
+# thing rather than the specific one a finding is about. Rule 4e rejects a
+# candidate that reduces (after dropping articles/determiners) to exactly
+# one of these. Deliberately domain-neutral and small -- never extended
+# with domain vocabulary (equipment, payment, batch, supplier, ...). Nouns
+# that are frequently the genuine bare subject of an audit finding
+# ("record", "document", "certificate", "log", "system", "control",
+# "procedure") are intentionally EXCLUDED: rejecting those bare would lose
+# real subjects. This set is only the words that are pure meta-description.
+_GENERIC_SUBJECT_NOUNS = {
+    "process", "activity", "condition", "matter", "thing", "item",
+    "area", "aspect", "element", "situation", "concern", "topic",
+    "practice", "operation", "task", "point", "part", "subject",
+    "object", "audit", "finding", "observation", "review",
+}
+
 # Grammatical modifiers describing frequency/recurrence character, never a
 # domain-specific vocabulary list -- "recurring failures" names a pattern,
 # not a specific affected object.
@@ -323,6 +620,58 @@ def validate_semantic_subject(subject: str | None) -> bool:
     """Return True if `subject` is a valid, clean noun phrase / entity / process.
     Rejects clauses, pronouns, or malformed fragments."""
     return not reject_subject_if_clause(subject)
+
+
+# The one professional, domain-neutral phrase every user-facing field uses
+# when the finding genuinely does not name a specific auditable object.
+# Never a machine reason code, never an internal marker.
+UNRESOLVED_SUBJECT_DISPLAY = "Finding subject not specifically identified"
+
+_UNRESOLVED_MARKER_PREFIXES = ("UNKNOWN", "UNRESOLVED", "NOT ESTABLISHED", "NOT_ESTABLISHED")
+
+
+def is_established_subject(subject: str | None) -> bool:
+    """True only when `subject` is a concrete, usable finding subject that
+    may be substituted into downstream question / evidence / narrative
+    templates.
+
+    Stricter than `validate_semantic_subject` (which is grammar-only): this
+    ALSO rejects the explicit "UNKNOWN …"/"UNRESOLVED …" markers the
+    pipeline deliberately stores when extraction fails, and generic
+    process-category placeholders. The three fallback planners
+    (plan_investigation_fallback, five_why_fallback) must gate on THIS, not
+    on a fixed `{"process compliance", None, ""}` set -- otherwise a stored
+    "UNRESOLVED — …" marker gets spliced into "Applicable procedure
+    governing UNRESOLVED — …".
+    """
+    if not subject or not subject.strip():
+        return False
+    s = subject.strip()
+    if s.upper().startswith(_UNRESOLVED_MARKER_PREFIXES):
+        return False
+    if not validate_semantic_subject(s):
+        return False
+    try:  # lazy: invariants imports this module
+        from app.agent.invariants import is_generic_placeholder_entity
+        if is_generic_placeholder_entity(s):
+            return False
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return True
+
+
+def humanize_unresolved_subject(text: str | None) -> str | None:
+    """Map an internal "UNKNOWN …"/"UNRESOLVED …" subject marker (or a bare
+    grammatical fragment that somehow survived) to the single professional
+    display phrase. No-op for a genuine subject. Applied at the report
+    boundary so a machine marker never reaches the auditor-facing output
+    (spec sections 2 & 24)."""
+    if not text or not text.strip():
+        return text
+    s = text.strip()
+    if s.upper().startswith(_UNRESOLVED_MARKER_PREFIXES) or not validate_semantic_subject(s):
+        return UNRESOLVED_SUBJECT_DISPLAY
+    return text
 
 
 def _strip_framing(sentence: str) -> str:
@@ -711,6 +1060,13 @@ _BARE_DETERMINER_WORDS = {
     "some", "any", "no", "none", "all", "total",
 }
 
+# Pure grammatical function words -- articles, bare determiners, pronouns.
+# A candidate composed ENTIRELY of these (rule 4d in reject_subject_if_clause)
+# names nothing at all. Defined here, after both source sets, so module
+# import order is respected. "the"/"a"/"an" were in NEITHER source set,
+# which is exactly why a bare "The" used to pass validation.
+_CONTENTLESS_WORDS = _PRONOUNS | _BARE_DETERMINER_WORDS | {"the", "a", "an"}
+
 _QUANTITY_PREFIX_RE = re.compile(
     r"^(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
     r"multiple|several|numerous|various|many|few|some)\s+",
@@ -729,7 +1085,11 @@ def strip_quantity_prefix(text: str | None) -> str | None:
 
 def _clean_subject(raw: str) -> str:
     s = raw.strip().strip("\"'").strip()
-    s = re.sub(r"^(?:that|which|who|from|of|in|to)\s+", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(
+        r"^(?:that|which|who|from|of|in|to|involving|regarding|concerning|"
+        r"pertaining\s+to|relating\s+to|related\s+to|associated\s+with|about)\s+",
+        "", s, flags=re.IGNORECASE,
+    ).strip()
     s = re.sub(
         r"^(?:audit\s+trail\s+(?:proves|shows|confirms|establishes)|"
         r"scada\s+system\s+logs?\s+(?:establish|proves|shows|confirms)|"
@@ -748,6 +1108,12 @@ def _clean_subject(raw: str) -> str:
     s = _SELF_REFERENTIAL_EVIDENCE_PREFIX_RE.sub("", s).strip()
     s = _ACCORDING_TO_EVIDENCE_PREFIX_RE.sub("", s).strip()
     s = re.sub(r"^(?:a|an|the)\s+", "", s, flags=re.IGNORECASE).strip()
+    # Leading bare compliance-adjectives ("required", "applicable", "relevant"
+    # …) that describe a control/record without adding a distinguishing
+    # concept -- "required segregation-of-duties review" -> "segregation-of-
+    # duties review". Structural (adjective of obligation), not domain terms.
+    s = re.sub(r"^(?:required|applicable|relevant|necessary|mandatory|appropriate|prescribed|stipulated)\s+(?=\S)", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^(?:a|an|the)\s+", "", s, flags=re.IGNORECASE).strip()
     s = re.sub(r"^(?:from|of|in|to)\s+", "", s, flags=re.IGNORECASE).strip()
     s = _QUANTITY_PREFIX_RE.sub("", s).strip()
     s = re.sub(r"\s+", " ", s).strip(" ,.;:")
@@ -765,6 +1131,13 @@ def _clean_subject(raw: str) -> str:
     # ("checklist for" / "checklist between" / "checklist and").
     s = re.sub(r"\s+", " ", s).strip(" ,.;:")
     s = re.sub(r"\s*\b(?:for|between|during|on|at|in|and)\s*$", "", s, flags=re.IGNORECASE).strip(" ,.;:")
+    # A leading bare article with nothing after it ("The", "A") -- or a
+    # result that stripping/clause-removal reduced to nothing but a
+    # function word -- is not a subject. Return "" so the caller's
+    # `if cleaned:` / validate_semantic_subject guard takes the
+    # unresolved path instead of propagating "The".
+    if not s or s.lower() in _CONTENTLESS_WORDS:
+        return ""
     return s
 
 
@@ -779,7 +1152,10 @@ _ENTITY_RE = re.compile(
     # though it were an equipment/batch code, corrupting subject extraction
     # for any finding using such wording. A real code (EQ-104, BR-2026-0900,
     # SOP-ENG-002, MBR-4471) always contains a digit; a plain adjective
-    # compound never does.
+    # compound never does. The prefix is 1-5 letters, not 2-5: single-letter
+    # asset tags ("M-204", "T-14", "P-3", "L-5") are extremely common across
+    # maintenance / equipment / facilities findings, and the mandatory digit
+    # after the hyphen keeps ordinary words out ("x-ray" has no digit).
     #
     # F6 — Structural identifier validation: the same digit-requirement
     # guard applied to the bare PREFIX-SUFFIX alternative is now also applied
@@ -788,7 +1164,7 @@ _ENTITY_RE = re.compile(
     # A generic English noun following the label word ("batch record", "lot
     # file", "batch process") never does -- without this guard those phrases
     # were falsely extracted as entity IDs, corrupting the subject field.
-    r"\b([A-Z]{2,5}-[A-Z0-9-]*\d[A-Z0-9-]*"
+    r"\b([A-Z]{1,5}-[A-Z0-9-]*\d[A-Z0-9-]*"
     r"|Lot\s+[A-Z0-9-]*\d[A-Z0-9-]*"
     r"|Batch\s+[A-Z0-9-]*\d[A-Z0-9-]*"
     r"|Line\s+\d+|Room\s+\d+|Cleanroom\s+Suite\s+\d+|Suite\s+\d+|"
@@ -1313,11 +1689,28 @@ _ACTOR_NOUNS_RE = re.compile(
 )
 
 
+_ACTOR_AS_OBLIQUE_RE = re.compile(
+    r"\b(?:for|of|by|from|to|between|among|regarding|concerning|assigned\s+to|"
+    r"performed\s+by|held\s+by|granted\s+to)\s+(?:the\s+|a\s+|an\s+|each\s+|any\s+|this\s+)?$",
+    re.IGNORECASE,
+)
+
+
 def is_actor_noun(text: str | None) -> bool:
-    """True if text refers to personnel / actors rather than a controlled object."""
+    """True when `text` is HEADED by a personnel/actor noun (so it should not
+    be used as an affected object). An actor word that sits after a
+    preposition ("access for user U-77", "segregation of duties for approver
+    AP-2", "training for the operators") is an oblique CONTEXT role, not the
+    head -- the phrase's real subject is the noun before the preposition, so
+    the phrase is NOT actor-headed."""
     if not text:
         return False
-    return bool(_ACTOR_NOUNS_RE.search(text))
+    m = _ACTOR_NOUNS_RE.search(text)
+    if not m:
+        return False
+    if _ACTOR_AS_OBLIQUE_RE.search(text[: m.start()]):
+        return False
+    return True
 
 
 @dataclass
@@ -1373,6 +1766,12 @@ class DeviationInfo:
     # kept distinct from the POPULATION it recurred across, and from any
     # prior-action target -- never collapsed into one opaque object.
     occurrence_population: str | None = None
+    # Explicitly-stated QUANTITATIVE recurrence ("experienced three failures
+    # over a six-month period"): the stated count / event / period, preserved
+    # verbatim. NEVER a frequency, probability, or risk classification.
+    recurrence_count: int | None = None
+    recurrence_event: str | None = None
+    recurrence_period: str | None = None
     # Attributed-claim semantics (Section 2/3): the SOURCE who made a
     # statement and the causal PROPOSITION they offered are kept distinct
     # from the affected object/activity itself -- a person's explanation
@@ -1478,6 +1877,23 @@ _CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
             r"^(?P<subject>.+?)\s+contain(?:ed|s)\s+"
             r"(?P<cond>an\s+error|errors|an\s+incomplete\s+entry|incomplete\s+entries|"
             r"a\s+discrepancy|discrepancies)\b.*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # "The <X record/log/entry/document/file> contained/had/included
+        # <any defect>" -- when the grammatical subject is itself a
+        # record/document, the record IS the affected object (spec: preserve
+        # legitimate record-as-object cases). Structural: subject head noun
+        # is a record-type noun + a "contained/had/included" predicate.
+        "record_contained_defect",
+        re.compile(
+            r"^(?P<subject>.+?\b(?:record|records|log|logs|logbook|entry|entries|"
+            r"document|documents|documentation|file|files|form|forms|sheet|"
+            r"sheets|report|reports|certificate|register|worksheet|dataset)"
+            r"(?:\s+(?:for|of|on|in|from|covering)\s+[\w\s-]{1,40}?)?)\s+"
+            r"(?:contain(?:ed|s)|had|includ(?:ed|es))\s+"
+            r"(?P<cond>(?:an?\s+|the\s+)?[a-z][a-z\s-]{2,40}?)\s*\.?$",
             re.IGNORECASE,
         ),
     ),
@@ -1593,7 +2009,9 @@ def _entity_noun_phrase(text: str, entity: str) -> str | None:
         if match.group(2).upper() != entity.upper():
             continue
         noun_phrase = match.group(1).strip()
-        _stopwords = {"for", "the", "a", "an", "of", "to", "in", "on", "at", "and", "or", "with"}
+        _stopwords = {"for", "the", "a", "an", "of", "to", "in", "on", "at", "and", "or", "with",
+                      "involving", "regarding", "concerning", "about", "identified", "found",
+                      "observed", "noted", "affecting"}
         words = noun_phrase.split()
         last_stopword_idx = max(
             (i for i, w in enumerate(words) if w.lower() in _stopwords), default=-1
@@ -1724,6 +2142,29 @@ def _extract_activity_from_reported_finding(text: str) -> str:
     return "process compliance"
 
 
+_DISCREPANCY_UNIT = (
+    r"%|percent|pct|units?|pieces?|items?|counts?|records?|entries|transactions?|"
+    r"degrees?\s*[cf]?|°\s*[cf]|ppm|mm|cm|kg|g|l|ml|hours?|days?|minutes?"
+)
+# "<discrepancy-noun> of X <unit>" -- the comparison's own magnitude when the
+# finding names it as a noun ("a shortfall of 120 units", "a variance of 4.2%").
+# Noun-anchored so it never fires on an unrelated "of 5" / "by 3".
+_DISCREPANCY_NOUN_RE = re.compile(
+    r"\b(?:difference|discrepancy|variance|deviation|shortfall|shortage|"
+    r"deficit|deficiency|surplus|excess|overage|underage|gap|error|drop|increase|decrease)\s+"
+    r"(?:of\s+|was\s+|equal\s+to\s+|amounting\s+to\s+)"
+    r"(?P<qual>approximately|about|roughly|nearly|around|up\s+to)?\s*"
+    rf"(?P<val>\d+(?:\.\d+)?)\s*"
+    rf"(?P<unit>{_DISCREPANCY_UNIT})?",
+    re.IGNORECASE,
+)
+# "by X <unit>" magnitude -- only consulted AFTER a comparison verb has
+# already matched (so "by 3" alone never triggers it).
+_COMPARISON_BY_MAGNITUDE_RE = re.compile(
+    rf"\bby\s+(?P<qual>approximately|about|roughly|nearly|around|up\s+to)?\s*"
+    rf"(?P<val>\d+(?:\.\d+)?)\s*(?P<unit>{_DISCREPANCY_UNIT})?",
+    re.IGNORECASE,
+)
 _DISCREPANCY_RE = re.compile(
     r"\b(?:difference|discrepancy|variance|deviation)\s+(?:of\s+|was\s+)?"
     r"(?P<qual>approximately|about|roughly|nearly)?\s*"
@@ -1741,16 +2182,18 @@ def extract_measured_discrepancy(text: str) -> tuple[float, str | None, str | No
     figure and must never be handed to cost/financial analysis."""
     if not text:
         return None
-    m = _DISCREPANCY_RE.search(text)
+    m = _DISCREPANCY_RE.search(text) or _DISCREPANCY_NOUN_RE.search(text)
     if not m:
         return None
     try:
         val = float(m.group("val"))
     except (TypeError, ValueError):
         return None
-    unit_raw = (m.group("unit") or "").strip().lower()
-    if unit_raw in ("%", "percent"):
+    unit_raw = re.sub(r"\s+", " ", (m.groupdict().get("unit") or "").strip().lower())
+    if unit_raw in ("%", "percent", "pct"):
         unit = "%"
+    elif unit_raw in ("unit", "units"):
+        unit = "units"
     else:
         unit = unit_raw or None
     qualifier = (m.group("qual") or "").strip().lower() or None
@@ -1775,6 +2218,366 @@ _COMPARISON_SUBTYPE_RULES: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
+# Discrepancy nouns -> direction. shortfall/deficit = physical BELOW the
+# reference; surplus/excess = ABOVE; variance/difference/gap = direction
+# UNKNOWN (MISMATCH). Structural noun class, no domain vocabulary.
+_DISC_NOUN_BELOW = r"shortfall|shortage|deficit|deficiency|underage|shortpayment|drop|decrease|deficit"
+_DISC_NOUN_ABOVE = r"surplus|excess|overage|overpayment|increase|excess"
+_DISC_NOUN_NEUTRAL = r"variance|difference|discrepancy|gap|mismatch|disagreement|inconsistency|divergence|delta"
+_DISC_NOUN_ANY = rf"{_DISC_NOUN_BELOW}|{_DISC_NOUN_ABOVE}|{_DISC_NOUN_NEUTRAL}"
+_QC_REPORT_VERB = r"showed|shows|reported|reports|revealed|reveals|indicated|indicates|identified|found|had|has|recorded|records|contained|contains|reflected|reflects"
+_QC_REF_PREP = r"against|versus|vs\.?|compared\s+(?:to|with)|relative\s+to|from|below|above|over|under|with"
+
+_QUANTIFIED_DISC_FRAME_RE = re.compile(
+    rf"^\s*(?:the\s+|an?\s+)?(?P<left>[A-Za-z0-9][\w\s/'-]{{1,70}}?)\s+"
+    rf"(?:{_QC_REPORT_VERB})\s+(?:a\s+|an\s+|the\s+)?"
+    rf"(?P<noun>{_DISC_NOUN_ANY})\s+(?:of\s+)?"
+    rf"(?P<qual>approximately|about|roughly|nearly|around)?\s*"
+    rf"(?P<val>\d+(?:\.\d+)?)?\s*(?P<unit>{_DISCREPANCY_UNIT})?\s*"
+    rf"(?:{_QC_REF_PREP})\s+(?:the\s+|an?\s+)?(?P<right>[A-Za-z0-9][\w\s/'-]{{1,60}}?)\s*\.?\s*$",
+    re.IGNORECASE,
+)
+_QUANTIFIED_ABOVE_BELOW_RE = re.compile(
+    rf"^\s*(?:the\s+|an?\s+)?(?P<left>[A-Za-z0-9][\w\s/'-]{{1,70}}?)\s+"
+    rf"(?:was|were|is|are|came\s+in|measured)\s+"
+    rf"(?P<qual>approximately|about|roughly|nearly|around)?\s*"
+    rf"(?P<val>\d+(?:\.\d+)?)\s*(?P<unit>{_DISCREPANCY_UNIT})?\s*"
+    rf"(?P<dir>above|below|over|under|short\s+of|in\s+excess\s+of|higher\s+than|lower\s+than|"
+    rf"greater\s+than|less\s+than)\s+"
+    rf"(?:the\s+|an?\s+)?(?P<right>[A-Za-z0-9][\w\s/'-]{{1,60}}?)\s*\.?\s*$",
+    re.IGNORECASE,
+)
+_QUANTIFIED_VERB_BY_RE = re.compile(
+    rf"^\s*(?:the\s+|an?\s+)?(?P<left>[A-Za-z0-9][\w\s/'-]{{1,70}}?)\s+"
+    rf"(?P<dir>exceeded|fell\s+short\s+of|fell\s+below|dropped\s+below|came\s+in\s+below|"
+    rf"came\s+in\s+above|overshot|undershot)\s+"
+    rf"(?:the\s+|an?\s+)?(?P<right>[A-Za-z0-9][\w\s/'-]{{1,50}}?)\s+by\s+"
+    rf"(?P<qual>approximately|about|roughly|nearly|around)?\s*"
+    rf"(?P<val>\d+(?:\.\d+)?)\s*(?P<unit>{_DISCREPANCY_UNIT})?\s*\.?\s*$",
+    re.IGNORECASE,
+)
+_DIR_BELOW_RE = re.compile(rf"^(?:{_DISC_NOUN_BELOW})$|below|under|short\s+of|lower|less|fell\s+short|dropped|undershot", re.IGNORECASE)
+_DIR_ABOVE_RE = re.compile(rf"^(?:{_DISC_NOUN_ABOVE})$|above|over|in\s+excess|higher|greater|exceeded|overshot", re.IGNORECASE)
+
+
+def _norm_unit(u: str | None) -> str | None:
+    u = re.sub(r"\s+", " ", (u or "").strip().lower())
+    if u in ("%", "percent", "pct"):
+        return "%"
+    if u in ("unit", "units"):
+        return "units"
+    return u or None
+
+
+def _extract_quantified_comparison(text: str) -> dict | None:
+    """Structural extraction of a quantified comparison the verb-only
+    comparison branch misses. Returns a dict with left/right/noun/type/
+    magnitude/unit/qualifier, or None. Direction is taken ONLY from the
+    stated noun or preposition -- never inferred for a bare "differed"."""
+    for sent in _SENTENCE_SPLIT_RE.split((text or "").strip()):
+        s = _strip_framing(sent.strip())
+        for rx, kind in (
+            (_QUANTIFIED_DISC_FRAME_RE, "noun_frame"),
+            (_QUANTIFIED_ABOVE_BELOW_RE, "above_below"),
+            (_QUANTIFIED_VERB_BY_RE, "verb_by"),
+        ):
+            m = rx.match(s)
+            if not m:
+                continue
+            g = m.groupdict()
+            _dir_src = (g.get("noun") or g.get("dir") or "").lower()
+            if _DIR_BELOW_RE.search(_dir_src):
+                ctype = "BELOW"
+            elif _DIR_ABOVE_RE.search(_dir_src):
+                ctype = "EXCEEDED"
+            else:
+                ctype = "MISMATCH"
+            val = None
+            if g.get("val"):
+                try:
+                    val = float(g["val"])
+                except ValueError:
+                    val = None
+            noun = (g.get("noun") or "").lower() or {
+                "BELOW": "shortfall", "EXCEEDED": "excess",
+            }.get(ctype, "difference")
+            # "The reconciliation/comparison/count/review OF <X> showed a
+            # shortfall" -- the audit ACTIVITY that produced the comparison
+            # is not the affected subject; <X> is. Strip it structurally
+            # (an evidence-source noun + of/for/between), never a domain word.
+            _left = re.sub(
+                rf"^(?:the\s+|a\s+|an\s+)?(?:{_EVIDENCE_SOURCE_NOUNS})\s+"
+                r"(?:of|for|between|on|across)\s+(?:the\s+)?",
+                "", g["left"].strip(), flags=re.IGNORECASE,
+            ).strip()
+            return {
+                "left": _left or g["left"].strip(),
+                "right": g["right"].strip(),
+                "noun": noun,
+                "type": ctype,
+                "magnitude": val,
+                "unit": _norm_unit(g.get("unit")),
+                "qualifier": (g.get("qual") or "").strip().lower() or None,
+            }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# DUAL INDEPENDENT ASSESSMENT with explicitly-UNRESOLVED comparability.
+#
+# Structural shape (domain-neutral): the finding reports TWO separate
+# quantified assessments of the same underlying object, each attributed to
+# its own source, and then states that their comparability has NOT been
+# established ("the scope had not been confirmed to match", "the
+# populations were not confirmed comparable", "the methods were not
+# confirmed equivalent", "the quotation scope remained under review",
+# "had not been reconciled").
+#
+# Semantic consequences (all enforced here so no downstream node has to
+# re-derive them):
+#   * SUBJECT  = the substantive object being assessed -- never a source
+#                noun ("Engineering", "Procurement"), an actor role, or a
+#                measurement artifact ("engineering estimate", "supplier
+#                quotation"). When no substantive object is named the
+#                resolver returns None here and falls through (it never
+#                promotes a source / artifact to keep this branch alive).
+#   * CONDITION = the two magnitudes are not yet confirmed comparable --
+#                NOT "X was not used as required" (there is no stated
+#                requirement) and NOT an established overrun / loss.
+#   * Both magnitudes and their provenance are conserved in
+#     comparison_left / comparison_right / comparison_basis.
+# ---------------------------------------------------------------------------
+_ASSESS_VERB_RE = (
+    r"estimated|estimates|projected|projects|calculated|calculates|"
+    r"quoted|quotes|proposed|proposes|forecast|forecasted|forecasts|"
+    r"assessed|assesses|reported|reports|obtained|showed|shows|"
+    r"recorded|records|measured|measures|priced|prices|budgeted|"
+    r"appraised|valued|indicated|indicates|put"
+)
+_ASSESS_VERB_TO_ARTIFACT = {
+    "estimate": "estimate", "estimated": "estimate", "estimates": "estimate",
+    "project": "projection", "projected": "projection", "projects": "projection",
+    "calculate": "calculation", "calculated": "calculation", "calculates": "calculation",
+    "quote": "quotation", "quoted": "quotation", "quotes": "quotation",
+    "propose": "proposal", "proposed": "proposal", "proposes": "proposal",
+    "forecast": "forecast", "forecasted": "forecast", "forecasts": "forecast",
+    "assess": "assessment", "assessed": "assessment", "assesses": "assessment",
+    "report": "report", "reported": "report", "reports": "report",
+    "obtain": "quotation", "obtained": "quotation",
+    "show": "figure", "showed": "figure", "shows": "figure",
+    "record": "record", "recorded": "record", "records": "record",
+    "measure": "measurement", "measured": "measurement", "measures": "measurement",
+    "price": "price", "priced": "price",
+    "budget": "budget", "budgeted": "budget",
+    "value": "valuation", "valued": "valuation",
+    "put": "figure",
+}
+_MAGNITUDE_RE = (
+    r"(?:(?:₹|\$|€|£|Rs\.?|INR|USD|EUR|GBP)\s?\d[\d,]*(?:\.\d+)?"
+    r"(?:\s?(?:lakh|lakhs|crore|crores|million|billion|thousand|k|m|bn))?"
+    r"|\d[\d,]*(?:\.\d+)?\s?(?:%|(?:percent|per\s+cent|"
+    r"hours?|hrs?|days?|weeks?|months?|units?|lakh|lakhs|crore|crores|"
+    r"million|billion|thousand|k)\b)"
+    r"|(?<![A-Za-z0-9])[XYZ](?![A-Za-z0-9]))"
+)
+_ASSESSMENT_MENTION_RE = re.compile(
+    rf"(?P<src>[A-Za-z][\w.-]*(?:\s+[a-z][\w.-]*){{0,2}}?)\s+"
+    rf"(?:(?:had|has|have)\s+)?(?P<verb>{_ASSESS_VERB_RE})\s+"
+    rf"(?P<mid>(?:(?!\b(?:{_ASSESS_VERB_RE})\b)[^.;])*?)"
+    rf"(?P<mag>{_MAGNITUDE_RE})",
+    re.IGNORECASE,
+)
+_ASSESSMENT_NOMINAL_RE = re.compile(
+    rf"(?:the\s+|an?\s+)?(?P<src>(?:[a-z][\w-]*\s+){{0,2}}?)"
+    rf"(?P<art>estimate|quotation|quote|projection|forecast|proposal|bid|"
+    rf"budget|valuation|appraisal|tender|figure|price)\s+"
+    rf"(?:was|were|of|came\s+to|stood\s+at|is|totall?ed|amounted\s+to)\s+"
+    rf"(?P<mag>{_MAGNITUDE_RE})",
+    re.IGNORECASE,
+)
+_UNRESOLVED_COMPARABILITY_RE = re.compile(
+    r"(?:"
+    r"\bnot\s+(?:yet\s+)?(?:been\s+)?(?:confirmed|reconciled|established|verified|"
+    r"validated|aligned|determined)\b"
+    r"|\b(?:had|have|has)\s+not\s+been\s+reconciled\b"
+    r"|\bremained?\s+(?:under|pending)\s+review\b"
+    r"|\b(?:were|was|are|is)\s+(?:still\s+)?(?:under|pending)\s+review\b"
+    r"|\bnot\s+(?:yet\s+)?(?:confirmed\s+)?(?:comparable|equivalent)\b"
+    r"|\bnot\s+(?:yet\s+)?confirmed\s+to\s+(?:match|be\s+(?:equivalent|comparable))\b"
+    r"|\bcomparability\s+(?:had|has|was|were)\s+not\b"
+    r")",
+    re.IGNORECASE,
+)
+# Comparability HEAD noun -- the dimension whose alignment is unconfirmed.
+_COMPARABILITY_HEAD_RE = re.compile(
+    r"\b(?:scope|scopes|basis|bases|population|populations|method|methods|"
+    r"assumptions?|coverage|work\s+scope|methodolog\w*|approach)\b",
+    re.IGNORECASE,
+)
+
+
+def _measurement_artifact_head(np: str | None) -> bool:
+    """True when `np` is a MEASUREMENT / ASSESSMENT ARTIFACT rather than a
+    substantive affected object -- e.g. "engineering estimate", "supplier
+    quotation", "the internal estimate", "contractor quote", "budget
+    figure". Structural: (source / provenance modifier)? + artifact head
+    noun. Never fires on a bare substantive noun ("the module", "the
+    project")."""
+    if not np:
+        return False
+    s = np.strip().lower()
+    s = re.sub(r"^(?:the|a|an|its|their|his|her)\s+", "", s)
+    return bool(re.match(
+        r"^(?:[a-z][\w-]*\s+){0,3}?"
+        r"(?:estimate|estimates|quotation|quotations|quote|quotes|projection|"
+        r"projections|forecast|forecasts|appraisal|valuation|bid|bids|"
+        r"proposal|proposals|figure|figures|tender|tenders|costing)$",
+        s,
+    ))
+
+
+def _subject_from_assessment_mid(mid: str, tail: str) -> str | None:
+    """Isolate the substantive object being assessed from the text between
+    the assessment verb and its magnitude (`mid`), falling back to the
+    text immediately after the magnitude (`tail`) -- e.g.
+      "that replacement of the equipment control module would cost "  -> "replacement of the equipment control module"
+      "the project at "                                               -> "the project"
+      "repair at "                                                    -> "repair"
+      "" / "for the migration"                                        -> "the migration"
+      "" / " defect rate"                                             -> "defect rate".
+    Returns a validated noun phrase or None (never a source / artifact)."""
+    candidates: list[str] = []
+    m = (mid or "").strip()
+    m = re.sub(r"^(?:that|the\s+cost\s+of|a\s+cost\s+of)\s+", "", m, flags=re.IGNORECASE)
+    m = re.sub(
+        r"\s+(?:would|will|to)\s+(?:cost|be|total|come\s+to|amount\s+to|require|take).*$",
+        "", m, flags=re.IGNORECASE,
+    ).strip()
+    m = re.sub(r"\s+(?:at|of|for|to\s+be|would\s+be|was|were|is|are)$", "", m, flags=re.IGNORECASE).strip()
+    m = re.sub(r"^(?:a|an|approximately|about|roughly|around|nearly)\s+", "", m, flags=re.IGNORECASE).strip()
+    if m:
+        candidates.append(m)
+    t = (tail or "").strip().strip(".;,")
+    # cut the tail at the first clause boundary / comparison connector so a
+    # greedy match cannot swallow the second assessment ("migration, while
+    # the vendor proposed 40 hours ...").
+    t = re.split(
+        r"\s*(?:[,;]|\bwhile\b|\bwhereas\b|\bbut\b|\band\b|\bcompared\b|\bthan\b|\bagainst\b)\s*",
+        t, maxsplit=1, flags=re.IGNORECASE,
+    )[0].strip()
+    t_for = re.match(r"^(?:approximately\s+|about\s+)?(?:for|on|of)\s+(?:the\s+|an?\s+)?(.+)$", t, re.IGNORECASE)
+    if t_for:
+        candidates.append(t_for.group(1).strip())
+    elif t and not re.match(r"^(?:while|whereas|but|and)\b", t, re.IGNORECASE):
+        # trailing noun immediately after the magnitude ("2% defect rate")
+        t_noun = re.match(r"^([a-z][\w-]*(?:\s+[a-z][\w-]*){0,3})", t, re.IGNORECASE)
+        if t_noun:
+            candidates.append(t_noun.group(1).strip())
+    for c in candidates:
+        c = _clean_subject(c) or c
+        c = strip_leading_article(c) or c
+        c = c.strip(" .,;:")
+        if not c or len(c) < 3:
+            continue
+        if is_actor_noun(c) or _measurement_artifact_head(c):
+            continue
+        if not validate_semantic_subject(c):
+            continue
+        return c
+    return None
+
+
+def _extract_dual_assessment_comparison(text: str) -> dict | None:
+    """Detect the "two independent quantified assessments, comparability
+    explicitly unresolved" finding shape. Returns a dict with subject /
+    left / right / basis / condition, or None."""
+    if not text or not text.strip():
+        return None
+    if not _UNRESOLVED_COMPARABILITY_RE.search(text):
+        return None
+    mentions: list[dict] = []
+    for m in _ASSESSMENT_MENTION_RE.finditer(text):
+        src = m.group("src").strip().strip(".,;:")
+        verb = m.group("verb").strip().lower()
+        mag = re.sub(r"\s+", " ", m.group("mag").strip())
+        mid = m.group("mid") or ""
+        tail = text[m.end():m.end() + 80]
+        mentions.append({"src": src, "verb": verb, "mag": mag, "mid": mid, "tail": tail})
+    for m in _ASSESSMENT_NOMINAL_RE.finditer(text):
+        art = m.group("art").lower()
+        art = "quotation" if art == "quote" else art
+        mag = re.sub(r"\s+", " ", m.group("mag").strip())
+        src = (m.group("src") or "").strip().strip(".,;:")
+        mentions.append({
+            "src": (src + " " + art).strip(), "verb": "", "mag": mag,
+            "mid": f"the {src} {art} ".strip(), "tail": text[m.end():m.end() + 80],
+            "_nominal_art": art,
+        })
+    # de-duplicate on magnitude text; require at least two distinct
+    # assessments (an unresolved-comparability clause alone is not enough).
+    seen: set[str] = set()
+    uniq: list[dict] = []
+    for mm in mentions:
+        key = mm["mag"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(mm)
+    if len(uniq) < 2:
+        return None
+    a, b = uniq[0], uniq[1]
+
+    def _artifact(mm: dict) -> str:
+        art = _ASSESS_VERB_TO_ARTIFACT.get(mm["verb"], "figure")
+        # honour an explicit artifact noun in the span ("a supplier quotation of")
+        exp = re.search(
+            r"\b(estimate|quotation|quote|projection|forecast|proposal|bid|"
+            r"budget|valuation|appraisal|tender|figure|price)\b",
+            mm["mid"], re.IGNORECASE,
+        )
+        if exp:
+            art = exp.group(1).lower()
+            if art == "quote":
+                art = "quotation"
+        mod = re.search(
+            r"\b(supplier|vendor|contractor|internal|external|independent|"
+            r"engineering|preliminary|revised|original|in-house|third-party)\b",
+            (mm["src"] + " " + mm["mid"]), re.IGNORECASE,
+        )
+        src_word = mm["src"].split()[-1].lower() if mm["src"] else ""
+        if mod:
+            return f"{mod.group(1).lower()} {art}"
+        if src_word and src_word not in ("the", "a", "an", "it", "they"):
+            return f"{src_word} {art}"
+        return art
+
+    left_art, right_art = _artifact(a), _artifact(b)
+    left = f"{left_art} of {a['mag']}"
+    right = f"{right_art} of {b['mag']}"
+    subject = (
+        _subject_from_assessment_mid(a["mid"], a["tail"])
+        or _subject_from_assessment_mid(b["mid"], b["tail"])
+    )
+    if not subject:
+        return None
+    basis = f"{left_art} vs {right_art}"
+    condition = f"{left} not yet confirmed comparable to {right}"
+    head = _COMPARABILITY_HEAD_RE.search(text)
+    if head:
+        condition = (
+            f"{head.group(0).lower()} of the {left_art} and {right_art} "
+            f"not yet confirmed comparable ({a['mag']} vs {b['mag']})"
+        )
+    return {
+        "subject": subject,
+        "left": left,
+        "right": right,
+        "basis": basis,
+        "condition": condition,
+        "magnitudes": [a["mag"], b["mag"]],
+    }
+
+
 def classify_comparison_subtype(left: str | None, right: str | None, basis: str | None = None) -> str:
     """Classify a comparison/mismatch finding into a specific investigation
     FRAMEWORK based on the compared phrases' own vocabulary. Returns
@@ -1786,6 +2589,176 @@ def classify_comparison_subtype(left: str | None, right: str | None, basis: str 
         if pattern.search(combined):
             return subtype
     return "UNKNOWN_COMPARISON"
+
+
+_PROP_STATE_RE = re.compile(
+    r"^(?P<np>.+?)\s+(?:was|were|is|are|"
+    r"had(?:\s+not|\s+never)?\s+been|have(?:\s+not|\s+never)?\s+been|has(?:\s+not|\s+never)?\s+been)\s+"
+    r"(?:not\s+|never\s+|ever\s+)?(?P<part>[a-z]+(?:ed|en))\b",
+    re.IGNORECASE,
+)
+_PROP_ACTIVE_RE = re.compile(r"^(?P<np>.+?)\s+(?P<verb>[a-z]+ed)\b", re.IGNORECASE)
+
+# Evaluative / degree modifiers that mark a phrase as describing HOW WELL a
+# relation was carried out -- i.e. a CONDITION, not a subject. Grammatical
+# category (adjectives of deficient degree), not domain vocabulary.
+_CONDITION_MODIFIER = (
+    r"inconsistent|inadequate|incomplete|insufficient|ineffective|poor|weak|lax|"
+    r"limited|partial|sporadic|deficient|substandard|unsatisfactory|nonexistent|"
+    r"minimal|patchy|uneven|erratic|unreliable|questionable|marginal|"
+    r"intermittent|haphazard|unclear|ambiguous|informal|undocumented"
+)
+# Relational-noun heads: a nominalization suffix, or a small closed set of
+# irregular nouns that take an "of/with/to" complement naming their patient.
+_RELATIONAL_CONTROL_HEADS = {
+    "compliance", "adherence", "conformance", "conformity", "enforcement",
+    "oversight", "control", "monitoring", "segregation", "governance",
+    "supervision", "administration", "management", "stewardship",
+}
+_RELATIONAL_HEAD = (
+    r"[a-z]{4,}(?:ance|ence|tion|sion|ment|ing|ity)"
+    r"|compliance|oversight|control|use|review|care|upkeep|conduct|"
+    r"segregation|adherence|governance|handling|awareness|understanding"
+)
+_CONDITION_NOMINALIZATION_RE = re.compile(
+    r"^\s*(?:there\s+(?:was|were|is|are|has\s+been|have\s+been)\s+)?"
+    r"(?:(?:a|an|the|widespread|systemic|repeated|ongoing|general|apparent)\s+)?"
+    rf"(?:(?P<mod>{_CONDITION_MODIFIER})\s+"
+    r"|(?:lack|failure|absence|breakdown|gap|gaps|shortfall|deficiency|weakness|"
+    r"deterioration|erosion|loss)\s+(?:of|in)\s+)"
+    rf"(?P<head>(?:{_RELATIONAL_HEAD}))\s+"
+    r"(?:with|of|to|in|for|over|regarding|concerning|around|across)\s+"
+    r"(?P<obj>.+?)\s*\.?\s*$",
+    re.IGNORECASE,
+)
+
+# "The requirement / obligation / expectation / duty TO <verb> <object>
+# (FOR <entity>) was not met/fulfilled/satisfied" -- a REQUIREMENT
+# statement. The subject is the requirement's object (or the entity it
+# applies to), never the requirement phrase itself.
+_REQUIREMENT_NOT_MET_RE = re.compile(
+    r"^\s*(?:the\s+|a\s+|an\s+)?(?:documented\s+|applicable\s+|approved\s+|"
+    r"stated\s+)?(?:requirement|obligation|expectation|duty|need|mandate|"
+    r"standard|policy|rule|control|expectation)s?\s+"
+    r"(?:to\s+(?P<verb>[a-z]+)\s+(?P<obj>.+?)"
+    r"|(?:for|regarding|concerning|around|on|covering)\s+(?P<obj2>.+?))"
+    r"\s+(?:was|were|is|are|has\s+been|have\s+been|had\s+been)\s+not\s+"
+    r"(?:met|fulfilled|satisfied|achieved|maintained|adhered\s+to|complied\s+with|"
+    r"observed|followed|enforced|applied)\b.*$",
+    re.IGNORECASE,
+)
+
+# Contrastive / additive connector joining an OBSERVED EVENT clause to a
+# DEFICIENCY clause ("a procedure was revised, BUT the validation was not
+# documented"; "the release proceeded EVEN THOUGH the review had not been
+# completed"; "a change was deployed; the required review was not
+# evidenced"). Semicolon included. Purely structural discourse markers.
+_CONTRASTIVE_SPLIT_RE = re.compile(
+    r"\s*(?:;|,?\s+(?:but|yet|however|although|though|even\s+though|even\s+when|"
+    r"whereas|despite\s+(?:the\s+fact\s+)?that|notwithstanding\s+that|"
+    r"in\s+spite\s+of\s+(?:the\s+fact\s+)?that))\s+",
+    re.IGNORECASE,
+)
+# A DEFICIENCY predicate: a required compliance activity / record / state
+# was not satisfied. The verb list is the generic compliance-activity class
+# already used by _MISSING_RECORD_VERB_RE / _TRANSITIVE_FAILED_TO_VERBS --
+# grammar of audit deficiency, not any domain's vocabulary.
+_DEFICIENCY_VERB = (
+    r"document|record|log|eviden|complet|perform|conduct|execut|approv|"
+    r"review|verif|authoriz|assess|updat|renew|calibrat|sign|obtain|"
+    r"establish|maintain|retain|escalat|reconcil|validat|qualif|inspect|"
+    r"test|monitor|trend|close|resolve|address|implement|track"
+)
+_DEFICIENCY_PREDICATE_RE = re.compile(
+    # explicit negation immediately before a compliance verb -- "was NOT
+    # recorded", "had NOT been completed", "did NOT perform", "never
+    # verified". A bare "was performed" (an accomplished action) is NOT a
+    # deficiency and must not match.
+    rf"\b(?:not|never)\s+(?:yet\s+)?(?:been\s+|fully\s+|properly\s+)?(?:{_DEFICIENCY_VERB})\w*\b"
+    # deficiency STATES
+    r"|\b(?:was|were|is|are|remained?|remains|is\s+still|are\s+still)\s+"
+    r"(?:overdue|missing|incomplete|absent|unavailable|expired|outstanding|"
+    r"pending|lapsed|out\s+of\s+date|not\s+on\s+file|not\s+available|"
+    r"not\s+in\s+place|nowhere\s+to\s+be\s+found)\b"
+    r"|\b(?:no|without\s+(?:any\s+)?)(?:documented\s+)?(?:record|documentation|"
+    r"evidence|approval|review|sign-?off|authorization|assessment)\b"
+    r"|\b(?:lacks?|lacked)\s+(?:a\s+|any\s+|the\s+)?(?:documented\s+)?"
+    r"(?:record|documentation|evidence|approval|review)\b",
+    re.IGNORECASE,
+)
+
+
+# Small closed VERB -> NOUN map (grammar, not domain vocabulary) for naming
+# the activity that a negated reporting frame says was not demonstrated.
+_PARTICIPLE_TO_NOUN = {
+    "evaluated": "evaluation", "assessed": "assessment", "reviewed": "review",
+    "investigated": "investigation", "performed": "performance",
+    "conducted": "conduct", "completed": "completion", "documented": "documentation",
+    "analyzed": "analysis", "analysed": "analysis", "verified": "verification",
+    "tested": "testing", "inspected": "inspection", "approved": "approval",
+    "calibrated": "calibration", "trended": "trending", "escalated": "escalation",
+    "reconciled": "reconciliation", "monitored": "monitoring",
+}
+_ACTIVITY_NOUN_TAILS = set(_PARTICIPLE_TO_NOUN.values()) | {"check", "control", "action", "step"}
+
+# Verbs that, AFTER "<record-noun> did not", are unambiguously reporting/
+# attestation verbs (unlike the general set, "record"/"contain"/"note" are
+# safe here because the subject is already an explicit record store).
+_NEG_REPORTING_VERB = (
+    r"show|shows|demonstrate|demonstrates|confirm|confirms|indicate|indicates|"
+    r"establish|establishes|reflect|reflects|evidence|evidences|reveal|reveals|"
+    r"prove|proves|record|records|capture|captures|contain|contains|note|notes|"
+    r"document|documents|support|supports|verify|verifies|identify|identifies|"
+    r"substantiate|substantiates|include|includes"
+)
+
+
+def _proposition_subject_and_condition(
+    prop: str, entities: list[str] | None = None,
+) -> tuple[str | None, str, str | None]:
+    """Given the PROPOSITION of a negated reporting frame ("<X> was
+    evaluated", "corrective action was taken"), return
+    (affected_subject, observed_condition, missing_activity_phrase). The
+    subject is the entity the proposition concerns -- preferring an explicit
+    identifier inside it; the condition is the negated participle ("not
+    evaluated"); the activity phrase names what the records failed to
+    establish. Pure structure, no domain vocabulary."""
+    prop = (prop or "").strip().rstrip(".")
+    _default = (None, "not established by the available records", None)
+    if not prop:
+        return _default
+    entities = entities or []
+    m = _PROP_STATE_RE.match(prop) or _PROP_ACTIVE_RE.match(prop)
+    np_raw = m.group("np") if m else prop
+    part = (m.groupdict().get("part") or m.groupdict().get("verb") or "").lower() if m else ""
+    _cond = f"not {part}" if part else "not established by the available records"
+
+    subject: str | None = None
+    for _ent in entities:
+        _np = _entity_noun_phrase(prop, _ent)
+        if _np and validate_semantic_subject(_np):
+            subject = _np
+            break
+    if subject is None:
+        np_clean = _clean_subject(np_raw) or ""
+        np_clean = re.sub(r"^(?:a|an|the|any|that|this|each|all|whether)\s+", "", np_clean, flags=re.IGNORECASE).strip()
+        if np_clean and validate_semantic_subject(np_clean):
+            subject = np_clean
+
+    # Name the activity the records failed to establish.
+    _activity: str | None = None
+    _np_for_activity = _clean_subject(np_raw) or ""
+    _np_for_activity = re.sub(r"^(?:a|an|the|any|that|this)\s+", "", _np_for_activity, flags=re.IGNORECASE).strip()
+    if _np_for_activity:
+        _tail = _np_for_activity.rsplit(" ", 1)[-1].lower()
+        if _tail in _ACTIVITY_NOUN_TAILS:
+            _activity = _np_for_activity  # already names the activity ("corrective action")
+        elif part in _PARTICIPLE_TO_NOUN:
+            _activity = f"{_PARTICIPLE_TO_NOUN[part]} of {_np_for_activity}"
+    if _activity is None and part in _PARTICIPLE_TO_NOUN:
+        _activity = _PARTICIPLE_TO_NOUN[part]
+
+    return subject, _cond, _activity
 
 
 def extract_semantic_subject(text: str) -> DeviationInfo:
@@ -1806,6 +2779,160 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
     _referenced_doc_sentences = {
         span for _doc_type, span in detect_referenced_unavailable_documents(text)
     }
+
+    # 00. Compound "<observed event> <contrastive> <deficiency>": the
+    # finding's actual subject is the DEFICIENCY (a required control / record
+    # / activity not satisfied), not the event. Split on the discourse
+    # marker and resolve from the deficiency clause; keep the event clause as
+    # `relevant_change`. Only fires when exactly ONE side carries a
+    # deficiency predicate -- otherwise the normal path runs. Recursion is
+    # single-level (the deficiency clause has no contrastive marker of its
+    # own) and guarded against re-processing the whole text.
+    # Only within a SINGLE sentence -- a ", but" inside the finding's SECOND
+    # sentence must not fold the first sentence into an "event clause".
+    _single_sentence = len([s for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]) <= 1
+    if _single_sentence and _CONTRASTIVE_SPLIT_RE.search(text):
+        _parts = [p.strip(" ,.;:") for p in _CONTRASTIVE_SPLIT_RE.split(text) if p and p.strip(" ,.;:")]
+        # Fire ONLY for the event-then-deficiency order ("<event> BUT
+        # <deficiency>"). The deficiency-then-downstream-action order
+        # ("<X was not documented> THOUGH <the change was deployed>") is
+        # already handled by the 0d missing-record branch below, which also
+        # sets downstream_action_present -- don't pre-empt it. Also skip when
+        # the deficiency clause is a referenced-document-unavailable note
+        # ("... but the report was not available"), which the evidence-
+        # boundary layer handles separately.
+        if (
+            len(_parts) == 2
+            and _DEFICIENCY_PREDICATE_RE.search(_parts[1])
+            and not _DEFICIENCY_PREDICATE_RE.search(_parts[0])
+            and not detect_referenced_unavailable_documents(_parts[1])
+        ):
+            _def = [_parts[1]]
+            _evt = [_parts[0]]
+            if _def[0].lower() != text.strip().lower():
+                _chg = _clean_subject(_evt[0])
+                _chg = (_chg[0].upper() + _chg[1:]) if _chg and validate_semantic_subject(_chg) else None
+                # The finding's primary actor lives in the EVENT clause ("the
+                # Operator logged ...") -- carry it, not the deficiency
+                # clause's reporter ("supervisor reported ...").
+                _evt_actors = extract_actors(_evt[0])
+
+                _recur = extract_semantic_subject(_def[0])
+                if _recur.matched and _recur.subject and validate_semantic_subject(_recur.subject):
+                    _recur.entities = _recur.entities or entities
+                    _recur.date = _recur.date or date
+                    _recur.relevant_change = _recur.relevant_change or _chg
+                    if _evt_actors:
+                        _recur.actor = _evt_actors[0]
+                        _recur.actors = _evt_actors + [a for a in (_recur.actors or actors) if a not in _evt_actors]
+                    else:
+                        _recur.actors = _recur.actors or actors
+                    return _recur
+
+                # Structured resolvers didn't match (e.g. "the review HAD NOT
+                # BEEN completed") -- fall back to the proposition analyser
+                # used by the negated-reporting-frame branch.
+                _dsub, _dcond, _dact = _proposition_subject_and_condition(
+                    re.sub(r"^\s*(?:the\s+required\s+|a\s+required\s+|the\s+|a\s+|an\s+)", "", _def[0], flags=re.IGNORECASE),
+                    entities,
+                )
+                if _dsub and validate_semantic_subject(_dsub) and not is_actor_noun(_dsub):
+                    _dsub_cap = _dsub[0].upper() + _dsub[1:]
+                    _dactivity = _dact or _dsub
+                    return DeviationInfo(
+                        subject=_dsub, finding_subject=_dsub, affected_object=_dsub_cap,
+                        affected_process=f"{topic_word(_dactivity).capitalize()} and record control",
+                        affected_activity=_dactivity[0].upper() + _dactivity[1:],
+                        deviation=f"The {_dactivity} was {_dcond}",
+                        condition=_dcond, date=date,
+                        actor=actors[0] if actors else None, actors=actors, entities=entities,
+                        semantic_type="MISSING_RECORD", matched=True,
+                        missing_record_activity=_dactivity, requirement_status="STATED",
+                        relevant_change=_chg,
+                    )
+
+    # 0aa. CONDITION-NOMINALIZATION as grammatical subject:
+    # "<evaluative> <relational-noun> <of/with/to> <object>" -- e.g.
+    # "inconsistent compliance WITH the gowning procedure", "poor adherence
+    # TO the change-control process", "lack of oversight OF contractor
+    # access". The head is a nominalized RELATION whose of/with/to
+    # complement is the semantic patient; the "<evaluative> <head>" phrase
+    # is the OBSERVED CONDITION, not the affected subject. Structural: an
+    # evaluative/degree modifier (or a "lack/failure/absence of" frame) on a
+    # noun whose head is a nominalization suffix or a small set of irregular
+    # relational nouns, followed by a prepositional object. NOT a phrase
+    # like "a missing record" (concrete artifact head, no of/with
+    # complement) -- those legitimately stay the subject.
+    _rnm = _REQUIREMENT_NOT_MET_RE.match(_strip_framing(text.strip()))
+    if _rnm:
+        _rnm_region = (_rnm.group("obj") or _rnm.group("obj2") or "").strip()
+        _rnm_region = re.split(
+            r"\s+(?:was|were|is|are|for\s+(?:the\s+|a\s+|an\s+)?[a-z]|during|"
+            r"in\s+the|across|which|that)\b",
+            _rnm_region, maxsplit=1, flags=re.IGNORECASE,
+        )[0].strip(" ,.;:")
+        _rnm_region = re.sub(
+            r"\s+(?:monthly|annually|yearly|quarterly|weekly|daily|biweekly|"
+            r"semi-?annually|periodically|regularly|routinely|promptly|timely)\s*$",
+            "", _rnm_region, flags=re.IGNORECASE,
+        ).strip()
+        _rnm_sub, _rnm_cond, _ = _proposition_subject_and_condition(_rnm_region, entities)
+        _rnm_sub = _rnm_sub or (
+            _entity_noun_phrase(text, entities[0]) if entities else None
+        ) or _clean_subject(_rnm_region)
+        _rnm_verb = (_rnm.group("verb") or "").lower()
+        if _rnm_sub and validate_semantic_subject(_rnm_sub) and not is_actor_noun(_rnm_sub):
+            _rnm_cap = _rnm_sub[0].upper() + _rnm_sub[1:]
+            _rnm_c = f"{_rnm_verb} requirement not met" if _rnm_verb else "required condition not met"
+            return DeviationInfo(
+                subject=_rnm_sub, finding_subject=_rnm_sub, affected_object=_rnm_cap,
+                affected_process=f"{topic_word(_rnm_sub).capitalize()} compliance and control",
+                affected_activity=_rnm_cap, deviation=f"{_rnm_cap} — {_rnm_c}",
+                condition=_rnm_c, date=date,
+                actor=actors[0] if actors else None, actors=actors, entities=entities,
+                semantic_type="OBSERVATION_VERIFICATION", matched=True, requirement_status="STATED",
+            )
+
+    _cn = _CONDITION_NOMINALIZATION_RE.match(_strip_framing(text.strip()))
+    if _cn:
+        _obj_region = _cn.group("obj").strip()
+        # trim at the first deviation predicate / subordinator / temporal /
+        # scope clause -- location/population scope ("in the fill area",
+        # "across three departments") is NOT part of the affected subject.
+        _obj_region = re.split(
+            r"\s+(?:was|were|is|are|has|have|had|which|that|resulting|leading|"
+            r"contributing|during|across|within|throughout|following|after|"
+            r"before|since|because|due\s+to|in\s+(?:the|a|an|several|multiple|"
+            r"[0-9]|two|three|four|five|six|seven|eight|nine|ten|various|"
+            r"certain|some|all)\b)\b",
+            _obj_region, maxsplit=1, flags=re.IGNORECASE,
+        )[0].strip(" ,.;:")
+        _cn_obj = _clean_subject(_obj_region)
+        # A bare generic complement ("duties", "records", "access") keeps its
+        # relational head so the subject reads naturally ("segregation of
+        # duties", not "duties").
+        if _cn_obj and len(_cn_obj.split()) == 1 and _cn_obj.lower() in {
+            "duties", "responsibilities", "roles", "access", "records",
+            "documentation", "activities", "tasks", "functions", "controls",
+        }:
+            _cn_obj = f"{_cn.group('head').strip().lower()} of {_cn_obj}"
+        _cn_cond_head = (_cn.group("head") or "").strip().lower()
+        _cn_mod = (_cn.group("mod") or "").strip().lower()
+        _cn_cond = (f"{_cn_mod} {_cn_cond_head}" if _cn_mod else f"insufficient {_cn_cond_head}").strip()
+        if _cn_obj and validate_semantic_subject(_cn_obj) and not is_actor_noun(_cn_obj):
+            _cn_cap = _cn_obj[0].upper() + _cn_obj[1:]
+            _cn_pop, _ = extract_population_clause(text)
+            return DeviationInfo(
+                subject=_cn_obj, finding_subject=_cn_obj, affected_object=_cn_cap,
+                affected_process=f"{topic_word(_cn_obj).capitalize()} compliance and control",
+                affected_activity=_cn_cap,
+                deviation=f"{_cn_cap} — {_cn_cond}",
+                condition=_cn_cond, date=date,
+                actor=actors[0] if actors else None, actors=actors, entities=entities,
+                semantic_type="CONTROL" if _cn_cond_head in _RELATIONAL_CONTROL_HEADS else "OBJECT",
+                matched=True, requirement_status="STATED",
+                occurrence_population=_cn_pop,
+            )
 
     t_low = text.lower()
     # 0. Specialized Domain-Level Semantic Classification (Section 1 & 11)
@@ -1964,6 +3091,102 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
         "conflicted with": "INCONSISTENT", "conflicts with": "INCONSISTENT",
     }
     _measurement = extract_measured_discrepancy(text)
+
+    # 0b-comp. TWO independent quantified assessments whose comparability the
+    # finding itself states is UNRESOLVED ("Engineering estimated ... ₹3
+    # lakh; Procurement obtained a supplier quotation of ₹4.2 lakh, but the
+    # scope had not been confirmed to match ..."). Handled BEFORE the
+    # generic entity/comparison resolvers so neither the source noun
+    # ("Engineering") nor the measurement artifact ("engineering estimate")
+    # is ever promoted to affected subject, and both magnitudes + their
+    # provenance survive. Neither magnitude is a remediation cost or a loss.
+    _dac = _extract_dual_assessment_comparison(text)
+    if _dac:
+        _dac_subj = _dac["subject"]
+        _dac_cap = _dac_subj[0].upper() + _dac_subj[1:]
+        return DeviationInfo(
+            subject=_dac_subj,
+            finding_subject=_dac_subj,
+            affected_object=_dac_cap,
+            affected_process=f"{topic_word(_dac_subj).capitalize()} scope reconciliation and verification",
+            affected_activity=_dac_cap,
+            deviation=f"The {_dac_subj} — {_dac['condition']}",
+            condition=_dac["condition"],
+            date=date,
+            actor=actors[0] if actors else None,
+            actors=actors,
+            entities=entities,
+            semantic_type="COMPARISON",
+            matched=True,
+            comparison_type="UNRESOLVED_COMPARABILITY",
+            comparison_left=_dac["left"],
+            comparison_right=_dac["right"],
+            comparison_basis=_dac["basis"],
+            comparison_subtype="SCOPE_COMPARABILITY_UNRESOLVED",
+            comparison_reference_type="INDEPENDENT_ASSESSMENT",
+            extraction_confidence="RESOLVED",
+            requirement_status="UNKNOWN",
+        )
+
+    # 0c0. QUANTIFIED comparison frames the verb-only `_COMPARISON_VERB_RE`
+    # below does not recognise -- all preserve an explicit magnitude that
+    # must not be lost:
+    #   "<X> showed/reported/revealed a <shortfall|surplus|variance|…> of
+    #      <M> <unit> (against|versus|compared to|relative to|from) <Y>"
+    #   "<X> was <M> <unit> (above|below|over|under|short of) <Y>"
+    #   "<X> (exceeded|fell short of|fell below|dropped below) <Y> by <M> <unit>"
+    # Direction comes from the discrepancy noun / preposition, never inferred.
+    _qc = _extract_quantified_comparison(text)
+    if _qc:
+        _qc_left = _clean_subject(_qc["left"])
+        if not (_qc_left and validate_semantic_subject(_qc_left)):
+            # a leading provenance adjective ("reported headcount", "measured
+            # result") can block validation -- keep it as the left qualifier
+            # and retry on the bare noun phrase.
+            _qc_left = _clean_subject(re.sub(
+                r"^(?:reported|recorded|measured|observed|logged|documented|"
+                r"calculated|actual|stated)\s+",
+                "", _qc["left"], flags=re.IGNORECASE,
+            ).strip())
+        if _qc_left and validate_semantic_subject(_qc_left) and not is_actor_noun(_qc_left):
+            _qc_right = _clean_subject(_qc["right"]) or _qc["right"].strip()
+            _qc_cap = _qc_left[0].upper() + _qc_left[1:]
+            _mv, _mu = _qc.get("magnitude"), _qc.get("unit")
+            _mag_txt = ""
+            if _mv is not None:
+                _mag_txt = f"{_mv:g}{'%' if _mu == '%' else (' ' + _mu if _mu else '')}"
+            _dir_word = {"BELOW": "below", "EXCEEDED": "above"}.get(_qc["type"], "against")
+            if _qc["type"] in ("BELOW", "EXCEEDED") and _mag_txt:
+                _qc_cond = f"{_qc['noun']} of {_mag_txt} {_dir_word} the {_qc_right}".strip()
+            elif _mag_txt:
+                _qc_cond = f"differed from the {_qc_right} by {_mag_txt}"
+            else:
+                _qc_cond = f"{_qc['noun']} against the {_qc_right}"
+            _qc_subtype = classify_comparison_subtype(_qc_left, _qc_right, None)
+            return DeviationInfo(
+                subject=_qc_left,
+                finding_subject=_qc_left,
+                affected_object=_qc_cap,
+                affected_process=f"{topic_word(_qc_left).capitalize()} reconciliation and verification",
+                deviation=f"The {_qc_left} — {_qc_cond}",
+                condition=_qc_cond,
+                date=date,
+                actor=actors[0] if actors else None,
+                actors=actors,
+                entities=entities,
+                semantic_type="COMPARISON",
+                matched=True,
+                comparison_type=_qc["type"],
+                comparison_left=_qc_left,
+                comparison_right=_qc_right,
+                comparison_basis=_qc_right,
+                comparison_subtype=_qc_subtype,
+                comparison_reference_type="REFERENCE_VALUE",
+                measurement_value=_mv,
+                measurement_unit=_mu,
+                measurement_qualifier=_qc.get("qualifier"),
+                requirement_status="STATED",
+            )
     # Match against the single SENTENCE containing the comparison verb, not
     # the whole (possibly multi-sentence) finding text -- otherwise a
     # trailing sentence ("The difference was approximately 4.2%.") gets
@@ -1984,6 +3207,24 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
         comparison_type = _COMPARISON_TYPE_BY_VERB.get(
             re.sub(r"\s+", " ", _comparison_match.group("verb").lower()), "MISMATCH"
         )
+
+        # "<X> differed from <Y> by 4.2 percent" / "exceeded <Y> by 12 units"
+        # -- the magnitude is stated AFTER the reference and would otherwise
+        # be swallowed into the right-hand side. Pull it out into the typed
+        # measurement and strip it from `right_raw` so `comparison_right`
+        # stays the clean reference phrase.
+        if _measurement is None:
+            _by_m = _COMPARISON_BY_MAGNITUDE_RE.search(right_raw)
+            if _by_m:
+                try:
+                    _measurement = (
+                        float(_by_m.group("val")),
+                        _norm_unit(_by_m.group("unit")),
+                        (_by_m.group("qual") or "").strip().lower() or None,
+                    )
+                except ValueError:
+                    pass
+                right_raw = right_raw[: _by_m.start()].strip().rstrip(",")
 
         # Strip trailing relative pronoun clauses or state values from left_raw (e.g. "The recorded drying temperature was 65°C, which" -> "The recorded drying temperature")
         left_raw = re.sub(r",?\s*(?:which|and)\s*$", "", left_raw, flags=re.IGNORECASE).strip()
@@ -2074,6 +3315,13 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
             topic = _topic_words[-1] if _topic_words else topic_word(left_clean)
             basis_suffix = f" against {comparison_basis}" if comparison_basis else ""
             dev_str = f"The {left_clean} did not match the {right_clean}{basis_suffix}"
+            # Carry an explicit magnitude into the condition string so a
+            # quantified comparison is never rendered as a bare "not matched".
+            if _measurement is not None:
+                _m_txt = f"{_measurement[0]:g}{'%' if _measurement[1] == '%' else (' ' + _measurement[1] if _measurement[1] else '')}"
+                _cmp_condition = f"differed from the {right_clean} by {_m_txt}"
+            else:
+                _cmp_condition = "not matched"
             comparison_subtype = classify_comparison_subtype(left_clean, right_clean, comparison_basis)
             comparison_reference_type = {
                 "CALCULATION_MISMATCH": "CALCULATED_VALUE",
@@ -2091,7 +3339,7 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                 affected_object=affected_obj,
                 affected_process=f"{topic.capitalize()} reconciliation and verification",
                 deviation=dev_str,
-                condition="not matched",
+                condition=_cmp_condition,
                 date=date,
                 actor=comparison_actor,
                 actors=([comparison_actor] if comparison_actor else []) + actors,
@@ -2110,6 +3358,110 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                 comparison_reference_type=comparison_reference_type,
                 comparison_batch_id=comparison_batch_id,
             )
+
+    # 0d0. NEGATED reporting frame: "<evidence source> did/does/could not
+    # <reporting verb> that <proposition>" -- e.g. "Complaint records did not
+    # demonstrate that recurring failures of product PX-9 were evaluated",
+    # "Temperature logs did not show that corrective action was taken".
+    #
+    # Semantics: the finding is NOT about the records; it is that the
+    # <proposition> (a required evaluation / action / control) was not
+    # established. The affected object is the entity/activity IN the
+    # proposition; the evidence source is only the reporting frame. This is
+    # the negated twin of the positive frame `_strip_framing` already
+    # removes ("records show that ..."), detected by the SAME structural
+    # sets -- no new blacklist. When the proposition names no usable
+    # subject, return NON_ACTIONABLE so the finding resolves to the honest
+    # "not specifically identified" marker rather than falling through to a
+    # generic clause pattern that would grab the evidence source.
+    # The subject side must CONTAIN a record-store noun and no "that" (which
+    # would start the proposition); it may be a conjoined pair ("both the
+    # SCADA log and the shift handover record"). Negation is "did/does/...
+    # not" or "failed to".
+    _neg_frame = re.match(
+        rf"^\s*(?P<src>(?:(?!\bthat\b).){{3,90}}?\b(?:{_EVIDENCE_RECORD_NOUN})s?\b(?:(?!\bthat\b).)*?)"
+        r"\s+(?:(?:did|does|do|could|would|was|were|has|have|had)\s+not|failed\s+to|"
+        r"were\s+unable\s+to|was\s+unable\s+to)\s+"
+        rf"(?:{_NEG_REPORTING_VERB})\s+(?:that\s+)?(?P<prop>.+?)\s*\.?\s*$",
+        _strip_framing(text.strip()),
+        re.IGNORECASE,
+    )
+    if _neg_frame:
+        _psub, _pcond, _pact = _proposition_subject_and_condition(_neg_frame.group("prop"), entities)
+        if (
+            _psub and validate_semantic_subject(_psub) and not is_actor_noun(_psub)
+            and not looks_like_evidence_request(_psub)
+        ):
+            _psub_cap = _psub[0].upper() + _psub[1:]
+            _activity = _pact or _psub
+            return DeviationInfo(
+                subject=_psub,
+                finding_subject=_psub,
+                affected_object=_psub_cap,
+                affected_process=f"{topic_word(_activity).capitalize()} and record control",
+                affected_activity=_activity[0].upper() + _activity[1:],
+                deviation=f"The {_activity} was {_pcond}" if _pact else f"The {_psub} — {_pcond}",
+                condition=_pcond,
+                date=date,
+                actor=actors[0] if actors else None,
+                actors=actors,
+                entities=entities,
+                semantic_type="MISSING_RECORD",
+                matched=True,
+                missing_record_activity=_activity,
+                requirement_status="STATED",
+            )
+        # The proposition names no usable entity. Two sub-cases:
+        #  (a) it is a real "<X> was <verb>ed" proposition whose subject is
+        #      just too generic ("recurring failures were evaluated") -- the
+        #      records here ARE a reporting frame about something else, so
+        #      the finding is genuinely unresolved -> NON_ACTIONABLE;
+        #  (b) it is an EVIDENCE-ADEQUACY ARTIFACT with no inner proposition
+        #      ("sufficient evidence to support invalidation of the
+        #      result"), and the frame has no "that"-clause -- here the
+        #      finding is that the SRC record itself failed to document
+        #      enough, i.e. the record is the deficient affected object
+        #      (example A). Only case (b) recovers the src as the subject,
+        #      and only when it names a SPECIFIC record (a bare generic
+        #      "records"/"logs" does not validate).
+        _prop_txt0 = (_neg_frame.group("prop") or "").strip().rstrip(".")
+        _has_that_clause = bool(
+            re.search(r"\bnot\s+\w+\s+that\b|\bfailed\s+to\s+\w+\s+that\b",
+                      _neg_frame.group(0), re.IGNORECASE)
+        )
+        _src_clean = _clean_subject(_neg_frame.group("src") or "")
+        if (
+            not _has_that_clause
+            and looks_like_evidence_request(_prop_txt0)
+            and _src_clean and validate_semantic_subject(_src_clean)
+            and not is_actor_noun(_src_clean)
+            and not looks_like_evidence_request(_src_clean)
+        ):
+            _nv_m = re.search(
+                rf"\bnot\s+({_NEG_REPORTING_VERB})\b|\bfailed\s+to\s+({_NEG_REPORTING_VERB})\b",
+                _neg_frame.group(0), re.IGNORECASE,
+            )
+            _neg_verb = ((_nv_m.group(1) or _nv_m.group(2)) if _nv_m else "document").lower()
+            _prop_txt = (_neg_frame.group("prop") or "").strip().rstrip(".")
+            _src_cond = f"did not {_neg_verb} {_prop_txt}".strip()
+            _src_cap = _src_clean[0].upper() + _src_clean[1:]
+            return DeviationInfo(
+                subject=_src_clean,
+                finding_subject=_src_clean,
+                affected_object=_src_cap,
+                affected_process=f"{topic_word(_src_clean).capitalize()} and record control",
+                affected_activity=_src_cap,
+                deviation=f"The {_src_clean} — {_src_cond}",
+                condition=_src_cond,
+                date=date,
+                actor=actors[0] if actors else None,
+                actors=actors,
+                entities=entities,
+                semantic_type="RECORD",
+                matched=True,
+                requirement_status="STATED",
+            )
+        return DeviationInfo(subject=None, matched=False, semantic_type="NON_ACTIONABLE", entities=entities, actors=actors)
 
     # 0d. Missing-record / missing-documentation findings ("X was not
     # documented", "X was not recorded", "no record of X exists", "X lacks
@@ -2258,6 +3610,62 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                 semantic_type="RECURRENCE",
                 matched=True,
                 occurrence_population=population_text,
+            )
+
+    # 0e2. QUANTITATIVE recurrence ("Equipment M-204 experienced three
+    # failures over a six-month period", "the line recorded five deviations
+    # in the last quarter"). The affected subject is the ENTITY; the stated
+    # count / event / period are preserved as typed fields, never collapsed
+    # into "status unconfirmed" and never turned into a frequency or a
+    # recurrence-risk classification. Structural (count + plural event noun +
+    # temporal window), any domain.
+    from app.agent.recurrence_guard import (
+        _QUANTITATIVE_RECURRENCE_RE as _QR_SENT_RE,
+        extract_quantitative_recurrence,
+    )
+    _qr = extract_quantitative_recurrence(text)
+    if _qr:
+        _qr_count, _qr_event, _qr_period = _qr
+        _qr_sent = next(
+            (s for s in _SENTENCE_SPLIT_RE.split(text.strip())
+             if _QR_SENT_RE.search(s)),
+            text,
+        )
+        # subject = the noun phrase before the recurrence verb, cleaned.
+        _qr_subj = None
+        _qr_lead = re.match(
+            r"^\s*(?:the\s+|an?\s+)?(?P<np>[A-Za-z0-9][\w\s/-]{1,60}?)\s+"
+            r"(?:experienced|had|recorded|logged|incurred|reported|saw|"
+            r"sustained|underwent)\s+",
+            _strip_framing(_qr_sent.strip()), re.IGNORECASE,
+        )
+        if _qr_lead:
+            _qr_subj = _clean_subject(_qr_lead.group("np"))
+        if not (_qr_subj and validate_semantic_subject(_qr_subj) and not is_actor_noun(_qr_subj)):
+            # "<N> <events> were recorded over <period>" -- no leading entity;
+            # fall back to any extracted identifier, else the event itself.
+            _id_ents = [e for e in entities if re.search(r"\d", e)]
+            _qr_subj = _id_ents[0] if _id_ents else _qr_event
+        if _qr_subj and validate_semantic_subject(_qr_subj):
+            _qr_cap = _qr_subj[0].upper() + _qr_subj[1:]
+            _qr_cond = f"{_qr_count} {_qr_event} over {_qr_period}"
+            return DeviationInfo(
+                subject=_qr_subj,
+                finding_subject=_qr_subj,
+                affected_object=_qr_cap,
+                affected_process=f"{topic_word(_qr_subj).capitalize()} operational process",
+                deviation=f"{_qr_cap} — {_qr_cond}",
+                condition=_qr_cond,
+                date=date,
+                actor=actors[0] if actors else None,
+                actors=actors,
+                entities=entities,
+                semantic_type="RECURRENCE",
+                matched=True,
+                occurrence_population=f"{_qr_count} {_qr_event}",
+                recurrence_count=_qr_count,
+                recurrence_event=_qr_event,
+                recurrence_period=_qr_period,
             )
 
     # 0f. Attributed causal explanation ("X stated/reported/claimed/
@@ -2645,6 +4053,21 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
         if not sentence or sentence in _referenced_doc_sentences:
             continue
         stripped = _strip_framing(sentence)
+        # Evidence-proposition sentence ("Maintenance records show that ...",
+        # "System logs indicate ...") describes something ABOUT the subject.
+        # Skip it as a subject SOURCE when (a) a reporting frame was actually
+        # stripped, (b) the remainder names no entity identifier of its own
+        # (so it is not the "Inspection found corrosion on Tank T-14" case
+        # where the real entity lives inside the clause), and (c) the finding
+        # names an entity elsewhere -- i.e. a better subject genuinely
+        # exists. Domain-agnostic; no phrase blacklist.
+        if (
+            stripped != sentence
+            and looks_like_evidence_proposition(sentence)
+            and not _ENTITY_RE.search(stripped)
+            and (entities or _ENTITY_RE.search(text))
+        ):
+            continue
         # Check for reported missing/absent/unperformed items in clause (e.g. "technician reported X was absent")
         m_rep_absent = re.search(
             r"(?:stated|reported|noted|indicated|confirmed|observed)\s+(?:that\s+)?(?:the\s+|an?\s+)?(?P<obj>[a-z0-9\s/-]+?)\s+(?:was|were)\s+(?P<cond>absent|missing|unavailable|not\s+recorded|not\s+completed|not\s+signed|not\s+performed)",
@@ -3168,8 +4591,22 @@ def extract_semantic_subject(text: str) -> DeviationInfo:
                 occurrence_population=_short_population,
             )
 
-        # Framing was stripped and what's left is a short, usable noun phrase
-        if stripped != sentence and len(stripped) < 140:
+        # Framing was stripped and what's left is a short, usable noun phrase.
+        # NOT when the remainder still names an entity (the structural
+        # entity-noun resolver below handles "... autoclave AC-02" far
+        # better than swallowing the whole clause) or is itself a
+        # causal/relational clause ("<X> triggered/caused <Y>") rather than
+        # a noun phrase.
+        if (
+            stripped != sentence
+            and len(stripped) < 140
+            and not _ENTITY_RE.search(stripped)
+            and not re.search(
+                r"\b(?:triggered|caused|causing|resulted\s+in|led\s+to|prompted|"
+                r"forced|drove|produced|generated|contributed\s+to)\b",
+                stripped, re.IGNORECASE,
+            )
+        ):
             subj = _clean_subject(stripped)
             if validate_semantic_subject(subj) and not is_actor_noun(subj):
                 clean_subj_cap = subj[0].upper() + subj[1:]
@@ -3283,7 +4720,12 @@ _NP_END = (
 _PASSIVE_ACTOR_COMPLEMENT_RE = re.compile(
     r"\b(?:was|were|is|are|been)\s+[a-z]+(?:ed|en)\s+"
     r"(?:to\s+be\s+)?(?:not\s+|never\s+|without\s+)?"
-    r"(?:[a-z]+ing|to\s+[a-z]+|wearing|using|following)\s+"
+    # A "to <verb>" complement whose verb is a SYMMETRIC COMPARISON /
+    # EQUIVALENCE predicate ("confirmed to match X", "reconciled to equal
+    # Y") takes a comparison REFERENCE, not the audited patient -- do not
+    # descend into it.
+    r"(?:[a-z]+ing|to\s+(?!match\b|equal\b|equate\b|correspond|reconcile|align\b|"
+    r"agree\b|coincide|conform|tally\b|mirror\b|compare\b)[a-z]+|wearing|using|following)\s+"
     r"(?:the\s+|an?\s+|any\s+|their\s+|his\s+|her\s+|its\s+)?" + _NP + _NP_END,
     re.IGNORECASE,
 )
@@ -3347,6 +4789,55 @@ _ABSENCE_CONDITION_RE = re.compile(
 )
 
 
+# Transitive ACTION-verb bases (grammatical, not domain vocabulary). When an
+# evidence-proposition frame ("<source> records show that ...") is followed by
+# "<NP> was/were <past participle of one of these>", the NP is the OBJECT of a
+# REPORTED ACTION (e.g. "... that temporary repairs were PERFORMED", "... that a
+# permanent fix was IMPLEMENTED") -- a remediation activity the source is
+# reporting on, never the audited entity. A state participle ("was DAMAGED",
+# "were INCOMPLETE") is the opposite: the NP is the affected entity, and must
+# still resolve. Extends the existing _TRANSITIVE_FAILED_TO_VERBS set.
+_REPORTED_ACTION_BASES = _TRANSITIVE_FAILED_TO_VERBS | {
+    "implement", "install", "configure", "develop", "create", "apply", "deploy",
+    "carry", "make", "take", "add", "remove", "replace", "repair", "fix",
+    "adjust", "modify", "revise", "raise", "assign", "attempt", "propose",
+    "recommend", "initiate", "schedule", "plan", "arrange", "obtain", "procure",
+}
+
+
+def _is_reported_action_participle(participle: str | None) -> bool:
+    """True when `participle` is the past participle of a transitive action
+    verb in `_REPORTED_ACTION_BASES` -- crude, dependency-free stemming that
+    tolerates doubled consonants ("installed"->install) and silent-e
+    ("raised"->raise)."""
+    if not participle:
+        return False
+    p = participle.lower().strip()
+    if not p.endswith(("ed", "en")):
+        return False
+    stem = p[:-3] + "y" if p.endswith("ied") else p[:-2]
+    cands = {stem, stem + "e"}
+    if len(stem) >= 2 and stem[-1] == stem[-2]:
+        cands.add(stem[:-1])
+    return bool(cands & _REPORTED_ACTION_BASES)
+
+
+def _evprop_reports_action_on(sentence: str, candidate: str) -> bool:
+    """In an evidence-proposition sentence, True when `candidate` is
+    immediately followed by "was/were [not] <transitive-action participle>"
+    -- i.e. the candidate is the OBJECT of a reported action ("... that
+    temporary repairs were PERFORMED", "... that no corrective action was
+    IMPLEMENTED"), not the audited entity. A state predicate ("was
+    DAMAGED / INCOMPLETE") returns False and resolves normally."""
+    if not sentence or not candidate:
+        return False
+    m = re.search(
+        re.escape(candidate.strip()) + r"\s+(?:was|were)\s+(?:not\s+|never\s+)?([a-z]+(?:ed|en))\b",
+        sentence, re.IGNORECASE,
+    )
+    return bool(m and _is_reported_action_participle(m.group(1)))
+
+
 def _accept_entity_candidate(raw: str | None) -> str | None:
     """Clean and validate a candidate noun phrase; reject actors, clauses,
     pronouns and empty fragments."""
@@ -3363,6 +4854,11 @@ def _accept_entity_candidate(raw: str | None) -> str | None:
         return None
     if is_actor_noun(cand):
         return None
+    # A MEASUREMENT / ASSESSMENT ARTIFACT ("engineering estimate", "supplier
+    # quotation", "the contractor quote") is evidence about an object, not
+    # the affected object itself -- never recover it as the finding subject.
+    if _measurement_artifact_head(cand):
+        return None
     return cand
 
 
@@ -3376,15 +4872,30 @@ def recover_entity_structurally(text: str) -> tuple[str, str | None] | None:
     """
     if not text or not text.strip():
         return None
-    for sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
-        sentence = _strip_framing(sentence.strip())
+    _finding_has_entity = bool(_ENTITY_RE.search(text))
+    for _raw_sentence in _SENTENCE_SPLIT_RE.split(text.strip()):
+        _raw_sentence = _raw_sentence.strip()
+        sentence = _strip_framing(_raw_sentence)
         if not sentence:
+            continue
+        # An evidence-proposition sentence whose remainder names no entity
+        # of its own must not have its embedded object ("temporary repairs
+        # were performed") recovered as the finding subject when a real
+        # entity exists elsewhere in the finding.
+        _was_evprop = sentence != _raw_sentence and looks_like_evidence_proposition(_raw_sentence)
+        if (
+            _was_evprop
+            and not _ENTITY_RE.search(sentence)
+            and _finding_has_entity
+        ):
             continue
         # B. absence / existential negation -- checked first because an
         # absence predicate is the most specific signal available.
         for pattern in _ABSENCE_PATTERNS:
             m = pattern.search(sentence)
             if m:
+                if _was_evprop and _evprop_reports_action_on(sentence, m.group("np")):
+                    continue
                 cand = _accept_entity_candidate(m.group("np"))
                 if cand:
                     cond_m = _ABSENCE_CONDITION_RE.search(sentence)
@@ -3393,6 +4904,8 @@ def recover_entity_structurally(text: str) -> tuple[str, str | None] | None:
         for pattern in _NOMINALIZATION_PATTERNS:
             m = pattern.search(sentence)
             if m:
+                if _was_evprop and _evprop_reports_action_on(sentence, m.group("np")):
+                    continue
                 cand = _accept_entity_candidate(m.group("np"))
                 if cand:
                     return cand, "not adhered to"
@@ -3405,6 +4918,11 @@ def recover_entity_structurally(text: str) -> tuple[str, str | None] | None:
         # A'. agentless passive with a non-actor subject, ANY participle.
         m = _AGENTLESS_PASSIVE_RE.match(sentence)
         if m:
+            # "<source> shows that <NP> was PERFORMED/IMPLEMENTED/..." -- the NP
+            # is a reported remediation ACTION, not the audited entity. A state
+            # participle ("was DAMAGED / INCOMPLETE") still resolves normally.
+            if _was_evprop and _is_reported_action_participle(m.group("part")):
+                continue
             cand = _accept_entity_candidate(m.group("np"))
             if cand:
                 return cand, m.group("part").lower()
@@ -3499,6 +5017,67 @@ def resolve_deviation(finding_text: str, fact_claims: list[str] | None = None) -
         if result.matched and result.subject and validate_semantic_subject(result.subject):
             break
 
+    # BARE CAUSAL-DIFFERENTIAL finding ("The discrepancy could have resulted
+    # from A, B, or C") -- no separate observed-condition clause. Resolve the
+    # subject to the deviation NOUN before the causal connector; NEVER let the
+    # entity-recovery fallbacks below grab one of the enumerated causes ("a
+    # system data-entry error"). The alternatives are preserved separately
+    # (spec 9/28).
+    if not (result.matched and result.subject and validate_semantic_subject(result.subject)):
+        try:
+            from app.agent.causal_guard import extract_stated_causal_alternatives as _esca_rd
+            _rd_alts = _esca_rd(finding_text)
+        except Exception:  # pragma: no cover
+            _rd_alts = []
+        if len(_rd_alts) >= 2:
+            _rd_m = re.search(
+                r"\bwhether\s+(?:the\s+|a\s+|an\s+)?(?P<w>[a-z][\w-]*(?:\s+[a-z][\w-]*){0,2}?)\s+"
+                r"(?:result\w*\s+from|(?:was|were|is|are|had\s+been)\s+(?:caused\s+by|due\s+to))"
+                r"|\b(?:the|a|an|this|that)\s+"
+                r"(?P<n>[a-z][\w-]*(?:\s+[a-z][\w-]*){0,2}?)\s+"
+                r"(?:that\s+[\w\s'-]{0,40}?\s+)?"
+                r"(?:could|may|might|would|can)\s+(?:not\s+)?(?:have\s+)?(?:been\s+)?"
+                r"(?:result\w*\s+from|be(?:en)?\s+caused\s+by|be(?:en)?\s+due\s+to|"
+                r"stem\w*\s+from|aris\w*\s+from)",
+                finding_text, re.IGNORECASE,
+            )
+            # A small structural OBSERVATION/DEVIATION noun class -- generic
+            # alone, but legitimate as the subject here because the finding IS
+            # a statement about this deviation ("The discrepancy could have
+            # resulted from ..."). Not a domain vocabulary list.
+            _RD_OBS_NOUN = re.compile(
+                r"^(?:discrepancy|deviation|variance|difference|gap|shortfall|"
+                r"shortage|surplus|excess|failure|fault|error|anomaly|"
+                r"nonconformity|non-conformity|inconsistency|mismatch|defect|"
+                r"exceedance|excursion|breach|breakdown|malfunction|outage|"
+                r"incident|delay|overrun|overpayment|underpayment|misstatement)$",
+                re.IGNORECASE,
+            )
+            _rd_subj = _clean_subject(
+                (_rd_m.group("w") or _rd_m.group("n") or "").strip()
+            ) if _rd_m else None
+            if not (
+                _rd_subj and not is_actor_noun(_rd_subj) and (
+                    validate_semantic_subject(_rd_subj)
+                    or _RD_OBS_NOUN.match(_rd_subj.strip())
+                )
+            ):
+                _rd_subj = UNRESOLVED_SUBJECT_DISPLAY
+            _rd_cap = _rd_subj[0].upper() + _rd_subj[1:]
+            _rd_ok = _rd_subj != UNRESOLVED_SUBJECT_DISPLAY
+            return DeviationInfo(
+                subject=_rd_subj, finding_subject=_rd_subj, affected_object=_rd_cap,
+                affected_process=(f"{topic_word(_rd_subj).capitalize()} investigation and verification"
+                                  if _rd_ok else "NOT_ESTABLISHED"),
+                deviation=(f"The {_rd_subj} is established but its cause is not established among "
+                           "the alternatives the finding enumerates"),
+                condition="cause not established among the stated alternatives",
+                date=getattr(result, "date", None),
+                actors=getattr(result, "actors", None) or [],
+                entities=getattr(result, "entities", None) or [],
+                semantic_type="OBJECT" if _rd_ok else "NON_ACTIONABLE", matched=True,
+            )
+
     if not result.matched or not result.subject or not validate_semantic_subject(result.subject):
         activity_subj = _extract_activity_from_reported_finding(_mask_referenced_document_spans(finding_text))
         if activity_subj and activity_subj != "process compliance":
@@ -3570,10 +5149,12 @@ def resolve_deviation(finding_text: str, fact_claims: list[str] | None = None) -
     # If the structured regexes did not match, parse the main independent clause
     # to extract the grammatical patient/theme noun phrase (affected object).
     if not result.matched or not result.subject or not validate_semantic_subject(result.subject):
-        for sent in _SENTENCE_SPLIT_RE.split(finding_text.strip()):
-            sent = _strip_framing(sent.strip())
+        for _raw_sent in _SENTENCE_SPLIT_RE.split(finding_text.strip()):
+            _raw_sent = _raw_sent.strip()
+            sent = _strip_framing(_raw_sent)
             if not sent or len(sent.split()) < 3:
                 continue
+            _sent_was_evprop = sent != _raw_sent and looks_like_evidence_proposition(_raw_sent)
             # 1. Passive / Stative / Intransitive Pattern: <OBJECT> (was/were/tripped/leaked/failed/showed/...) <CONDITION>
             m_syn = re.match(
                 r"^(?:the\s+|an?\s+)?(?P<obj>[a-zA-Z0-9][a-zA-Z0-9\s/-]{2,50}?)\s+"
@@ -3582,7 +5163,14 @@ def resolve_deviation(finding_text: str, fact_claims: list[str] | None = None) -
                 sent,
                 re.IGNORECASE,
             )
-            if m_syn:
+            if m_syn and not (
+                # In an evidence-proposition sentence, "<NP> was/were <action
+                # participle>" reports an ACTION on the NP -- the NP is not the
+                # audited entity (e.g. "... temporary repairs were performed").
+                _sent_was_evprop
+                and m_syn.group("verb").lower() in ("was", "were")
+                and _is_reported_action_participle((m_syn.group("rest") or "").strip().split()[0] if (m_syn.group("rest") or "").strip() else None)
+            ):
                 cand_obj = _clean_subject(m_syn.group("obj"))
                 if cand_obj and validate_semantic_subject(cand_obj) and not is_actor_noun(cand_obj):
                     cand_cap = cand_obj[0].upper() + cand_obj[1:]

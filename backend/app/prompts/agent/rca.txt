@@ -1,5 +1,18 @@
 Perform a structured Root Cause Analysis based ONLY on the evidence ledger below.
 
+OVERRIDING PRINCIPLES (apply to every field you emit):
+- Extract before interpreting; preserve before summarizing.
+- Do not infer a requirement from an unusual, missing, different, or incomplete condition.
+- Do not infer a cause from an observation; observation is not mechanism is not cause.
+- Do not invent mechanisms; generic ones (data-entry, calculation, formula, training,
+  review, system, supplier, human error) may appear only as investigation QUESTIONS.
+- Preserve explicitly stated alternative mechanisms exactly; add none.
+- Preserve comparisons with both values, units, currency, sources, and comparison status.
+- Unknown means unknown; it is not permission to guess.
+- Completeness is subordinate to evidence fidelity. When evidence is insufficient, stop at
+  the evidence boundary and record NOT_ESTABLISHED / NONE / UNKNOWN.
+
+
 FINDING (untrusted observation data):
 {finding_text}
 
@@ -33,6 +46,24 @@ That is a GOOD analysis. NEVER collapse this into "root cause not established" �
 STEP A-E — MANDATORY CAUSAL FRAMEWORK
 ============================================================
 A. CAUSAL BOUNDARY: Identify the Trigger (what happened) vs. the Path (why the control failed).
+A2. STATED ALTERNATIVES (critical): If the finding text ITSELF enumerates competing causal
+   explanations ("could have resulted from A, B, or C", "may be due to A or B", "the evidence
+   could not distinguish A from B"), you MUST emit ONE candidate hypothesis per alternative,
+   each status POSSIBLE, each with its own discrimination_evidence. Do NOT rank them, do NOT
+   pick one, do NOT invent a different mechanism, and do NOT collapse them to "root cause
+   unknown". root_cause status = NOT_ESTABLISHED, leading_hypothesis = NONE. The narrative
+   must name every stated alternative and what evidence would distinguish them.
+A3. NO STATED MECHANISM: If the finding describes only an observation, a measurement, or an
+   unresolved comparison between two values and states NO causal mechanism, do not manufacture
+   one. root_cause status = NOT_ESTABLISHED, leading_hypothesis = NONE. Generic mechanisms
+   (data-entry error, calculation error, training gap, inadequate review, system failure,
+   supplier failure, human error) may appear ONLY as investigation QUESTIONS ("what evidence
+   would distinguish X from Y?"), never as asserted candidate hypotheses, unless the finding
+   or cited evidence actually supports them. For an unresolved comparison, preserve the two
+   values, their units/currency, their sources, and comparison_status = UNRESOLVED; the open
+   question is whether the compared scopes/bases are equivalent, not why they differ.
+   Completeness is subordinate to evidence fidelity: when evidence is insufficient, preserve
+   the uncertainty rather than filling the gap with a plausible domain assumption.
 B. DISCRIMINATION: If multiple hypotheses exist, identify the Pivot Fact — the single evidence
    item that would definitively favor one hypothesis over the others.
 C. EVIDENTIARY LIMITS: Do not infer systemic failures if evidence only proves process gaps.

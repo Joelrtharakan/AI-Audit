@@ -1,9 +1,13 @@
-"""FastAPI Authentication router -- Microsoft Entra ID delegated sign-in for LQMS.
+"""FastAPI Authentication router -- dual SSO for LQMS.
 
-Replaces the former GitHub OAuth flow. A work/school user signs in with Microsoft
-Entra ID; the resulting delegated Microsoft Graph token (carrying the scopes
-required by the Microsoft 365 Copilot Chat API) is encrypted into the server-side
-session and used per-request for Copilot calls.
+Two identity providers coexist:
+  * Microsoft Entra ID  (/api/auth/microsoft/*)  -> Microsoft 365 Copilot backend
+  * GitHub OAuth         (/api/auth/github/*)     -> GitHub Copilot backend
+
+Whichever provider a user signs in with is recorded on the session
+(`auth_provider`) and determines which Copilot backend their investigations use
+(see `apply_user_copilot_token`). The per-user access token is encrypted into the
+server-side session and used per-request; it is never returned to the frontend.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Cookie, Header, Request, Response, status
 from fastapi.responses import RedirectResponse
 
+from app.auth.github_oauth import GitHubOAuthError, get_github_oauth_service
 from app.auth.microsoft_entra import MicrosoftAuthError, get_microsoft_entra_service
 from app.auth.security import generate_oauth_state, validate_oauth_state
 from app.auth.session import LQMSUserSession, get_session_store
@@ -55,12 +60,22 @@ def apply_user_copilot_token(request: Request) -> LQMSUserSession | None:
     if user_session is not None:
         token = user_session.get_decrypted_token()
         if token:
-            settings.microsoft_copilot_access_token = token
+            if user_session.auth_provider == "github":
+                settings.copilot_github_token = token
+                settings.llm_provider = "github_copilot"
+                from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
+                reset_copilot_clients()
+            else:
+                settings.microsoft_copilot_access_token = token
+                settings.llm_provider = "microsoft_copilot"
     return user_session
 
 
 async def refresh_user_copilot_token(user_session: LQMSUserSession) -> bool:
     """Attempt one silent delegated-token refresh; re-store on the session. Returns success."""
+    # GitHub OAuth web-flow tokens do not carry a refresh token; nothing to do.
+    if user_session.auth_provider == "github":
+        return False
     refresh_token = user_session.get_decrypted_refresh_token()
     if not refresh_token:
         return False
@@ -208,6 +223,7 @@ async def get_current_user_profile(
     if user_session is None:
         return {
             "authenticated": False,
+            "auth_provider": "",
             "user_principal_name": "",
             "github_login": "",
             "name": "",
@@ -235,7 +251,122 @@ async def logout(
     return {"status": "ok", "message": "Successfully logged out of LQMS"}
 
 
-# Backwards-compatible aliases: the previous GitHub routes now point at Microsoft.
-@router.get("/github/login", include_in_schema=False)
-async def _legacy_github_login(request: Request, return_to: str = "") -> Response:
-    return await microsoft_login(request, return_to=return_to)
+# ---------------------------------------------------------------------------
+# GitHub OAuth 2.0 web flow  ->  GitHub Copilot backend
+# ---------------------------------------------------------------------------
+
+
+@router.get("/github/login")
+async def github_login(request: Request, return_to: str = "") -> Response:
+    """Initiate the GitHub OAuth 2.0 web flow (signed CSRF state)."""
+    settings = get_settings()
+    oauth = get_github_oauth_service()
+
+    ret_url = return_to or settings.frontend_dashboard_url
+    state = generate_oauth_state(return_to=ret_url)
+
+    try:
+        auth_url = oauth.get_authorization_url(state=state)
+    except GitHubOAuthError as exc:
+        logger.warning("GitHub OAuth not configured: %s", exc)
+        msg = (
+            "GitHub sign-in is not yet configured. Set GITHUB_CLIENT_ID and "
+            "GITHUB_CLIENT_SECRET in backend/.env"
+        )
+        target = f"{settings.frontend_login_url}?auth=error&error=missing_config&message={urllib.parse.quote(msg)}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+
+    response = RedirectResponse(url=auth_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+    response.set_cookie(
+        key="lqms_oauth_state",
+        value=state,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return response
+
+
+@router.get("/github/callback")
+async def github_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+    lqms_oauth_state: str | None = Cookie(default=None),
+) -> Response:
+    """Handle the GitHub redirect: exchange code, verify org, establish a session."""
+    settings = get_settings()
+    oauth = get_github_oauth_service()
+    session_store = get_session_store()
+
+    login_page = settings.frontend_login_url
+    dashboard_page = settings.frontend_dashboard_url
+
+    if error:
+        err_msg = error_description or error
+        logger.warning("GitHub OAuth authorization error: %s", err_msg)
+        target = f"{login_page}?auth=error&error=oauth_denied&message={urllib.parse.quote(err_msg)}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+
+    if not state or not validate_oauth_state(state)[0]:
+        logger.warning("Invalid or expired OAuth state parameter rejected.")
+        target = f"{login_page}?auth=error&error=invalid_state&message={urllib.parse.quote('Invalid or expired OAuth state')}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+
+    if not code:
+        logger.warning("OAuth callback missing code parameter.")
+        target = f"{login_page}?auth=error&error=missing_code&message={urllib.parse.quote('Missing authorization code')}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+
+    try:
+        access_token = await oauth.exchange_code_for_token(code=code)
+        profile = await oauth.get_user_profile(access_token=access_token)
+    except Exception as exc:  # noqa: BLE001 - normalized to a user-safe redirect
+        logger.error("GitHub OAuth exchange or profile fetch failed: %s", exc)
+        target = f"{login_page}?auth=error&error=exchange_failed&message={urllib.parse.quote('Failed to authenticate with GitHub')}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+
+    username = str(profile.get("login", "")).strip()
+    email = str(profile.get("email") or "").strip()
+    if not email:
+        emails = await oauth.get_user_emails(access_token=access_token)
+        primary = next((e.get("email") for e in emails if e.get("primary")), None)
+        email = primary or (emails[0].get("email") if emails else "")
+
+    is_member, org_name = await oauth.verify_org_membership(access_token=access_token, username=username)
+    if not is_member:
+        logger.warning("GitHub user '%s' is not a member of allowed org '%s'", username, settings.github_allowed_org)
+        msg = f"Your GitHub account (@{username}) is not authorized for this application."
+        target = f"{login_page}?auth=error&error=unauthorized_org&message={urllib.parse.quote(msg)}"
+        return RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+
+    session = session_store.create_session(
+        auth_provider="github",
+        user_id=str(profile.get("id", "")),
+        user_principal_name=username,
+        name=str(profile.get("name") or username).strip(),
+        email=email,
+        avatar_url=str(profile.get("avatar_url", "")).strip(),
+        organization=org_name if org_name != "default" else "",
+        copilot_enabled=True,
+        plain_access_token=access_token,
+        plain_refresh_token="",
+    )
+
+    logger.info("GitHub OAuth sign-in successful: user='%s' org='%s' session_id=%s", username, org_name, session.session_id[:8])
+
+    target = f"{dashboard_page}?auth=success"
+    response = RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+    response.set_cookie(
+        key=settings.session_cookie_name,
+        value=session.session_id,
+        max_age=settings.session_expiry_hours * 3600,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    response.delete_cookie("lqms_oauth_state")
+    return response

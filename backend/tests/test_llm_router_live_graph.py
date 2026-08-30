@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.skip(reason="Multi-provider fan-out/failover router removed from the inference path: one investigation = one provider + one model via the LiteLLM boundary. See app/services/llm/execution.py + providers/litellm_provider.py.")
+
 from app.models.agent import (
     AgentTraceStep,
     CanonicalFindingState,

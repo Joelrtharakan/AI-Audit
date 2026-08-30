@@ -158,6 +158,63 @@ def _compute_final_state(state: AgentState) -> AgentFinalState:
     return AgentFinalState.READY_FOR_HUMAN_REVIEW
 
 
+_NOT_ESTABLISHED = "NOT ESTABLISHED"
+_UNRESOLVED_MARKERS = ("UNKNOWN", "UNRESOLVED", "NOT ESTABLISHED", "NOT_ESTABLISHED", "NOT_DETERMINED")
+
+
+def _finalize_report_consistency(report, canonical) -> None:
+    """Cross-section consistency (spec §29). Downgrade / clear only -- never
+    invents a value, never strengthens a conclusion. Every check keys on the
+    canonical STRUCTURED state, not on parsing report prose."""
+    try:
+        from app.services.semantic_subject import is_established_subject
+    except Exception:  # pragma: no cover
+        is_established_subject = lambda s: bool(s and str(s).strip())  # noqa: E731
+
+    _subject_unresolved = canonical is not None and (
+        bool(getattr(canonical, "subject_unresolved", False))
+        or not is_established_subject(getattr(canonical, "finding_subject", None))
+    )
+    _process_unresolved = canonical is None or str(
+        getattr(canonical, "affected_process", "") or ""
+    ).strip().upper().startswith(_UNRESOLVED_MARKERS) or not str(
+        getattr(canonical, "affected_process", "") or ""
+    ).strip()
+
+    ia = getattr(report, "impact_assessment", None)
+    if ia is not None:
+        # §5/§6: an unresolved subject cannot yield a named affected object.
+        if _subject_unresolved and is_established_subject(getattr(ia, "affected_object", None)):
+            # keep it ONLY if it matches a genuine canonical entity name
+            _canon_obj = str(getattr(canonical, "affected_object", "") or "")
+            if not (is_established_subject(_canon_obj)
+                    and _canon_obj.strip().lower() == str(ia.affected_object).strip().lower()):
+                ia.affected_object = _NOT_ESTABLISHED
+        # §6: process_at_risk / control_at_risk only when canonical established one.
+        if _process_unresolved:
+            if ia.process_at_risk and not str(ia.process_at_risk).strip().upper().startswith(_UNRESOLVED_MARKERS):
+                ia.process_at_risk = _NOT_ESTABLISHED
+            if ia.control_at_risk and not str(ia.control_at_risk).strip().upper().startswith(_UNRESOLVED_MARKERS):
+                ia.control_at_risk = _NOT_ESTABLISHED
+
+    # §29 / §13: remediation cost result must carry no numbers / no
+    # implementation activities once it is NOT_ASSESSABLE. Re-assert the
+    # engine's own idempotent guard on the final object.
+    rc = getattr(report, "remediation_cost", None)
+    if rc is not None:
+        try:
+            from app.remediation.engine import _enforce_result_consistency
+            _enforce_result_consistency(rc)
+        except Exception:  # pragma: no cover
+            pass
+
+    # §11/§29: NOT_ESTABLISHED root cause must not carry a leading hypothesis.
+    r_rc = getattr(report, "root_cause", None)
+    if r_rc is not None and getattr(r_rc, "status", None) == "NOT_ESTABLISHED":
+        if getattr(r_rc, "leading_hypothesis", None):
+            r_rc.leading_hypothesis = None
+
+
 async def generate_report_node(state: AgentState) -> AgentState:
     """Assemble the InvestigationReport from agent state — no LLM call."""
     trace = list(state.get("trace", []))
@@ -335,6 +392,8 @@ async def generate_report_node(state: AgentState) -> AgentState:
                 root_cause=root_cause,
                 capa=capa,
                 impact=impact,
+                canonical_state=state.get("canonical_finding_state"),
+                semantic_context=state.get("canonical_semantic_context"),
             )
         except Exception as exc:  # noqa: BLE001 - last-resort crash guard only
             logger.warning("Remediation cost estimation crashed unexpectedly (%s); reporting honestly.", exc)
@@ -389,6 +448,8 @@ async def generate_report_node(state: AgentState) -> AgentState:
         confidence=overall_conf,  # type: ignore[arg-type]
         investigation_required=investigation_required,  # type: ignore[arg-type]
         investigation_mode=investigation_mode,
+        semantic_mode=state.get("semantic_mode", "DETERMINISTIC"),  # type: ignore[arg-type]
+        canonical_semantic_status=str(state.get("canonical_semantic_status", "NOT_ATTEMPTED")),
         root_cause=root_cause,
         contributing_factors=state.get("contributing_factors", []),
         investigation=investigation_plan,
@@ -415,6 +476,14 @@ async def generate_report_node(state: AgentState) -> AgentState:
         critic_status=state.get("critic_status"),
         semantic_pipeline_disagreements=semantic_pipeline_disagreements,
     )
+
+    # ------------------------------------------------------------------
+    # FINAL REPORT CROSS-SECTION CONSISTENCY (spec §29). Downgrade / clear
+    # only -- never invents, never escalates. Every section must describe the
+    # SAME canonical semantic interpretation.
+    # ------------------------------------------------------------------
+    _finalize_report_consistency(report, state.get("canonical_finding_state"))
+
     if report.analysis_mode == "DETERMINISTIC":
         trace.append(AgentTraceStep.ok(
             "Report generated using evidence-grounded deterministic synthesis."

@@ -78,17 +78,89 @@ def _clip(s: Any, n: int = _MAX_STMT_CHARS) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _canonical_block(cs: Any) -> str:
+    if cs is None:
+        return ""
+    _f = lambda n: getattr(cs, n, None)  # noqa: E731
+    parts = [
+        (k, _clip(v, 160)) for k, v in (
+            ("affected_subject", _f("finding_subject") or _f("affected_object")),
+            ("observed_condition", _f("deviation_condition") or _f("condition")),
+            ("requirement", _f("requirement")),
+            ("affected_process", _f("affected_process")),
+            ("finding_type", _f("semantic_type")),
+            ("affected_period", _f("affected_period") or _f("time_period")),
+            ("recurrence", "yes" if (_f("previous_capa_referenced") or _f("occurrence_population")) else None),
+        ) if v and str(v).strip() and not str(v).upper().startswith(("UNKNOWN", "NOT ESTABLISHED", "UNRESOLVED"))
+    ]
+    return ("CANONICAL SEMANTIC STATE:\n" + "\n".join(f"  {k}: {v}" for k, v in parts) + "\n") if parts else ""
+
+
 def _context_block(
     finding_text: str,
     evidence_ledger: list[Any],
     root_cause: Any,
     capa: Any,
     impact: Any,
+    canonical_state: Any = None,
+    semantic_context: Any = None,
 ) -> str:
     """Compact, structured context -- only what remediation interpretation
     actually needs. No generated report prose, no financial LLM result, no
     duplicated narrative (spec: prompt context compression)."""
     lines: list[str] = [f"FINDING: {finding_text or '(none)'}", ""]
+    _canon = _canonical_block(canonical_state)
+    if _canon:
+        lines.append(_canon)
+
+    # The single canonical interpretation's own remediation reasoning
+    # (spec §9): the LLM already decided which activities are immediate vs
+    # cause-dependent -- carry that in so remediation costing reasons from
+    # ONE shared understanding, not a fresh independent read.
+    if semantic_context is not None:
+        _rr: list[str] = []
+        _rcs = getattr(semantic_context, "root_cause_status", None)
+        _oblig = getattr(semantic_context, "remediation_obligation", None) or "NOT_DETERMINED"
+        _oblig_why = getattr(semantic_context, "remediation_obligation_rationale", None)
+        if _rcs:
+            _rr.append(f"  root_cause_status: {_rcs}")
+        _rr.append(f"  remediation_obligation: {_oblig}"
+                   + (f" — {_clip(_oblig_why, 160)}" if _oblig_why else ""))
+        _inv_acts = getattr(semantic_context, "investigation_activities", []) or []
+        _rem_acts = getattr(semantic_context, "remediation_activities", []) or []
+        for a in _inv_acts:
+            _rr.append(f"  INVESTIGATION (not remediation, not priced): {_clip(a.activity, 160)}")
+        if not _rem_acts:
+            _rr.append(
+                "  => NO established remediation activity. The implementation scope has not "
+                "yet been determined -- the correct output is estimability=NOT_ASSESSABLE "
+                "(not_assessable_reason=REMEDIATION_NOT_DEFINED / IMPLEMENTATION_SCOPE_UNKNOWN). "
+                "Do NOT manufacture procedure/training/monitoring/control activities to fill "
+                "the cost section. Price only genuine remediation, never the investigation work."
+            )
+        else:
+            _rr.append(
+                "  => These ARE the remediation activities. Produce cost reasoning for "
+                "EXACTLY these -- one activity per line below, keyed by its id. Do NOT add "
+                "an activity, do NOT replace one, do NOT split investigation work back in. "
+                "Your `activities` array, if you emit one, must mirror this list 1:1."
+            )
+        for i, a in enumerate(_rem_acts):
+            _aid = getattr(a, "action_id", None) or f"R{i}"
+            _rr.append(
+                f"  {_aid} [{a.disposition}] {_clip(a.activity, 160)}"
+                + (f" — pricing evidence: {_clip(a.pricing_evidence_needed, 120)}" if a.pricing_evidence_needed else "")
+            )
+        for p in (getattr(semantic_context, "pricing_information", []) or []):
+            if p.observed_value_in_finding and not p.observed_value_is_remediation_cost:
+                _rr.append(
+                    f"  NOTE: '{_clip(p.observed_value_in_finding, 80)}' is a value stated in the "
+                    "finding, NOT a remediation cost"
+                )
+        if _rr:
+            lines.append("REMEDIATION REASONING (from the canonical interpretation "
+                         "-- consume this, do not re-interpret the finding):\n" + "\n".join(_rr))
+            lines.append("")
 
     ev_lines = []
     for idx, item in enumerate(evidence_ledger or []):
@@ -143,13 +215,15 @@ def _build_messages(
     root_cause: Any,
     capa: Any,
     impact: Any,
+    canonical_state: Any = None,
+    semantic_context: Any = None,
 ) -> list[dict[str, str]]:
     settings = get_settings()
     system_template = (
         settings.prompts_dir / "remediation_cost_interpretation_system_prompt.txt"
     ).read_text(encoding="utf-8")
     system_prompt = system_template.format(schema=_SCHEMA_HINT)
-    user_prompt = _context_block(finding_text, evidence_ledger, root_cause, capa, impact)
+    user_prompt = _context_block(finding_text, evidence_ledger, root_cause, capa, impact, canonical_state, semantic_context)
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -164,6 +238,8 @@ async def interpret_remediation(
     impact: Any = None,
     client=None,
     timeout_seconds: float | None = None,
+    canonical_state: Any = None,
+    semantic_context: Any = None,
 ) -> RemediationInterpretationResult:
     evidence_ledger = evidence_ledger or []
 
@@ -184,7 +260,7 @@ async def interpret_remediation(
         return "LLM_UNAVAILABLE", None
 
     try:
-        messages = _build_messages(finding_text, evidence_ledger, root_cause, capa, impact)
+        messages = _build_messages(finding_text, evidence_ledger, root_cause, capa, impact, canonical_state, semantic_context)
     except Exception as exc:
         logger.warning("Remediation cost interpretation: prompt build failed (%s).", exc)
         return "LLM_UNAVAILABLE", None

@@ -1,49 +1,51 @@
-"""Authoritative LLM Provider Factory.
+"""Authoritative LLM provider factory.
 
-Single entry-point for selecting and instantiating the configured LLMProvider
-(Ollama for development/testing and degraded fallback, Microsoft 365 Copilot for
-production -- reached through LiteLLM's custom-provider mechanism).
+Single entry-point. Returns the ONE application-owned inference boundary --
+`LiteLLMProvider` -- bound to the immutable `LLMExecutionConfig` that was frozen
+for this request (`app.services.llm.execution.begin_request`), or, for direct /
+non-request callers (unit tests), resolved from settings.
+
+There is deliberately NO provider fan-out / failover / multi-provider router in
+the inference path. `groq` / `gemini` / `openrouter` are single native LiteLLM
+routes; a failure surfaces as the app's normal degraded / fail-closed behavior,
+never a silent switch to another provider.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.config import get_settings
 from app.services.llm.base import LLMProvider
+from app.services.llm.execution import (
+    UnknownProviderError,
+    effective_execution_config,
+    resolve_execution_config,
+)
 from app.services.llm.exceptions import UnsupportedLLMProviderError
-from app.services.llm.providers.microsoft_copilot_provider import MicrosoftCopilotProvider
-from app.services.llm.providers.ollama_provider import OllamaProvider
+from app.services.llm.providers.litellm_provider import LiteLLMProvider
 
 
 def get_llm_provider(
     provider_name: str | None = None,
     timeout_seconds: float | None = None,
-    **kwargs: Any,
+    model: str | None = None,
+    **_ignored: Any,
 ) -> LLMProvider:
-    """Return the authoritative LLMProvider instance based on runtime configuration.
+    """Return the LiteLLM-backed provider for the active execution config.
 
     Args:
-        provider_name: Optional explicit provider override ("ollama", "copilot"). Defaults to settings.llm_provider.
-        timeout_seconds: Optional operation-specific timeout in seconds.
+        provider_name: optional explicit provider override (unit tests / health
+            endpoints). When omitted, the request-frozen config is used, falling
+            back to settings.
+        timeout_seconds: optional per-operation timeout override.
+        model: optional explicit model override (only meaningful with
+            provider_name).
     """
-    settings = get_settings()
-    name = (provider_name or settings.llm_provider).strip().lower()
+    if provider_name is None and model is None:
+        return LiteLLMProvider(effective_execution_config(), timeout_seconds=timeout_seconds)
 
-    if name == "ollama":
-        model = kwargs.pop("model", None) or settings.ollama_model
-        return OllamaProvider(model=model, timeout_seconds=timeout_seconds, **kwargs)
-
-    if name in ("microsoft_copilot", "microsoft-copilot", "m365_copilot", "m365-copilot", "copilot"):
-        model = kwargs.pop("model", None)
-        return MicrosoftCopilotProvider(model=model, timeout_seconds=timeout_seconds, **kwargs)
-
-    # Legacy router fallback for cloud APIs (Groq, OpenRouter, Gemini)
-    if name in ("groq", "openrouter", "gemini", "router"):
-        from app.services.llm_router import get_llm_router
-        return get_llm_router()
-
-    raise UnsupportedLLMProviderError(
-        f"Unsupported LLM provider: '{name}'. Valid providers are 'ollama', 'microsoft_copilot', "
-        "'groq', 'openrouter', 'gemini'."
-    )
+    try:
+        config = resolve_execution_config(provider=provider_name, model=model)
+    except UnknownProviderError as exc:
+        raise UnsupportedLLMProviderError(str(exc)) from exc
+    return LiteLLMProvider(config, timeout_seconds=timeout_seconds)

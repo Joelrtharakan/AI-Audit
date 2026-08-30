@@ -11,4 +11,5 @@ pytest>=8.3
 pytest-asyncio>=0.24
 litellm>=1.81
 msal>=1.31
+github-copilot-sdk>=1.0.11
 cryptography>=42.0.0

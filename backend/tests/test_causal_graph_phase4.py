@@ -40,8 +40,15 @@ def _canonical_with_semantic_graph(finding: str) -> CanonicalFindingState:
     conflicts = detect_evidence_conflicts(claims)
     props = build_propositions_from_ledger(finding, claims, conflicts)
     sg = build_semantic_graph(finding, claims, props, conflicts)
+    # Mirror what understand_finding_node actually stores: a real resolved
+    # subject (never the literal sentinel "subject", which correctly fails
+    # semantic-subject validation).
+    from app.services.semantic_subject import resolve_deviation
+
+    _r = resolve_deviation(finding, [finding])
+    _subj = _r.finding_subject or _r.subject or "the affected item"
     return CanonicalFindingState(
-        raw_finding=finding, finding_subject="subject", affected_object="subject",
+        raw_finding=finding, finding_subject=_subj, affected_object=_subj,
         affected_process="UNKNOWN", affected_activity="UNKNOWN", deviation=finding,
         observed_deviation=finding, facts=[finding], semantic_graph=sg,
     )
@@ -233,7 +240,11 @@ class TestGraphGroundedInvestigationPlanning:
         """End-to-end (deterministic planner, not the LLM path): a semantic
         graph with an unresolved normative fact produces at least one
         InvestigationQuestion with target_node_id set."""
-        finding = "The equipment log was not maintained as required by Directive EQ-4."
+        # Requirement label ("IRR-9") is deliberately distinct from the
+        # resolved subject ("irrigation cycle") so the grounded question for
+        # the unresolved requirement node is not deduplicated against the
+        # subject-based questions.
+        finding = "The irrigation cycle was not completed as required by Schedule IRR-9."
         canonical = _canonical_with_semantic_graph(finding)
         ledger = [EvidenceItem(claim=finding, source="finding", status=EvidenceStatus.VERIFIED)]
         _, plan = build_deterministic_investigation_plan(

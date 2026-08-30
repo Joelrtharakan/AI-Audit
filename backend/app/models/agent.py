@@ -861,6 +861,16 @@ class CanonicalFindingState(BaseModel):
     immediate_mechanism_status: str = "UNKNOWN"
     mechanism_status: str = "UNKNOWN"
     mechanism_polarity: str | None = None
+    # Competing causal mechanisms the finding text EXPLICITLY enumerates
+    # ("could have resulted from A, B, or C"). Structurally present in the
+    # finding -- preserved here so downstream (RCA / planner / 5-Why) never
+    # collapses "A, B, C remain unresolved" into a bare "root cause unknown".
+    # This is NOT causal inference: only an enumeration the finding makes
+    # explicit. Empty for every finding that does not enumerate alternatives.
+    stated_causal_alternatives: list[str] = Field(default_factory=list)
+    # True when the finding explicitly says those alternatives could not be
+    # distinguished from the available evidence.
+    causal_alternatives_unresolved: bool = False
     process: str = "UNKNOWN"
     procedure: str = "UNKNOWN"
     requirement: str = "UNKNOWN"
@@ -891,6 +901,25 @@ class CanonicalFindingState(BaseModel):
     downstream_action_text: str | None = None
     downstream_action_present: bool = False
     occurrence_population: str | None = None
+    # Explicitly-stated QUANTITATIVE recurrence ("experienced three failures
+    # over a six-month period"). Preserves the count / event / period the
+    # finding states -- WITHOUT inferring a frequency, a probability, or a
+    # recurrence-risk classification (that stays with recurrence_guard /
+    # risk_of_recurrence). None whenever the finding states no explicit count.
+    recurrence_count: int | None = None
+    recurrence_event: str | None = None       # e.g. "failures", "incidents"
+    recurrence_period: str | None = None      # e.g. "a six-month period"
+    # Missing-record semantics (spec: absence of record != absence of
+    # activity). Populated by the LLM-primary merge; None on the deterministic
+    # floor unless resolve_deviation set semantic_type=MISSING_RECORD.
+    missing_record_status: str | None = None  # RECORD_UNAVAILABLE / ACTIVITY_NOT_RECORDED / ...
+    activity_performance_ambiguity: bool = False
+    # Evidence-proposition provenance ("maintenance records show that <X>"):
+    # the source is kept distinct from the subject, the reported action from
+    # the observation, and its epistemic status preserved.
+    evidence_source: str | None = None
+    reported_observation: str | None = None
+    finding_epistemic_status: str | None = None  # VERIFIED / REPORTED / BELIEF / INFERRED / UNKNOWN
     attributed_source: str | None = None
     attributed_proposition: str | None = None
     transition_type: str | None = None
@@ -1717,6 +1746,12 @@ class InvestigationReport(BaseModel):
     confidence: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"  # backwards compatibility
     investigation_required: Literal["YES", "NO", "LIMITED"]
     investigation_mode: InvestigationMode = InvestigationMode.NORMAL
+    # Which layer actually produced the semantic interpretation for this run
+    # (spec §3/§20). The report must never imply canonical LLM reasoning
+    # occurred when the canonical call failed and the deterministic floor took
+    # over. `canonical_semantic_status` records WHY, for internal diagnostics.
+    semantic_mode: Literal["CANONICAL_LLM", "DETERMINISTIC_FALLBACK", "DETERMINISTIC"] = "DETERMINISTIC"
+    canonical_semantic_status: str = "NOT_ATTEMPTED"
     evidence_completeness: EvidenceCompleteness = EvidenceCompleteness.COMPLETE
     root_cause: RootCauseAnalysis
     contributing_factors: list[ContributingFactor] = []
@@ -1860,7 +1895,11 @@ class InvestigateRequest(BaseModel):
     severity: str = ""
     likelihood: str = ""
     risk_result: str = ""
+    # Provider + model selection for this investigation (frozen once at the
+    # request boundary; every LLM stage uses exactly this route). Empty ->
+    # server default (LLM_PROVIDER / LLM_MODEL).
     llm_provider: str = ""
+    llm_model: str = ""
     # Local-dev convenience: a delegated Microsoft Graph access token supplied
     # directly on the request instead of via the Entra sign-in session.
     microsoft_copilot_access_token: str = ""

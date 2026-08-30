@@ -53,8 +53,10 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     # downstream consumer below falls back to its unchanged legacy
     # behavior -- this is state C (Section 17), never conflated with an
     # explicit semantic NOT_ESTABLISHED (state B).
-    semantic_context = None
-    if settings.canonical_semantic_shadow_enabled:
+    # Prefer the context understand_finding_node already computed (LLM-primary
+    # mode) -- never re-interpret the finding a second time.
+    semantic_context = state.get("canonical_semantic_context")
+    if semantic_context is None and settings.canonical_semantic_shadow_enabled:
         try:
             from app.services.canonical_context_validator import validate_canonical_context
             from app.services.canonical_finding_interpreter import interpret_finding_canonically
@@ -62,6 +64,7 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
             raw_semantic_context = await interpret_finding_canonically(
                 finding_text=request.finding_text,
                 evidence_ledger=state.get("evidence_ledger", []),
+                timeout_seconds=settings.canonical_semantic_shadow_timeout_seconds,
             )
             if raw_semantic_context is not None:
                 semantic_context = validate_canonical_context(
@@ -88,7 +91,13 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
         except Exception as _ug_err:
             logger.warning("Causal uncertainty graph construction failed (non-fatal): %s", _ug_err)
 
-    if _graph_result.planner_mode == "NO_ACTIONABLE_UNCERTAINTY":
+    # A finding that EXPLICITLY enumerates competing causal mechanisms always
+    # carries actionable uncertainty -- the mechanisms must be discriminated.
+    # Never short-circuit to "no investigation needed" for it (spec 9/28).
+    from app.agent.causal_guard import extract_stated_causal_alternatives as _esca_plan
+    _has_stated_alts = len(_esca_plan(request.finding_text)) >= 2
+
+    if _graph_result.planner_mode == "NO_ACTIONABLE_UNCERTAINTY" and not _has_stated_alts:
         trace.append(AgentTraceStep.ok(
             f"Investigation Planner: NO_ACTIONABLE_UNCERTAINTY ({_graph_result.reason})"
         ))
@@ -363,6 +372,7 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
                 request.finding_text, state.get("evidence_ledger", []),
                 canonical_subject=getattr(_canonical, "finding_subject", None),
                 canonical_state=_canonical,
+                semantic_context=semantic_context,
             )
             plan = fallback_plan
             trace.append(AgentTraceStep.warn("Investigation Planner: generated fallback questions and evidence plan"))

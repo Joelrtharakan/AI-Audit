@@ -9,6 +9,9 @@
     }
 
     var currentProvider = localStorage.getItem("lqms_preferred_llm_provider") || "ollama";
+    // Provider-neutral model id. Empty -> backend uses the provider's default
+    // (LLM_MODEL / ollama_model / "m365-chat" / copilot_model ...).
+    var currentModel = localStorage.getItem("lqms_preferred_llm_model") || "";
 
     // Sprint 1 primary workflow: LLM-first, no RAG. Field names match
     // AnalyzeFindingRequest in the backend.
@@ -35,6 +38,7 @@
             risk_likelihood: $("#lblRiskL").val() || $("#lblRiskL").text().trim(),
             risk_result: $("#lblRiskResult").val() || $("#lblRiskResult").text().trim(),
             llm_provider: currentProvider,
+            llm_model: currentModel,
             microsoft_copilot_access_token: localStorage.getItem("lqms_copilot_token") || ""
         };
     }
@@ -155,6 +159,13 @@
         } else if (isDegraded) {
             html += "<span style='background:#fef2f2; color:#dc2626; border:1px solid #fecaca; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
             html += "<span style='width:8px; height:8px; border-radius:50%; background:#dc2626; display:inline-block; box-shadow:0 0 8px #dc2626;'></span> SAFETY FALLBACK MODE";
+            html += "</span>";
+        } else if (report.semantic_mode === "DETERMINISTIC_FALLBACK") {
+            // The canonical semantic LLM was the intended authority but its
+            // call did not succeed -- the deterministic floor produced this
+            // analysis. Never label that "DEEP LLM SYNTHESIS ACTIVE".
+            html += "<span style='background:#fffbeb; color:#b45309; border:1px solid #fde68a; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
+            html += "<span style='width:8px; height:8px; border-radius:50%; background:#d97706; display:inline-block; box-shadow:0 0 8px #d97706;'></span> DETERMINISTIC SAFETY ANALYSIS (LLM SEMANTIC LAYER UNAVAILABLE)";
             html += "</span>";
         } else {
             html += "<span style='background:#ecfdf5; color:#059669; border:1px solid #a7f3d0; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
@@ -615,9 +626,25 @@
         var rc = report.remediation_cost;
         if (rc && rc.status) {
             var rcNum = function(n) { return typeof n === "number" && !isNaN(n) && isFinite(n); };
+            var rcCond = {};
+            (rc.conditional_activities || []).forEach(function(a) { rcCond[a] = 1; });
+            var rcActList = function(items) {
+                var h = "<ul style='margin:4px 0 0; padding-left:18px; font-size:12px; color:#334155; line-height:1.6;'>";
+                items.forEach(function(a) {
+                    var isCond = !!rcCond[a];
+                    h += "<li>" + safeEsc(a) + (isCond
+                        ? " <span style='font-size:10px; font-weight:700; color:#b45309; text-transform:uppercase;'>&mdash; conditional</span>"
+                        : "") + "</li>";
+                });
+                return h + "</ul>";
+            };
             var rcMoney = function(n, cur) {
                 if (!rcNum(n)) return null;
-                return safeEsc(cur || rc.currency || "") + " " + n.toLocaleString();
+                var c = cur || rc.currency || "";
+                // Currency is never invented (spec section 7): a bare number
+                // with no currency is not a meaningful amount -- don't render it.
+                if (!c) return null;
+                return safeEsc(c) + " " + n.toLocaleString();
             };
             var rcBadge = function(basis) {
                 var b = String(basis || "NOT_ESTABLISHED").replace(/_/g, " ");
@@ -636,9 +663,37 @@
             html += "</div>";
 
             if (rc.status === "NOT_ASSESSABLE") {
-                html += "<div style='font-size:12px; color:#475569; line-height:1.6;'>" + safeEsc(rc.not_assessable_reason || "Remediation cost cannot be reliably estimated from the available evidence.") + "</div>";
+                // Finding-specific remediation SCOPE is shown even though the
+                // cost cannot be quantified -- the number is NOT_ASSESSABLE,
+                // the approach is not.
+                if (rc.remediation_strategy) {
+                    html += "<div style='margin-bottom:10px;'><div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>Remediation Approach</div>";
+                    html += "<div style='font-size:13px; color:#0f172a; line-height:1.5;'>" + safeEsc(rc.remediation_strategy) + "</div></div>";
+                }
+                if (rc.implementation_activities && rc.implementation_activities.length) {
+                    html += "<div style='margin-bottom:10px;'><div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>Remediation Activities</div>";
+                    html += rcActList(rc.implementation_activities) + "</div>";
+                } else {
+                    html += "<div style='margin-bottom:10px;'><div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>Remediation Activities</div>";
+                    html += "<div style='font-size:13px; color:#0f172a; line-height:1.5;'>None currently established.</div></div>";
+                }
+                if (rc.investigation_activities && rc.investigation_activities.length) {
+                    html += "<div style='margin-bottom:10px;'><div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>Investigation Activities <span style='font-weight:600; text-transform:none; color:#64748b;'>(not remediation &mdash; not part of remediation cost)</span></div>";
+                    html += "<ul style='margin:4px 0 0; padding-left:18px; font-size:12px; color:#334155; line-height:1.6;'>";
+                    rc.investigation_activities.forEach(function(a) { html += "<li>" + safeEsc(a) + "</li>"; });
+                    html += "</ul></div>";
+                }
+                var _remEmpty = !(rc.implementation_activities && rc.implementation_activities.length);
+                if (!_remEmpty && rc.unpriced_activities && rc.unpriced_activities.length && !(rc.implementation_activities && rc.implementation_activities.join("||") === rc.unpriced_activities.join("||"))) {
+                    html += "<div style='margin-bottom:10px;'><div style='font-size:11px; font-weight:800; color:#854d0e; text-transform:uppercase; letter-spacing:0.5px;'>Unpriced Activities</div>";
+                    html += "<ul style='margin:4px 0 0; padding-left:18px; font-size:12px; color:#713f12; line-height:1.6;'>";
+                    rc.unpriced_activities.forEach(function(a) { html += "<li>" + safeEsc(a) + "</li>"; });
+                    html += "</ul></div>";
+                }
+                html += "<div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>Cost</div>";
+                html += "<div style='font-size:12px; color:#475569; line-height:1.6; margin-bottom:6px;'><strong>Not assessable.</strong> " + safeEsc(rc.not_assessable_reason || "Remediation cost cannot be reliably estimated from the available evidence.") + "</div>";
                 if (rc.evidence_improves_estimate && rc.evidence_improves_estimate.length) {
-                    html += "<div style='margin-top:10px; font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>What would improve the estimate:</div>";
+                    html += "<div style='margin-top:8px; font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>" + (_remEmpty ? "Evidence Needed to Establish Remediation Scope" : "Evidence Needed to Price Established Remediation") + "</div>";
                     html += "<ul style='margin:4px 0 0; padding-left:18px; font-size:12px; color:#475569; line-height:1.6;'>";
                     rc.evidence_improves_estimate.forEach(function(e) { html += "<li>" + safeEsc(e) + "</li>"; });
                     html += "</ul>";
@@ -650,9 +705,7 @@
                 }
                 if (rc.implementation_activities && rc.implementation_activities.length) {
                     html += "<div style='margin-bottom:10px;'><div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>Implementation Activities</div>";
-                    html += "<ul style='margin:4px 0 0; padding-left:18px; font-size:12px; color:#334155; line-height:1.6;'>";
-                    rc.implementation_activities.forEach(function(a) { html += "<li>" + safeEsc(a) + "</li>"; });
-                    html += "</ul></div>";
+                    html += rcActList(rc.implementation_activities) + "</div>";
                 }
 
                 var rcLow = rcMoney(rc.low_estimate), rcMl = rcMoney(rc.most_likely_estimate), rcHigh = rcMoney(rc.high_estimate);
@@ -990,7 +1043,8 @@
                     $("#liGithubAuthAuthenticated").show();
 
                     var displayName = user.name || user.github_login;
-                    $("#navGithubLogin").text("@" + (user.user_principal_name || user.github_login) + " (M365 Copilot ✓)");
+                    var copilotLabel = user.auth_provider === "github" ? "GitHub Copilot" : "Microsoft 365 Copilot";
+                    $("#navGithubLogin").text("@" + (user.user_principal_name || user.github_login) + " (" + copilotLabel + " ✓)");
                     $("#dropGithubName").text(displayName);
                     $("#dropGithubLogin").text("@" + user.github_login);
 

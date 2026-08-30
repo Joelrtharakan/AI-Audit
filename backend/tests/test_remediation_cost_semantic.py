@@ -83,11 +83,13 @@ async def test_evidenced_multiply_uses_executor_not_llm_number():
 
 
 # --------------------------------------------------------------------------
-# 2. Assumed pricing → ASSUMPTION_BASED, classification ASSUMED
+# 2. "Do not manufacture precision": an assumed quantity x an assumed rate
+#    is fabricated effort -- no monetary amount is produced, the cost driver
+#    is retained as unpriced, and no LOW/HIGH range is invented.
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_assumed_pricing_is_assumption_based():
+async def test_assumed_quantity_times_assumed_rate_is_not_priced():
     interp = {
         "strategy": {"remediation_summary": "draft a procedure", "interpretation_confidence": "LOW"},
         "cost_components": [{
@@ -102,10 +104,17 @@ async def test_assumed_pricing_is_assumption_based():
         "overall_status": "ASSUMPTION_BASED", "estimability": "ESTIMABLE",
     }
     res = await _run(interp, [_ev("No procedure exists for the task")])
-    assert res.status == RemediationEstimateStatus.ASSUMPTION_BASED
-    assert res.most_likely_estimate == 30000.0
-    assert res.estimate_classification == CostBasis.ASSUMED
-    assert any("assumed" in a.lower() for a in res.assumptions)
+    assert res.most_likely_estimate is None
+    assert res.one_time_cost is None
+    assert res.low_estimate is None and res.high_estimate is None
+    assert res.status == RemediationEstimateStatus.NOT_ASSESSABLE
+    # the driver survives for the auditor, just unpriced
+    assert any("drafting" in a.lower() for a in res.unpriced_activities)
+    assert res.cost_components and res.cost_components[0].calculated_amount is None
+    # professional no-price reason, no internal jargon
+    assert "cannot be reliably estimated" in res.not_assessable_reason
+    for bad in ("LLM", "schema", "parser", "ASSUMED", "None"):
+        assert bad not in res.not_assessable_reason
 
 
 # --------------------------------------------------------------------------
@@ -201,7 +210,7 @@ async def test_partial_estimate_prices_what_it_can():
         "strategy": {"remediation_summary": "replace the unit and revalidate the process"},
         "activities": [
             {"activity_id": "A0", "description": "Procure and install replacement unit", "derived_from": "EVIDENCE"},
-            {"activity_id": "A1", "description": "Revalidate the downstream process", "derived_from": "CAPA"},
+            {"activity_id": "A1", "description": "Revalidate the downstream process", "derived_from": "RECOMMENDED_CAPA"},
         ],
         "cost_components": [
             {"component_id": "C0", "description": "Replacement unit + install", "activity_ids": ["A0"],
@@ -217,7 +226,13 @@ async def test_partial_estimate_prices_what_it_can():
     assert res.status == RemediationEstimateStatus.EVIDENCE_BACKED
     assert res.most_likely_estimate == 240000.0
     assert res.is_partial_estimate is True
-    assert "Process revalidation effort" in res.unpriced_activities
+    # the revalidation WORK is a visible activity and is unpriced ...
+    assert any("revalidat" in a.lower() for a in res.implementation_activities)
+    assert any("revalidat" in a.lower() for a in res.unpriced_activities)
+    # ... but the pricing-driver PHRASE "Process revalidation effort" is NOT an
+    # implementation activity; it stays traceable via cost_components.
+    assert "Process revalidation effort" not in res.implementation_activities
+    assert any(c.component_id == "C1" for c in res.cost_components)
     assert any("could not be priced" in u for u in res.uncertainty_reasons)
     # no fabricated cost for the unpriced activity
     unpriced = [c for c in res.cost_components if c.component_id == "C1"][0]

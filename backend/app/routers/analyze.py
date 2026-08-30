@@ -28,12 +28,26 @@ async def analyze_finding(
     LLM failure rather than partial/guessed data."""
     from app.config import get_settings
     settings = get_settings()
-    if payload.llm_provider:
-        settings.llm_provider = payload.llm_provider.strip().lower()
 
-    # Load the signed-in user's delegated Microsoft Graph token for Copilot calls
     from app.routers.auth import apply_user_copilot_token
     apply_user_copilot_token(request)
+
+    # Freeze ONE provider + ONE model for this analysis request.
+    from app.services.llm.execution import (
+        UnknownProviderError,
+        begin_request,
+        resolve_execution_config,
+    )
+    try:
+        exec_config = resolve_execution_config(
+            provider=(payload.llm_provider or settings.llm_provider),
+            model=(getattr(payload, "llm_model", "") or None),
+        )
+    except UnknownProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    rid = begin_request(exec_config)
+    logger.info("ANALYZE START request_id=%s route=%s", rid, exec_config.public_dict())
+
     try:
         return await service.analyze(payload)
     except LLMError as exc:

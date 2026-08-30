@@ -34,122 +34,131 @@ from app.services.llm.json_parser import (
     parse_llm_json,
     validate_llm_schema,
 )
+from app.services.llm.providers.litellm_provider import LiteLLMProvider
 from app.services.llm.providers.microsoft_copilot_provider import MicrosoftCopilotProvider
-from app.services.llm.providers.ollama_provider import OllamaProvider
 
 import httpx
 import respx
 
 
+def _fake_completion(content: str, finish_reason: str = "stop"):
+    from litellm.types.utils import ModelResponse, Usage
+    mr = ModelResponse()
+    mr.choices[0].message.content = content
+    mr.choices[0].finish_reason = finish_reason
+    mr.usage = Usage(prompt_tokens=128, completion_tokens=42, total_tokens=170)
+    return mr
+
+
 class TestProviderFactory:
-    """Test single authoritative provider factory selection."""
+    """The factory returns exactly ONE boundary -- LiteLLMProvider -- bound to
+    one resolved (provider, model)."""
 
-    def test_factory_returns_ollama_provider(self):
-        with patch("app.services.llm.factory.get_settings") as mock_settings:
-            mock_settings.return_value = Settings(llm_provider="ollama", ollama_model="qwen3:8b")
-            provider = get_llm_provider()
-            assert isinstance(provider, OllamaProvider)
-            assert provider._model == "qwen3:8b"
+    def _prov(self, *, llm_provider, **settings_kw):
+        with patch("app.services.llm.execution.get_settings") as ms:
+            ms.return_value = Settings(llm_provider=llm_provider, **settings_kw)
+            # explicit provider_name so this never reads a leaked request ContextVar
+            return get_llm_provider(provider_name=llm_provider, model=settings_kw.get("llm_model") or None)
 
-    def test_factory_returns_microsoft_copilot_provider(self):
-        with patch("app.services.llm.factory.get_settings") as mock_settings:
-            mock_settings.return_value = Settings(
-                llm_provider="microsoft_copilot", microsoft_copilot_access_token="mock_token"
-            )
-            provider = get_llm_provider()
-            assert isinstance(provider, MicrosoftCopilotProvider)
-            assert provider._model == "m365-chat"
+    def test_factory_returns_litellm_provider_for_ollama(self):
+        p = self._prov(llm_provider="ollama", llm_model="qwen3:8b")
+        assert isinstance(p, LiteLLMProvider)
+        assert p.config.provider == "ollama"
+        assert p.config.litellm_model == "ollama_chat/qwen3:8b"
+
+    def test_factory_ollama_default_model_when_llm_model_unset(self):
+        p = self._prov(llm_provider="ollama", llm_model="", ollama_model="qwen3:8b")
+        assert p.config.litellm_model == "ollama_chat/qwen3:8b"
+
+    def test_factory_returns_litellm_provider_for_microsoft(self):
+        p = self._prov(llm_provider="microsoft_copilot", microsoft_copilot_access_token="mock_token")
+        assert isinstance(p, LiteLLMProvider)
+        assert p.config.provider == "microsoft_copilot"
+        assert p.config.litellm_model == "microsoft_copilot/m365-chat"
+
+    def test_factory_returns_litellm_provider_for_github(self):
+        p = self._prov(llm_provider="github_copilot", copilot_github_token="ghp_x")
+        assert isinstance(p, LiteLLMProvider)
+        assert p.config.provider == "github_copilot"
+        assert p.config.litellm_model.startswith("github_copilot_session/")
 
     def test_factory_copilot_alias_maps_to_microsoft(self):
-        with patch("app.services.llm.factory.get_settings") as mock_settings:
-            mock_settings.return_value = Settings(llm_provider="copilot")
-            assert isinstance(get_llm_provider(), MicrosoftCopilotProvider)
+        assert self._prov(llm_provider="copilot").config.provider == "microsoft_copilot"
 
     def test_factory_rejects_unsupported_provider(self):
-        with patch("app.services.llm.factory.get_settings") as mock_settings:
-            mock_settings.return_value = Settings(llm_provider="unsupported_provider_xyz")
+        with patch("app.services.llm.execution.get_settings") as ms:
+            ms.return_value = Settings(llm_provider="unsupported_provider_xyz")
             with pytest.raises(UnsupportedLLMProviderError):
-                get_llm_provider()
+                get_llm_provider("unsupported_provider_xyz")
 
 
-class TestOllamaProviderContract:
-    """Test OllamaProvider behavior and error mapping."""
+class TestLiteLLMBoundaryContract:
+    """LiteLLMProvider: ONE call, normalized LLMResponse, mapped errors, no fan-out."""
 
-    @pytest.mark.asyncio
-    async def test_ollama_successful_generation_normalization(self):
-        provider = OllamaProvider(base_url="http://localhost:11434", model="qwen3:8b")
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "message": {"content": '{"root_cause_status": "NOT_ESTABLISHED"}'},
-            "done_reason": "stop",
-            "eval_count": 42,
-            "prompt_eval_count": 128,
-            "eval_duration": 1_000_000_000,
-            "prompt_eval_duration": 500_000_000,
-            "load_duration": 10_000_000,
-        }
-
-        mock_http_client = AsyncMock()
-        mock_http_client.post.return_value = mock_response
-
-        with patch("app.services.llm.providers.ollama_provider._get_shared_client", return_value=mock_http_client):
-            response = await provider.generate(
-                node="core_synthesis",
-                prompt="Analyze the finding",
-                system_prompt="System instructions",
-                response_format="json",
-            )
-
-            assert isinstance(response, LLMResponse)
-            assert response.provider == "ollama"
-            assert response.model == "qwen3:8b"
-            assert response.content == '{"root_cause_status": "NOT_ESTABLISHED"}'
-            assert response.finish_reason == "stop"
-            assert response.output_tokens == 42
-            assert response.input_tokens == 128
-            assert response.raw_metadata["hit_output_limit"] is False
+    def _provider(self, provider="ollama", model="qwen3:8b", **kw):
+        from app.services.llm.execution import resolve_execution_config, begin_request
+        with patch("app.services.llm.execution.get_settings") as ms:
+            ms.return_value = Settings(llm_provider=provider, llm_model=model, **kw)
+            cfg = resolve_execution_config(provider, model)
+        begin_request(cfg, request_id="TESTREQ")
+        return LiteLLMProvider(cfg)
 
     @pytest.mark.asyncio
-    async def test_ollama_timeout_error_mapping(self):
-        import httpx
+    async def test_single_acompletion_call_and_normalization(self):
+        p = self._provider()
+        with patch("litellm.acompletion", new=AsyncMock(return_value=_fake_completion('{"ok": true}'))) as mock_ac:
+            resp = await p.generate(node="core_synthesis", prompt="x", system_prompt="s", response_format="json")
+        assert mock_ac.await_count == 1                       # exactly one call
+        assert mock_ac.await_args.kwargs["model"] == "ollama_chat/qwen3:8b"
+        assert mock_ac.await_args.kwargs["num_retries"] == 0  # no fallback
+        assert isinstance(resp, LLMResponse)
+        assert resp.provider == "ollama" and resp.model == "qwen3:8b"
+        assert resp.content == '{"ok": true}'
+        from app.services.llm.call_metadata import get_last_call_metadata
+        meta = get_last_call_metadata()
+        assert meta["provider_used"] == "ollama" and meta["fallback_used"] is False
+        assert meta["provider_attempts"] == ["ollama"] and meta["request_id"] == "TESTREQ"
 
-        provider = OllamaProvider(base_url="http://localhost:11434", model="qwen3:8b", timeout_seconds=1.0)
-        mock_http_client = AsyncMock()
-        mock_http_client.post.side_effect = httpx.TimeoutException("Read timed out")
-
-        with patch("app.services.llm.providers.ollama_provider._get_shared_client", return_value=mock_http_client):
+    @pytest.mark.asyncio
+    async def test_timeout_maps_to_LLMTimeoutError(self):
+        import litellm
+        p = self._provider()
+        with patch("litellm.acompletion", new=AsyncMock(side_effect=litellm.Timeout("slow", model="m", llm_provider="ollama"))):
             with pytest.raises(LLMTimeoutError):
-                await provider.generate(node="extraction", prompt="Extract finding")
+                await p.generate(node="critic", prompt="x")
 
     @pytest.mark.asyncio
-    async def test_ollama_connection_error_mapping(self):
-        import httpx
-
-        provider = OllamaProvider(base_url="http://localhost:11434", model="qwen3:8b")
-        mock_http_client = AsyncMock()
-        mock_http_client.post.side_effect = httpx.ConnectError("Connection refused")
-
-        with patch("app.services.llm.providers.ollama_provider._get_shared_client", return_value=mock_http_client):
+    async def test_connection_error_maps_to_LLMConnectionError(self):
+        import litellm
+        p = self._provider()
+        with patch("litellm.acompletion", new=AsyncMock(side_effect=litellm.APIConnectionError(message="refused", model="m", llm_provider="ollama"))):
             with pytest.raises(LLMConnectionError):
-                await provider.generate(node="extraction", prompt="Extract finding")
+                await p.generate(node="extraction", prompt="x")
 
     @pytest.mark.asyncio
-    async def test_ollama_empty_response_error_mapping(self):
-        provider = OllamaProvider(base_url="http://localhost:11434", model="qwen3:8b")
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "message": {"content": "   "},
-            "done_reason": "stop",
-        }
+    async def test_auth_error_maps_to_LLMAuthenticationError(self):
+        import litellm
+        p = self._provider(provider="microsoft_copilot", model="m365-chat", microsoft_copilot_access_token="bad")
+        with patch("litellm.acompletion", new=AsyncMock(side_effect=litellm.AuthenticationError(message="401", model="m", llm_provider="microsoft_copilot"))):
+            with pytest.raises(LLMAuthenticationError):
+                await p.generate(node="core_synthesis", prompt="x")
 
-        mock_http_client = AsyncMock()
-        mock_http_client.post.return_value = mock_response
-
-        with patch("app.services.llm.providers.ollama_provider._get_shared_client", return_value=mock_http_client):
+    @pytest.mark.asyncio
+    async def test_empty_content_maps_to_LLMInvalidResponseError(self):
+        p = self._provider()
+        with patch("litellm.acompletion", new=AsyncMock(return_value=_fake_completion("   "))):
             with pytest.raises(LLMInvalidResponseError):
-                await provider.generate(node="critic", prompt="Critic review")
+                await p.generate(node="critic", prompt="x")
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_even_when_first_provider_fails(self):
+        """A failure NEVER results in a second provider being attempted."""
+        import litellm
+        p = self._provider()
+        with patch("litellm.acompletion", new=AsyncMock(side_effect=litellm.ServiceUnavailableError(message="503", model="m", llm_provider="ollama"))) as mock_ac:
+            with pytest.raises(LLMProviderError):
+                await p.generate(node="core_synthesis", prompt="x")
+        assert mock_ac.await_count == 1  # one provider, one attempt, then fail-closed
 
 
 def _conv_route(rsx, *, chat_status=200, chat_json=None, conv_status=201):

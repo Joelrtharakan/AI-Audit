@@ -116,6 +116,7 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     )
 
     from app.services.attribution_extraction import _is_expressive_non_substantive
+    from app.services.epistemic_modality import classify_epistemic_stance
     _excluded_non_substantive_segments: list[str] = []
 
     for seg in segments:
@@ -123,6 +124,19 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         if instr_res.is_untrusted:
             untrusted_segments.append(seg)
         elif _is_expressive_non_substantive(seg) or _CONVERSATIONAL_RE.search(seg.strip()):
+            _excluded_non_substantive_segments.append(seg)
+        elif classify_epistemic_stance(seg) is not None:
+            # An epistemic STANCE ("X believed / suspected / assumed / was of
+            # the opinion that Y") asserts a mental state about the world, not
+            # an observed affected object. Excluded from subject-resolution
+            # input here using the SAME canonical classifier the evidence-
+            # ledger loop below uses to record it as BELIEF -- so the two
+            # passes agree and a belief-about-a-cause can never become the
+            # affected object. (Grammatical modality is deliberately NOT
+            # gated here: a compound finding often pairs an ACTUAL main clause
+            # with a counterfactual reason -- "the check was skipped because
+            # it would have delayed X" -- and the evidence loop already marks
+            # the non-actual part UNVERIFIED per-claim.)
             _excluded_non_substantive_segments.append(seg)
         else:
             seg_resolved = resolve_deviation(seg)
@@ -353,6 +367,7 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     # result the authoritative resolver actually found.
     from app.services.semantic_subject import (
         best_partial_noun_phrase,
+        is_established_subject,
         resolve_deviation,
         validate_semantic_subject,
     )
@@ -376,10 +391,33 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         resolution_text = ""
     else:
         resolution_text = request.finding_text
+
+    # A "two independent quantified assessments, comparability explicitly
+    # unresolved" finding carries its comparison semantics ACROSS sentence
+    # boundaries ("Engineering estimated ... ₹3 lakh." / "Procurement
+    # obtained a quotation of ₹4.2 lakh, but the scope had not been
+    # confirmed to match ..."). Per-segment filtering (e.g. the epistemic-
+    # stance gate dropping the "X estimated that ..." clause) can leave
+    # `resolution_text` with only one side, destroying the comparison. When
+    # the trusted full text (untrusted injections still excluded) exhibits
+    # this shape, resolve on that instead so both assessments and their
+    # provenance are conserved.
+    from app.services.semantic_subject import _extract_dual_assessment_comparison
+    _trusted_full = " ".join(s for s in segments if s not in untrusted_segments)
+    if (
+        _trusted_full
+        and _extract_dual_assessment_comparison(_trusted_full)
+        and not _extract_dual_assessment_comparison(resolution_text)
+    ):
+        resolution_text = _trusted_full
+
     resolved = resolve_deviation(resolution_text, fact_claims)
     source_words = significant_words(resolution_text)
     _DEGRADED_SUBJECTS = {"process compliance", None, ""}
-    resolver_succeeded = (resolved.finding_subject or resolved.subject) not in _DEGRADED_SUBJECTS
+    # A bare fragment ("The"), a generic placeholder, or an explicit
+    # unresolved marker must all count as "resolver did NOT succeed" so the
+    # LLM-subject / best-fragment / honest-marker fallback below runs.
+    resolver_succeeded = is_established_subject(resolved.finding_subject or resolved.subject)
 
     if resolver_succeeded:
         deviation_subject = resolved.finding_subject or resolved.subject
@@ -452,6 +490,18 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     from app.agent.causal_guard import extract_immediate_mechanism
     mechanism = extract_immediate_mechanism(reported_claims, fact_claims)
 
+    # Preserve any causal differential the finding states explicitly
+    # ("could have resulted from A, B, or C") -- structural, no inference.
+    from app.agent.causal_guard import (
+        extract_stated_causal_alternatives,
+        stated_alternatives_unresolved,
+    )
+    _stated_causal_alternatives = extract_stated_causal_alternatives(request.finding_text)
+    _causal_alternatives_unresolved = bool(_stated_causal_alternatives) and (
+        stated_alternatives_unresolved(request.finding_text)
+        or mechanism.status == "UNKNOWN"
+    )
+
     # Claim-level decomposition with full provenance (Phase 2): decomposes
     # the finding into individual claims, each with its own attribution and
     # status, then detects conflicts between claims about the same
@@ -500,7 +550,14 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         request.finding_text, evidence_claims, evidence_conflicts, referenced_documents
     )
     propositions = build_propositions_from_ledger(request.finding_text, evidence_claims, evidence_conflicts)
-    semantic_graph = build_semantic_graph(request.finding_text, evidence_claims, propositions, evidence_conflicts)
+    # Pass the already-computed DeviationInfo -- one semantic interpretation
+    # per investigation (build_semantic_graph must not re-run resolve_deviation).
+    # Only reuse it when it was computed from the SAME text the graph builder
+    # would use (byte-equivalence for the segment-filtered path).
+    semantic_graph = build_semantic_graph(
+        request.finding_text, evidence_claims, propositions, evidence_conflicts,
+        resolved_deviation=(resolved if resolution_text == request.finding_text else None),
+    )
 
     # Typed measurement (Section 8): a discrepancy magnitude ("approximately
     # 4.2%") is semantically OBSERVED_DISCREPANCY, never a financial amount,
@@ -575,8 +632,8 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         reported_statements=reported_claims,
         unknowns=["Root cause unconfirmed from initial evidence"],
         affected_objects=[deviation_subject],
-        affected_period=deviation_date or "UNKNOWN",
-        time_period=deviation_date or "UNKNOWN",
+        affected_period=deviation_date or resolved.recurrence_period or recurrence.recurrence_period or "UNKNOWN",
+        time_period=deviation_date or resolved.recurrence_period or recurrence.recurrence_period or "UNKNOWN",
         actor=deviation_actor,
         actors=resolved.actors,
         entities=resolved.entities,
@@ -586,6 +643,8 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         immediate_mechanism_status=mechanism.status,
         mechanism_status=mechanism.status,
         mechanism_polarity=mechanism.polarity,
+        stated_causal_alternatives=_stated_causal_alternatives,
+        causal_alternatives_unresolved=_causal_alternatives_unresolved,
         prompt_injection_detected=is_instruction(request.finding_text),
         input_integrity_status=_worst_classification,
         security_flags=_security_flags,
@@ -612,6 +671,9 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         downstream_action_text=resolved.downstream_action_text,
         downstream_action_present=resolved.downstream_action_present,
         occurrence_population=resolved.occurrence_population,
+        recurrence_count=resolved.recurrence_count or recurrence.recurrence_count,
+        recurrence_event=resolved.recurrence_event or recurrence.recurrence_event,
+        recurrence_period=resolved.recurrence_period or recurrence.recurrence_period,
         attributed_source=resolved.attributed_source,
         attributed_proposition=resolved.attributed_proposition,
         transition_type=resolved.transition_type,
@@ -692,11 +754,78 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             missing_information=["Input does not contain an actionable audit finding, deviation, or verifiable condition."],
         )
 
+    # ------------------------------------------------------------------
+    # LLM-PRIMARY semantic interpretation (spec Phase 3/4). The LLM builds
+    # the structured semantic representation; a deterministic validator
+    # constrains it; validated fields are MERGED into canonical_finding_state
+    # with resolve_deviation() as the fail-closed floor. Gated OFF by default
+    # -- when disabled, or the LLM returns None/invalid, the merge is a pure
+    # no-op and canonical_finding_state is exactly what resolve_deviation
+    # produced. Computed ONCE here and reused by every downstream node via
+    # state["canonical_semantic_context"].
+    # ------------------------------------------------------------------
+    canonical_semantic_context = state.get("canonical_semantic_context")
+    canonical_semantic_status = state.get("canonical_semantic_status") or (
+        "REUSED" if canonical_semantic_context is not None else "NOT_ATTEMPTED"
+    )
+    if settings.canonical_semantic_llm_primary and canonical_semantic_context is None:
+        try:
+            from app.services.canonical_context_validator import validate_canonical_context
+            from app.services.canonical_finding_interpreter import (
+                interpret_finding_canonically_with_status,
+            )
+            from app.services.canonical_state_merge import merge_semantic_context_into_canonical
+
+            # timeout_seconds=None -> production `canonical_semantic_primary_timeout_seconds`,
+            # NOT the 8s shadow timeout: this is the PRIMARY semantic authority.
+            canonical_semantic_status, _raw_ctx = await interpret_finding_canonically_with_status(
+                finding_text=request.finding_text,
+                evidence_ledger=ledger,
+                timeout_seconds=None,
+            )
+            if _raw_ctx is not None:
+                canonical_semantic_context = validate_canonical_context(
+                    _raw_ctx, ledger, request.finding_text
+                )
+                canonical_state, _merge = merge_semantic_context_into_canonical(
+                    canonical_state, canonical_semantic_context
+                )
+                if _merge.fields_from_llm or _merge.fields_rejected:
+                    trace.append(AgentTraceStep.ok(
+                        "Understanding: LLM-primary semantic merge — "
+                        f"from_llm={_merge.fields_from_llm} rejected={_merge.fields_rejected} "
+                        f"conserved={_merge.fields_conserved}"
+                    ))
+        except Exception as exc:  # noqa: BLE001 - fail-closed by design
+            logger.warning("LLM-primary semantic interpretation failed (%s); deterministic floor retained.", exc)
+            canonical_semantic_context = None
+            canonical_semantic_status = "UNEXPECTED_ERROR"
+
+    # Explicit, observable semantic mode (spec §3/§20): the report must never
+    # imply canonical LLM reasoning occurred when the canonical call failed.
+    _semantic_mode = "CANONICAL_LLM" if canonical_semantic_context is not None else (
+        "DETERMINISTIC_FALLBACK" if settings.canonical_semantic_llm_primary else "DETERMINISTIC"
+    )
+    if settings.canonical_semantic_llm_primary:
+        if canonical_semantic_context is not None:
+            trace.append(AgentTraceStep.ok(
+                f"Understanding: semantic mode = {_semantic_mode} "
+                f"(canonical interpretation {canonical_semantic_status})"
+            ))
+        else:
+            trace.append(AgentTraceStep.warn(
+                f"Understanding: semantic mode = {_semantic_mode} — canonical interpretation "
+                f"unavailable ({canonical_semantic_status}); deterministic floor is authoritative"
+            ))
+
     return {
         **state,
         "observation_quality": quality,
         "extraction": extraction,
         "canonical_finding_state": canonical_state,
+        "canonical_semantic_context": canonical_semantic_context,
+        "canonical_semantic_status": canonical_semantic_status,
+        "semantic_mode": _semantic_mode,
         "trace": trace,
         "errors": errors,
         "iteration_count": state.get("iteration_count", 0),

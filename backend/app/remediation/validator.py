@@ -49,6 +49,32 @@ def _validate_component(
     """Return a possibly-adjusted copy of the component, or None if it must be
     dropped entirely. Adjustments (basis downgrade, pricing strip) are recorded
     in `outcome.llm_disagreements`."""
+    # --- Observed-value / remediation-cost boundary (spec sections 16/17/25):
+    # an observed ESTIMATE or QUOTATION carried over from the finding is
+    # finding / financial evidence, not remediation work. It must never be
+    # modelled as a remediation cost component regardless of how the LLM
+    # labelled it. Structural test on the component's own quantity unit and
+    # description -- no domain vocabulary.
+    from app.services.semantic_subject import _measurement_artifact_head
+    _qu = (c.quantity_unit or "").strip().lower().rstrip("s")
+    _ARTIFACT_UNITS = {
+        "estimate", "quotation", "quote", "projection", "forecast",
+        "appraisal", "valuation", "bid", "tender",
+    }
+    if _qu in _ARTIFACT_UNITS or _measurement_artifact_head(c.description):
+        outcome.rejected.append(
+            RemediationRejectedItem(
+                item_id=c.component_id, kind="COMPONENT",
+                reason_code="OBSERVED_VALUE_NOT_REMEDIATION",
+                detail=(
+                    "This component identifies an observed estimate/quotation from the "
+                    "finding, which is finding evidence rather than remediation work; "
+                    "it was not priced as a remediation cost."
+                ),
+            )  # type: ignore[arg-type]
+        )
+        return None
+
     kept_refs = [r for r in c.source_reference_ids if r in valid_reference_ids]
     dropped_refs = [r for r in c.source_reference_ids if r not in valid_reference_ids]
     data = c.model_dump()
@@ -78,22 +104,48 @@ def _validate_component(
             "downgraded to ASSUMED."
         )
 
-    # --- No invented pricing (spec section 6): a numeric unit cost with no
-    # defensible basis AND no stated assumption is stripped; the component
-    # survives as a named cost driver with no number.
+    # --- "Do not manufacture precision." A monetary figure enters the
+    # estimate ONLY when it is anchored to evidence -- never merely because
+    # the LLM labelled an invented number ESTIMATED/ASSUMED. Anchored means:
+    #
+    #   * unit_cost_basis is VERIFIED or REPORTED  (an evidence item stated
+    #     the price / rate / total), OR
+    #   * unit_cost_basis is ESTIMATED *and* the component cites >=1 real
+    #     evidence item  (a defensible inference from a cited source, e.g. a
+    #     midpoint of two stated internal estimates).
+    #
+    # ADDITIONALLY, a per-unit RATE (PER_HOUR / PER_UNIT / ...) is anchored
+    # only when the QUANTITY it multiplies is itself EVIDENCED -- an assumed
+    # "N hours x rate" is fabricated effort (spec: no default effort quantity,
+    # no default labour rate).
+    #
+    # Not anchored -> the figure and any range are removed; the component
+    # SURVIVES as a named, unpriced cost driver (spec sections 1-8, 18, 20).
     eff_basis = data["unit_cost_basis"]
-    if c.unit_cost is not None and eff_basis == "NOT_ESTABLISHED" and not c.assumptions:
+    _rate_anchored = eff_basis in ("VERIFIED", "REPORTED") or (
+        eff_basis == "ESTIMATED" and has_evidence_ref
+    )
+    _is_rate = c.amount_type in ("PER_QUANTITY", "PER_HOUR", "PER_UNIT", "PER_EVENT", "PER_IMPLEMENTATION")
+    _qty_anchored = data.get("quantity_basis") == "EVIDENCED"
+    _anchored = _rate_anchored and (_qty_anchored or not _is_rate)
+
+    if not _anchored and (
+        data.get("unit_cost") is not None
+        or data.get("unit_cost_low") is not None
+        or data.get("unit_cost_high") is not None
+    ):
+        _why = (
+            "an assumed per-unit quantity" if (_is_rate and _rate_anchored and not _qty_anchored)
+            else "no evidence-backed pricing basis"
+        )
         data["unit_cost"] = None
         data["unit_cost_low"] = None
         data["unit_cost_high"] = None
+        data["unit_cost_basis"] = "NOT_ESTABLISHED"
         outcome.llm_disagreements.append(
-            f"{c.component_id}: unit cost {c.unit_cost} had no evidence basis and no stated "
-            "assumption -- the figure was removed; the cost driver is retained without a price."
+            f"{c.component_id}: {_why} -- no monetary amount was produced; the cost driver is "
+            "retained for the auditor with pricing not established."
         )
-    elif c.unit_cost is not None and eff_basis == "ASSUMED" and not c.assumptions:
-        data["assumptions"] = [
-            "Unit cost is an assumed placeholder; no pricing basis was stated in the evidence."
-        ]
 
     # --- Non-positive / non-finite numeric guards.
     if data.get("unit_cost") is not None and not _finite_pos(data["unit_cost"]):
@@ -212,9 +264,10 @@ def validate_and_plan(
         adjusted = _validate_component(c, valid_reference_ids, valid_evidence_ids, outcome)
         if adjusted is None:
             outcome.dropped_component_ids.append(c.component_id)
-            outcome.rejected.append(
-                RemediationRejectedItem(item_id=c.component_id, kind="COMPONENT", reason_code="MISSING_PROVENANCE", detail="Component could not be validated.")  # type: ignore[arg-type]
-            )
+            if not any(r.item_id == c.component_id and r.kind == "COMPONENT" for r in outcome.rejected):
+                outcome.rejected.append(
+                    RemediationRejectedItem(item_id=c.component_id, kind="COMPONENT", reason_code="MISSING_PROVENANCE", detail="Component could not be validated.")  # type: ignore[arg-type]
+                )
             continue
         components.append(adjusted)
 

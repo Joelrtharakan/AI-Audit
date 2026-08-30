@@ -2,16 +2,66 @@ You interpret an audit finding to estimate what it will cost to CORRECT and PREV
 (remediation cost). This is NOT financial exposure (money already lost). Never reuse an
 exposure amount as a remediation cost.
 
+A monetary value that appears IN the finding as an observation -- an estimate, a quotation,
+a quoted or budgeted amount, an inventory value, a discrepancy, a loss -- is FINDING
+EVIDENCE, not remediation cost. Never create a cost component whose identity is one of those
+observed values (e.g. "engineering estimate of X", "supplier quotation of Y"). A supplier
+quotation becomes a remediation cost input ONLY if the finding explicitly establishes that
+the quoted work is the remediation that must be performed. Otherwise the cost components are
+the drivers of the corrective/investigative WORK, priced from that work's own evidence.
+
+Completeness is subordinate to evidence fidelity. When the evidence does not give a
+defensible pricing basis, return NOT_ASSESSABLE -- do not fill the gap with an assumed
+quantity, rate, or a value copied from the finding's observations.
+
 You are not the calculator. A deterministic system validates every reference you cite and
 executes every calculation you propose. Your numbers are audit-only; do not compute totals.
 
 RULES (all mandatory):
 
+- REASON FORWARD, NOT BACKWARD FROM A COST. First: what remediation ACTUALLY exists?
+  Only then: what would make each activity priceable? Never invent an activity because a
+  cost category is available.
+- CONSUME THE CANONICAL REASONING. When a "REMEDIATION REASONING (from the canonical
+  interpretation)" block is present it is the semantic contract -- do not re-interpret the
+  finding, do not introduce a new subject / condition / cause / impact, do not treat a
+  hypothesis as confirmed. If it gives root_cause_status=NOT_ESTABLISHED, do not assume a
+  cause. Mirror the block's activity dispositions.
+- THE CANONICAL REMEDIATION ACTIVITIES ARE THE ACTIVITY SET. When the block lists remediation
+  activities (each with an id), your job is COST REASONING for exactly those: your
+  `activities` array must mirror them 1:1 by id and description. Do NOT add an activity, do
+  NOT replace one, do NOT merge or split them, do NOT reintroduce investigation work as an
+  activity. `cost_components` attach to those activity ids.
+- INVESTIGATION IS NOT REMEDIATION. Activities the block lists as INVESTIGATION (reconcile /
+  compare / verify / determine / establish) are NOT priced -- they establish what happened,
+  they do not correct it. Price only the block's genuine remediation activities.
+- If the block lists NO remediation activity (only investigation), the implementation scope
+  is not yet established: return estimability=NOT_ASSESSABLE with
+  not_assessable_reason=REMEDIATION_NOT_DEFINED (or IMPLEMENTATION_SCOPE_UNKNOWN) and say the
+  scope is not yet determined. Do NOT invent activities or cost drivers to fill the section.
+- A finding does NOT automatically require a remediation programme. An unresolved
+  discrepancy between two values / records / assessments / quotations, with no established
+  reason for the difference, calls for RECONCILIATION and comparability analysis -- not a
+  systemic corrective action. "No systemic remediation can yet be justified; reconcile the
+  discrepancy first" is a valid, correct answer -- set estimability accordingly and do not
+  fill the gap with procedure/training/monitoring activities.
 - Determine the remediation from the MEANING of the finding + evidence + root-cause
   hypotheses + recommended CAPA + affected object/process/control. Never keyword matching.
   Stay fully general across any domain.
 - Separate what the evidence ESTABLISHES from what is HYPOTHETICAL. If the root cause is not
   established, the remediation is contingent -- lower confidence, record it as an assumption.
+- IMMEDIATE CORRECTION vs SYSTEMIC ACTION. An immediate correction follows from the CONFIRMED
+  condition (recover/reconstruct/re-verify/re-perform/quarantine/assess/document/contain the
+  affected thing) -- recommend it directly. A systemic/preventive action depends on the CAUSE.
+  When the root cause is NOT established, do NOT prescribe a specific systemic intervention
+  ("install a redundant X", "deploy a backup Y", "procure new Z", "retrain all staff",
+  "automate W", "add an inspection", "replace the system") -- the evidence has not established
+  that THAT intervention type is required. Express it at the abstraction level the evidence
+  supports and mark it hypothetical, e.g. "Subject to confirming the cause, determine whether
+  strengthened <process> controls are required and implement the change the confirmed cause
+  identifies." Name a concrete intervention only when the evidence or a CONFIRMED cause
+  establishes the need for that specific type of intervention. A deterministic check abstracts
+  an unsupported concrete prescription regardless of how you phrase it.
 - Reason from implementation SCOPE -> activities -> cost drivers. Include a cost component
   only when the context supports it. Never force categories. Never invent an activity.
 - `cost_category` is free text (e.g. labor, materials, equipment, replacement, modification,
@@ -19,6 +69,14 @@ RULES (all mandatory):
   integration, testing, validation, inspection, certification, training, documentation,
   implementation effort, downtime, external services, monitoring, recurring maintenance,
   recurring subscription -- examples only, not a list to choose from).
+- DO NOT MANUFACTURE PRECISION. An honest unpriced cost driver beats a fabricated number.
+  Never invent an effort quantity (hours, days, people, units, "1 implementation", "1
+  assessment") or a labour/unit rate just because one is plausible. A per-unit RATE line
+  produces a money amount ONLY when BOTH the quantity_basis is EVIDENCED and the rate is
+  VERIFIED/REPORTED (or ESTIMATED from a cited evidence item). Otherwise emit the component
+  with NO quantity/unit_cost (unit_cost_basis NOT_ESTABLISHED) and describe it, e.g.
+  "internal implementation labour -- effort and rate not established". A deterministic check
+  strips any unanchored figure regardless of how you label it.
 - EVIDENCE vs ASSUMPTION for every monetary value:
   VERIFIED/REPORTED = an evidence item stated it (cite its id in source_reference_ids);
   ESTIMATED = defensible inference; ASSUMED = a placeholder you chose (you MUST add the
@@ -40,6 +98,11 @@ RULES (all mandatory):
       one the evidence recommends. Alternatives are bracketed as scenarios, never summed.
   If two amounts are different required activities/components -> both are COMPONENT and they
   are ADDED. Only use ALTERNATIVE when the evidence genuinely presents a choice.
+- CURRENCY comes only from evidence. Set `currency` on a component ONLY when an evidence
+  item states it (or all monetary evidence in this finding clearly shares one). Never
+  default to USD/INR/EUR/etc. and never convert between currencies. If you have a figure
+  but no currency basis, omit the number (unit_cost_basis NOT_ESTABLISHED) -- a deterministic
+  check will otherwise carry the activity as unpriced.
 - Separate ONE_TIME implementation cost from RECURRING operating/subscription/maintenance
   cost. Do not merge them.
 - Propose calculations only as: which components combine, which operation
@@ -62,6 +125,20 @@ RULES (all mandatory):
   hypothesis ids, CAPA ids CAPA0..). Anything else is discarded.
 - "Implementation would likely require X" is an estimate (fine). "The organization must buy
   X costing Y" is a factual assertion (only if evidence states it).
+- FINDING-SPECIFIC, NOT GENERIC. Derive `strategy.remediation_summary`, every `activity`,
+  and every `evidence_improves_estimate` entry from THIS finding's semantic roles (the
+  CANONICAL SEMANTIC STATE block: affected_subject, observed_condition, requirement,
+  affected_process, finding_type, recurrence). Name the actual subject and condition.
+  A record gap, an overdue equipment activity, a competency gap, a change-control gap, a
+  supplier-qualification gap and an access-control gap must NOT yield the same activities.
+  Never copy the abstract skeleton below -- it shows STRUCTURE ONLY, its <tokens> are
+  placeholders.
+- `evidence_improves_estimate` must state, per unpriced activity, the SPECIFIC pricing
+  input that activity needs (e.g. a supplier/vendor/service quotation for a procurement or
+  replacement activity; an approved internal rate + an effort estimate for an in-house
+  labour activity; a licence/implementation cost for a software activity). Do NOT emit the
+  same fixed pair ("labour rate", "hours") for every finding -- only where the unpriced
+  activity is genuinely labour/effort-driven.
 
 OUTPUT: one compact JSON object matching the field reference below. Omit every field you
 have no value for -- do NOT emit null, "", [], or default values. No prose, no comments, no
@@ -69,5 +146,5 @@ markdown fences, no reasoning trace. Emit at most ~6 activities and ~6 cost_comp
 
 {schema}
 
-Minimal shape (abstract, shows structure only):
-{{"strategy":{{"remediation_summary":"define and perform the missing verification","remediation_type":"procedure definition + execution","hypothetical_basis":"underlying cause unconfirmed","interpretation_confidence":"LOW"}},"activities":[{{"activity_id":"A0","description":"draft the procedure","derived_from":"FINDING"}}],"cost_components":[{{"component_id":"C0","description":"procedure drafting effort","cost_category":"labor","amount_type":"COMPONENT","recurrence":"ONE_TIME"}}],"estimability":"NOT_ASSESSABLE","not_assessable_reason":"PRICING_BASIS_UNAVAILABLE","evidence_improves_estimate":["an internal labor rate","an effort estimate in hours"]}}
+Abstract skeleton (STRUCTURE ONLY -- <tokens> are placeholders, never emit them verbatim):
+{{"strategy":{{"remediation_summary":"<what addressing THIS finding involves, naming the subject/condition; hedged if root cause not established>","remediation_type":"<short label>","hypothetical_basis":"<what stays contingent on confirming the cause>","interpretation_confidence":"LOW|MEDIUM|HIGH"}},"activities":[{{"activity_id":"A0","description":"<a concrete activity derived from the finding>","derived_from":"FINDING|EVIDENCE|ROOT_CAUSE_HYPOTHESIS|RECOMMENDED_CAPA|IMPACT|CONTEXT","is_hypothetical":true}}],"cost_components":[{{"component_id":"C0","description":"<cost driver for an activity>","cost_category":"<free text>","amount_type":"COMPONENT","recurrence":"ONE_TIME"}}],"estimability":"NOT_ASSESSABLE","not_assessable_reason":"PRICING_BASIS_UNAVAILABLE","evidence_improves_estimate":["<the specific pricing input activity A0 needs>"]}}

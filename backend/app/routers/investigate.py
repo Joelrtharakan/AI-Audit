@@ -119,28 +119,40 @@ async def investigate_finding(
     The agent NEVER modifies the LQMS. Final authority rests with the auditor.
     """
     settings = get_settings()
-    if payload.llm_provider:
-        settings.llm_provider = payload.llm_provider.strip().lower()
 
-    # Resolve delegated Microsoft Graph token from the authenticated session first,
-    # falling back to an explicit token in the payload (local-dev convenience).
+    # Resolve the per-user Copilot token (session first, payload token as a
+    # local-dev fallback). This may set settings.llm_provider + the matching
+    # token for the resolver below.
     from app.routers.auth import apply_user_copilot_token
     user_session = apply_user_copilot_token(request)
     if user_session is None and payload.microsoft_copilot_access_token:
         settings.microsoft_copilot_access_token = payload.microsoft_copilot_access_token.strip()
 
-    # Check cache first for duplicate request instant response. Keyed on
-    # model + prompt_version too, so a model swap or prompt edit can't
-    # silently serve a result generated under different configuration.
+    # ---- Freeze the LLM execution route for the WHOLE investigation ----
+    # ONE provider + ONE model, resolved once. Every LLM stage (core_synthesis,
+    # critic, remediation, ...) uses exactly this route via LiteLLM. No fan-out,
+    # no fallback to another provider/model.
+    from app.services.llm.execution import (
+        UnknownProviderError,
+        begin_request,
+        resolve_execution_config,
+    )
+    try:
+        exec_config = resolve_execution_config(
+            provider=(payload.llm_provider or settings.llm_provider),
+            model=(payload.llm_model or None),
+        )
+    except UnknownProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    request_id = begin_request(exec_config)
+    logger.info(
+        "INVESTIGATION START request_id=%s route=%s", request_id, exec_config.public_dict()
+    )
+
+    # Check cache first for duplicate request instant response. Keyed on the
+    # frozen provider+model so a model/provider swap can't serve a stale result.
     depts_str = ",".join(payload.departments) if payload.departments else ""
-    if settings.llm_provider == "ollama":
-        cache_model = settings.ollama_model
-    elif settings.llm_provider in ("microsoft_copilot", "microsoft-copilot", "m365_copilot", "copilot"):
-        # The M365 Copilot Chat API exposes no model identifier; use a stable
-        # literal so the cache key still changes if the provider changes.
-        cache_model = "m365-copilot"
-    else:
-        cache_model = settings.openrouter_model
+    cache_model = f"{exec_config.provider}:{exec_config.model}"
     cache_key = compute_cache_key(
         payload.finding_text,
         depts_str,
@@ -269,6 +281,23 @@ async def investigate_finding(
                 "message": _validation_failure,
             },
         )
+
+    # Display boundary (spec sections 2 & 24): the pipeline stores an
+    # explicit "UNKNOWN …"/"UNRESOLVED …" marker on the affected object /
+    # process when the finding names no specific auditable subject -- an
+    # honest internal state, but a machine marker must never be the
+    # auditor-facing text. Map it (and any bare grammatical fragment that
+    # slipped through) to one professional phrase. Runs AFTER the structural
+    # validation gate so it never masks a real failure. Domain-agnostic.
+    _report = final_state_dict.get("report")
+    if _report is not None:
+        from app.services.semantic_subject import humanize_unresolved_subject
+
+        _ia = getattr(_report, "impact_assessment", None)
+        if _ia is not None and getattr(_ia, "affected_object", None):
+            _h = humanize_unresolved_subject(_ia.affected_object)
+            if _h != _ia.affected_object:
+                _ia.affected_object = _h
 
     model_name = (
         settings.ollama_model

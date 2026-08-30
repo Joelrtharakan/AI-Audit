@@ -45,6 +45,51 @@ _OCCURRENCE_COUNT_RE = re.compile(
     rf"\b{_NUMBER_WORD}\s+(?:separate\s+|different\s+|distinct\s+)?(?:occasions|times|instances)\b",
     re.IGNORECASE,
 )
+# Explicit QUANTITATIVE recurrence: "<subject> experienced/had/recorded/
+# logged/incurred/reported/saw <N> <plural events> over/during/in/within
+# <period>", or "<N> <plural events> (occurred|were recorded|were received|
+# were observed) over/during/in <period>". Structural (count + plural event
+# noun + temporal window), no domain vocabulary. Used ONLY to preserve the
+# stated count/event/period -- deliberately NOT added to the `is_recurring`
+# signal, so it never on its own drives a recurrence-RISK classification.
+_NUM_TO_INT = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10,
+}
+_QUANTITATIVE_RECURRENCE_RE = re.compile(
+    rf"(?P<count>{_NUMBER_WORD})\s+"
+    r"(?P<event>[a-z][a-z-]{2,}(?:s|es)|failures|incidents|deviations|"
+    r"complaints|excursions|rejections|breakdowns|stoppages|alarms|events|"
+    r"occurrences|nonconformities|non-conformities|errors|defects|trips)\b"
+    r"(?:(?!\.).){0,40}?"
+    r"\b(?:over|during|in|within|across|spanning)\s+"
+    r"(?P<period>(?:the\s+(?:last|previous|past|preceding)\s+|a\s+|an\s+)?"
+    r"(?:[\w-]+\s+){0,3}?"
+    r"(?:day|days|week|weeks|month|months|quarter|quarters|year|years|"
+    r"period|shift|shifts|cycle|cycles|campaign|campaigns))\b",
+    re.IGNORECASE,
+)
+
+
+def extract_quantitative_recurrence(finding_text: str) -> tuple[int, str, str] | None:
+    """(count, event, period) when the finding explicitly states a
+    quantitative recurrence; None otherwise. Preservation only -- never a
+    frequency or risk signal."""
+    if not finding_text:
+        return None
+    m = _QUANTITATIVE_RECURRENCE_RE.search(finding_text)
+    if not m:
+        return None
+    raw = m.group("count").lower()
+    if raw.isdigit():
+        count = int(raw)
+    elif raw in _NUM_TO_INT:
+        count = _NUM_TO_INT[raw]
+    else:
+        return None  # "multiple/several/numerous" -> not an explicit count
+    if not 2 <= count <= 999:
+        return None
+    return count, m.group("event").strip().lower(), m.group("period").strip()
 _RECURRENCE_WORD_RE = re.compile(
     r"\b(recurrence|recurring|recurred|repeated\s+finding|repeat\s+finding|reoccur(?:red|rence)?|the\s+same\s+[\w\s-]{1,30}?\s+occurred)\b",
     re.IGNORECASE,
@@ -102,6 +147,12 @@ class RecurrenceInfo:
     # alone; requires its own explicit effectiveness-review language.
     previous_capa_effectiveness: str = "NOT_VERIFIED"
     rationale: str | None = None
+    # Explicitly-stated quantitative recurrence ("three failures over a
+    # six-month period") -- preservation only, never a risk signal and
+    # deliberately independent of `is_recurring`.
+    recurrence_count: int | None = None
+    recurrence_event: str | None = None
+    recurrence_period: str | None = None
 
 
 def detect_recurrence(finding_text: str) -> RecurrenceInfo:
@@ -150,6 +201,8 @@ def detect_recurrence(finding_text: str) -> RecurrenceInfo:
     elif has_previous_capa:
         rationale = "A previous corrective action is referenced, but no similar-finding recurrence is stated."
 
+    _qr = extract_quantitative_recurrence(finding_text)
+
     return RecurrenceInfo(
         is_recurring=is_recurring,
         has_previous_capa_reference=has_previous_capa,
@@ -157,6 +210,9 @@ def detect_recurrence(finding_text: str) -> RecurrenceInfo:
         previous_capa_status=capa_status,
         previous_capa_effectiveness=effectiveness,
         rationale=rationale,
+        recurrence_count=_qr[0] if _qr else None,
+        recurrence_event=_qr[1] if _qr else None,
+        recurrence_period=_qr[2] if _qr else None,
     )
 
 

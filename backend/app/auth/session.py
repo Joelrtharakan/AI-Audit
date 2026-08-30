@@ -24,12 +24,16 @@ class LQMSUserSession:
     name: str
     email: str
     avatar_url: str
-    organization: str  # tenant id (or friendly tenant name)
+    organization: str  # Entra tenant id/name, or GitHub org (or "")
     copilot_enabled: bool
     encrypted_access_token: str
     encrypted_refresh_token: str
     created_at: float
     expires_at: float
+    # Which identity provider authenticated this session -- "microsoft" (Entra
+    # -> M365 Copilot) or "github" (GitHub OAuth -> GitHub Copilot). Decides
+    # which Copilot backend this session's investigations use.
+    auth_provider: str = "microsoft"
 
     @property
     def is_expired(self) -> bool:
@@ -53,6 +57,7 @@ class LQMSUserSession:
         """Return safe user profile for frontend consumption -- NEVER returns a token."""
         return {
             "authenticated": True,
+            "auth_provider": self.auth_provider,
             "user_id": self.user_id,
             "user_principal_name": self.user_principal_name,
             # `github_login` retained as an alias so the existing dashboard UI
@@ -85,6 +90,7 @@ class SessionStore:
         copilot_enabled: bool,
         plain_access_token: str,
         plain_refresh_token: str = "",
+        auth_provider: str = "microsoft",
     ) -> LQMSUserSession:
         settings = get_settings()
         session_id = secrets.token_urlsafe(32)
@@ -104,6 +110,7 @@ class SessionStore:
             encrypted_refresh_token=encrypt_token(plain_refresh_token),
             created_at=now,
             expires_at=expires_at,
+            auth_provider=auth_provider,
         )
         self._sessions[session_id] = session
         self._cleanup_expired()

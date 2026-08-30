@@ -33,6 +33,9 @@ def _ev(claim, status=EvidenceStatus.VERIFIED):
 CASES = [
     # (name, finding, evidence_claims, interpretation, expected_most_likely)
     (
+        # An evidence-backed hourly RATE but an ASSUMED number of hours is
+        # fabricated effort -- "Do not manufacture precision": no amount is
+        # produced, the driver is retained unpriced.
         "implement-a-control",
         "No approval step exists before records are released.",
         ["A reviewer role exists and is paid INR 900/hour (HR rate card)"],
@@ -50,7 +53,7 @@ CASES = [
                                        "component_ids": ["C0"], "produces": "MOST_LIKELY"}],
             "overall_status": "EVIDENCE_BACKED",
         },
-        14400.0,
+        None,
     ),
     (
         "physical-modification",
@@ -143,6 +146,11 @@ async def test_generalizes_without_domain_branching(name, finding, ev_claims, in
         if tr.llm_proposed_result is not None and tr.executor_result is not None:
             assert tr.executor_result != tr.llm_proposed_result or tr.disagreement is None
 
+    if name == "implement-a-control":
+        # rate was evidenced, hours were assumed -> unpriced driver, no range
+        assert res.most_likely_estimate is None
+        assert res.low_estimate is None and res.high_estimate is None
+        assert any("approval control" in a.lower() for a in res.unpriced_activities)
     if name == "process-redesign":
         assert res.status == RemediationEstimateStatus.NOT_ASSESSABLE
         assert res.implementation_activities == [] or isinstance(res.implementation_activities, list)

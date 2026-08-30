@@ -58,6 +58,41 @@ class Settings(BaseSettings):
     canonical_semantic_shadow_enabled: bool = False
     canonical_semantic_shadow_timeout_seconds: float = 8.0
 
+    # LLM-PRIMARY canonical interpretation call budget. This is the largest
+    # single structured LLM response in the pipeline (semantic roles +
+    # candidate hypotheses + investigation plan + investigation / remediation
+    # activities + pricing + the financial sub-object), so it needs a
+    # production-grade timeout and token budget -- the same operation-specific
+    # pattern used by the financial (120s / 2000 tok) and remediation
+    # (90s / 1400 tok) interpreters. An 8s timeout or a truncated response was
+    # silently failing this call for exactly the complex findings that matter,
+    # dropping the whole pipeline back to the deterministic floor and
+    # re-introducing the investigation-as-remediation defect. A genuinely
+    # unreachable provider still fails closed, just later.
+    canonical_semantic_primary_timeout_seconds: float = 120.0
+    canonical_semantic_max_tokens: int = 2600
+    canonical_semantic_num_ctx: int = 8192
+
+    # LLM-PRIMARY canonical semantic interpretation: when True, the LLM
+    # canonical interpretation runs in understand_finding_node (once, reused
+    # downstream) and its VALIDATED structured fields are merged into
+    # canonical_finding_state -- the LLM becomes the primary semantic
+    # interpreter and resolve_deviation() becomes the fail-closed floor. The
+    # LLM also owns the investigation/remediation/pricing distinction, which
+    # the downstream remediation-cost engine consumes rather than
+    # re-deriving from the raw finding.
+    #
+    # ON by default: the deterministic path is a SAFETY FLOOR, not the
+    # primary intelligence layer. When the LLM provider is unreachable or
+    # returns None/invalid, `interpret_finding_canonically` returns None, the
+    # merge is a pure no-op, and every downstream consumer falls back to the
+    # unchanged deterministic behaviour -- so an unreachable provider costs
+    # only added latency, never a wrong result. The test suite pins this
+    # False (see tests/conftest.py) so the regression baseline stays
+    # deterministic and fast; dedicated LLM-primary tests enable it
+    # explicitly.
+    canonical_semantic_llm_primary: bool = True
+
     # Remediation Cost Estimation (app.remediation): a SEPARATE semantic
     # analysis from financial exposure -- "what will it cost to correct/
     # prevent the finding?" rather than "what did the finding cost?". The
@@ -92,8 +127,23 @@ class Settings(BaseSettings):
     # itself is 4096).
     remediation_cost_num_ctx: int = 4096
 
-    # Production Local Ollama Inference Server
+    # -------------------------------------------------------------------------
+    # LLM execution route (app.services.llm.execution / .providers.litellm_provider)
+    # ONE provider + ONE model, resolved once per investigation request, routed
+    # through LiteLLM as the single inference boundary. LLM_MODEL is
+    # provider-neutral (the LiteLLM identifier is derived only at the adapter
+    # boundary). LLM_FALLBACK_ENABLED=false means a failed call surfaces the
+    # app's degraded / fail-closed behavior -- never a silent switch to another
+    # provider. When true, retries stay against the SAME provider and model.
+    # -------------------------------------------------------------------------
     llm_provider: str = "ollama"
+    # Empty -> each provider's own default (ollama_model / "m365-chat" /
+    # copilot_model / groq_model / ...). Set explicitly (e.g. "qwen3:8b") to pin
+    # the model for the configured provider.
+    llm_model: str = ""
+    llm_fallback_enabled: bool = False
+
+    # Local Ollama inference server (base URL + default model when LLM_MODEL unset).
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
     ollama_timeout_seconds: float = 25.0
@@ -110,7 +160,19 @@ class Settings(BaseSettings):
     # prompt evaluation isn't paying for KV cache it never uses.
     ollama_num_ctx: int = 4096
     ollama_temperature: float = 0.1
+    # `ollama_thinking=False` (default) means: for a selected model that matches
+    # one of `ollama_thinking_model_markers`, thinking is DISABLED at the Ollama
+    # level (LiteLLM `reasoning_effort="disable"` -> `"think": false` in the
+    # /api/chat body) so no <think>...</think> tokens are generated for our
+    # structured-JSON extraction -- pure latency/token saving. Set True to let
+    # such models reason normally.
     ollama_thinking: bool = False
+    # Comma-separated, case-insensitive substrings identifying Ollama reasoning
+    # models. A selected model whose name contains any marker gets the
+    # thinking-disable treatment above. Generic -- "qwen3" covers qwen3:8b,
+    # qwen3:14b, qwen3-coder, hf.co/*/Qwen3-32B, etc. Add e.g. "deepseek-r1"
+    # if you run other reasoning models. Never a hardcoded single model id.
+    ollama_thinking_model_markers: str = "qwen3"
     ollama_max_retries: int = 1
 
     # Operation-specific timeouts & token budgets
@@ -197,6 +259,28 @@ class Settings(BaseSettings):
     # Optional tenant allow-list gate (parallels the former github_allowed_org):
     # when set, only users whose token tenant id (tid claim) matches are admitted.
     microsoft_allowed_tenant_id: str = ""
+
+    # -------------------------------------------------------------------------
+    # GitHub OAuth + GitHub Copilot -- an ALTERNATIVE sign-in to Microsoft
+    # Entra / M365 Copilot. Both coexist: whichever provider a user signs in
+    # with determines which Copilot backend their investigations use for that
+    # session (see app/routers/auth.py::apply_user_copilot_token). See
+    # app/auth/github_oauth.py and
+    # app/services/llm/providers/github_copilot_provider.py.
+    # -------------------------------------------------------------------------
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    github_redirect_uri: str = "http://localhost:8010/api/auth/github/callback"
+    # Optional org allow-list gate; empty = any GitHub account with a Copilot
+    # subscription is admitted.
+    github_allowed_org: str = ""
+    # GitHub Copilot SDK model ("auto" lets Copilot choose). Dev bypass token is
+    # populated per-request from the authenticated session in production.
+    copilot_model: str = "auto"
+    copilot_github_token: str = ""
+    copilot_timeout_seconds: float = 90.0
+    copilot_log_level: str = "info"
+
     session_secret: str = "dev-secret-key-change-in-production-min-32-chars"
     session_cookie_name: str = "lqms_session"
     session_expiry_hours: int = 24

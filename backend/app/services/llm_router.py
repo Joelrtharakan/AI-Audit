@@ -122,13 +122,16 @@ class ProviderCircuit:
 
 _CIRCUITS: dict[str, ProviderCircuit] = {name: ProviderCircuit() for name in PROVIDER_ORDER}
 _SEMAPHORES: dict[str, asyncio.Semaphore] = {}
-_last_call_metadata: contextvars.ContextVar[dict] = contextvars.ContextVar(
-    "llm_router_last_call_metadata", default={}
+from app.services.llm.call_metadata import (  # noqa: E402
+    _last_call_metadata as _last_call_metadata,
+    get_last_call_metadata as get_last_call_metadata,  # re-export -> shared ContextVar
 )
 
-
-def get_last_call_metadata() -> dict:
-    return _last_call_metadata.get()
+# NOTE: this multi-provider circuit-breaker / failover router is NO LONGER in the
+# investigation inference path (see app.services.llm.factory). It is retained
+# only for its metadata helpers and any explicit out-of-band cloud-router use.
+# `get_llm_provider` never returns an LLMRouter -- one investigation = one
+# provider + one model, no fan-out, no fallback.
 
 
 def _classify_cooldown(exc: Exception, default_cooldown: float, max_cooldown: float) -> tuple[float, str, float | None]:

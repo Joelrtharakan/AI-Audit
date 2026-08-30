@@ -151,7 +151,475 @@ def validate_canonical_context(
             sanitized.explicit_previous_capa_reference = False
             sanitized.previous_capa_evidence_ids = []
 
+    _validate_llm_primary_fields(sanitized, finding_text)
+    _validate_llm_reasoning_fields(sanitized, evidence_ledger, finding_text)
     return sanitized
+
+
+# --- LLM-PRIMARY field safety (spec Phase 5) --------------------------------
+
+_LLM_CAUSAL_ROLE_RE = re.compile(
+    r"\b(?:root\s+cause|assignable\s+cause|underlying\s+cause|the\s+cause\b|"
+    r"a\s+cause\b|causes?\b|mechanism|failure\s+mode|reason\b|contributing\s+factor)\b",
+    re.IGNORECASE,
+)
+_LLM_EVIDENCE_SOURCE_RE = re.compile(
+    r"^(?:the\s+|a\s+|an\s+)?(?:records?|logs?|documentation|documents?|register|"
+    r"audit|report|review|inspection|assessment|evidence|data|audit\s+trail|"
+    r"history|file|observation|survey|walkthrough|reconciliation)\s*$",
+    re.IGNORECASE,
+)
+_LLM_NONPERFORMANCE_RE = re.compile(
+    r"\b(?:was|were)\s+(?:never|not)\s+(?:performed|carried\s+out|conducted|done|"
+    r"completed|executed|undertaken)\b|"
+    r"\bdid\s+not\s+(?:occur|happen|take\s+place|perform|conduct|complete)\b|"
+    r"\bnever\s+(?:performed|conducted|done|occurred|took\s+place)\b|"
+    r"\bfailed\s+to\s+(?:perform|conduct|complete|carry\s+out)\b|"
+    r"\b(?:activity|check|verification|inspection|review|step)\s+(?:was\s+)?"
+    r"(?:not\s+performed|omitted|skipped|missed)\b",
+    re.IGNORECASE,
+)
+# "unclear/not established WHETHER ... performed" -> the ambiguity is
+# explicit; non-performance is NOT supported.
+_LLM_PERFORMANCE_AMBIGUOUS_RE = re.compile(
+    r"\b(?:unclear|not\s+(?:clear|established|determined|known)|could\s+not\s+"
+    r"(?:be\s+)?(?:established|determined|confirmed)|uncertain)\b[\w\s,'-]{0,40}?"
+    r"\bwhether\b",
+    re.IGNORECASE,
+)
+_LLM_DIRECTION_WORD_RE = re.compile(
+    r"\b(?:above|below|over|under|exceed\w*|short(?:fall|age)?|surplus|excess|"
+    r"deficit|in\s+excess\s+of|greater\s+than|less\s+than|higher\s+than|lower\s+than|"
+    r"more\s+than|fewer\s+than|fell\s+(?:short|below))\b",
+    re.IGNORECASE,
+)
+
+
+def _sig_words(s: str | None) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]{3,}", (s or "").lower())}
+
+
+def _validate_llm_primary_fields(ctx: CanonicalFindingContext, finding_text: str) -> None:
+    """Independently constrain the structured LLM-primary fields. Mutates
+    `ctx` in place -- an unsafe value is nulled / downgraded, never kept."""
+    ft = finding_text or ""
+    ft_words = _sig_words(ft)
+
+    # SUBJECT: never a causal role, an evidence-source noun, or a bare
+    # enumerated cause.
+    subj = (ctx.finding_subject or "").strip()
+    if subj:
+        low = subj.lower().rstrip(".")
+        _bad = (
+            _LLM_CAUSAL_ROLE_RE.search(low)
+            or _LLM_EVIDENCE_SOURCE_RE.match(low)
+            or any(_sig_words(a) and _sig_words(a) <= _sig_words(low)
+                   for a in (ctx.stated_causal_alternatives or []))
+        )
+        if not _bad:
+            # A subject must be an ENTITY noun phrase, not a clause / predication
+            # ("<entity> remains open", "<entity> lacks X", reported speech).
+            # Structural grammatical gate, shared pipeline-wide.
+            try:
+                from app.services.semantic_subject import reject_subject_if_clause
+                _bad = reject_subject_if_clause(subj)
+            except Exception:  # pragma: no cover
+                pass
+        if _bad:
+            ctx.finding_subject = None
+            ctx.subject_kind = None
+
+    # STATED ALTERNATIVES: each must be grounded in the finding text (no
+    # fabrication). Keep order, drop unsupported ones.
+    if ctx.stated_causal_alternatives:
+        kept = [
+            a for a in ctx.stated_causal_alternatives
+            if _sig_words(a) and len(_sig_words(a) & ft_words) >= 1
+        ]
+        ctx.stated_causal_alternatives = kept
+        if len(kept) < 2:
+            ctx.causal_alternatives_unresolved = ctx.causal_alternatives_unresolved and bool(kept)
+
+    # MISSING RECORD: ACTIVITY_NOT_PERFORMED requires explicit non-performance
+    # wording in the finding; otherwise downgrade and mark the ambiguity.
+    if ctx.missing_record_status == "ACTIVITY_NOT_PERFORMED" and (
+        _LLM_PERFORMANCE_AMBIGUOUS_RE.search(ft) or not _LLM_NONPERFORMANCE_RE.search(ft)
+    ):
+        ctx.missing_record_status = "ACTIVITY_NOT_RECORDED"
+        ctx.activity_performance_ambiguity = True
+
+    # COMPARISON DIRECTION: a stated ABOVE/BELOW needs a directional word in
+    # the finding; otherwise it is a bare "differed" -> MISMATCH.
+    if ctx.comparison is not None and ctx.comparison.direction in ("ABOVE", "BELOW"):
+        if not _LLM_DIRECTION_WORD_RE.search(ft):
+            ctx.comparison.direction = "MISMATCH"
+
+    # NO MANUFACTURED MAGNITUDE: a comparison magnitude the finding text does
+    # not contain as a number is dropped.
+    if ctx.comparison is not None and ctx.comparison.magnitude is not None:
+        _mag = ctx.comparison.magnitude
+        _mag_strs = {str(int(_mag)) if float(_mag).is_integer() else str(_mag), f"{_mag:g}"}
+        if not any(m in ft for m in _mag_strs):
+            ctx.comparison.magnitude = None
+            ctx.comparison.unit = None
+
+    # NO MANUFACTURED RECURRENCE COUNT.
+    if ctx.recurrence is not None and ctx.recurrence.count is not None:
+        _c = ctx.recurrence.count
+        _words = {"two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
+        _c_ok = str(_c) in ft or any(
+            w in ft.lower() and {2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+                                 7: "seven", 8: "eight", 9: "nine", 10: "ten"}.get(_c) == w
+            for w in _words
+        )
+        if not _c_ok:
+            ctx.recurrence.count = None
+
+
+# --- LLM-owned investigative / remediation reasoning safety (spec §6-§10) ---
+
+# An assertion that a cause IS established as fact (as opposed to naming it as
+# an open question). Structural, domain-neutral.
+_CAUSE_ASSERTED_RE = re.compile(
+    r"\b(?:was|were|is|are|has\s+been|have\s+been)\s+caused\s+by\b|"
+    r"\b(?:because\s+of|due\s+to|as\s+a\s+result\s+of|attributable\s+to|"
+    r"stems?\s+from|resulted\s+from|the\s+root\s+cause\s+(?:is|was)\b)\b",
+    re.IGNORECASE,
+)
+# Interrogative / uncertainty framing that makes a causal mention an OPEN
+# question rather than an assertion.
+_UNCERTAIN_FRAME_RE = re.compile(
+    r"\b(?:whether|if|which|what|why|how|unknown|unclear|not\s+(?:known|established|"
+    r"determined|confirmed)|possible|may|might|could|suspected|to\s+be\s+determined|"
+    r"extent|degree|the\s+cause\s+of)\b",
+    re.IGNORECASE,
+)
+# A statement that LEADS with an investigative/methodological verb is an
+# EVIDENCE REQUEST (a proposal for obtaining evidence), never an assertion
+# about reality -- so it is never held to the evidence-grounding bar that
+# assertions are. Generic method vocabulary, not a domain or finding list.
+_EVIDENCE_REQUEST_LEAD_RE = re.compile(
+    r"^\s*(?:to\s+)?(?:review|examine|obtain|gather|collect|request|determine|confirm|"
+    r"verify|validate|assess|evaluate|inspect|interview|reconcile|compare|establish|"
+    r"check|identify|quantify|trace|analy[sz]e|audit|test|sample|observe|walk\s*through|"
+    r"clarify|ascertain|corroborate|cross-?check)\b",
+    re.IGNORECASE,
+)
+# Bare declarative attribution of failure / blame with NO hedge -- an
+# assertion about reality that must be evidence-supported (spec §2A / §3).
+_BLAME_ASSERTION_RE = re.compile(
+    r"\b(?:failed\s+to|did\s+not|neglected\s+to|was\s+negligent|"
+    r"was\s+responsible\s+for|deliberately|intentionally|"
+    r"(?:was|were|is|are)\s+(?:at\s+fault|to\s+blame|non-?compliant|in\s+violation))\b",
+    re.IGNORECASE,
+)
+
+
+def _asserts_as_fact(text: str | None) -> bool:
+    """True when `text` states a CAUSE or an act of failure/blame as an
+    established fact, with no interrogative/uncertainty framing and not
+    phrased as an evidence request. Role check (spec §2/§3): only assertions
+    about reality are gated -- questions, requests and hypotheses are not."""
+    t = (text or "").strip()
+    if not t or _EVIDENCE_REQUEST_LEAD_RE.match(t) or _UNCERTAIN_FRAME_RE.search(t):
+        return False
+    return bool(
+        _CAUSE_ASSERTED_RE.search(t)
+        or _BLAME_ASSERTION_RE.search(t)
+        or _LLM_CAUSAL_ROLE_RE.search(t)
+    )
+
+
+def _validate_llm_reasoning_fields(
+    ctx: CanonicalFindingContext,
+    evidence_ledger: list[EvidenceItem],
+    finding_text: str,
+) -> None:
+    """Constrain the LLM's proposed hypotheses / investigation plan /
+    remediation reasoning by SEMANTIC ROLE, not vocabulary overlap
+    (spec §2/§3):
+
+      - Assertions about reality  -> must be evidence-supported.
+      - Investigation questions / evidence requests -> the requested evidence
+        need NOT appear in the finding; only rejected if they assert an
+        unverified cause/blame as fact.
+      - Hypotheses -> stay POSSIBLE unless a VERIFIED causal claim backs them;
+        never dropped for lacking finding tokens.
+      - Remediation activities -> proposals; kept unless they are an
+        unsupported concrete systemic prescription while the cause is
+        unconfirmed (then forced CONDITIONAL, not dropped).
+
+    Mutates `ctx` in place. Never strengthens epistemic status."""
+
+    # Did the LLM opt into the investigative/remediation reasoning contract
+    # at all? If it produced none of it, we do NOT synthesize any -- the
+    # deterministic path (which already preserves stated alternatives) runs
+    # unchanged. Only when the LLM actually reasoned do we normalize +
+    # guard that reasoning.
+    _llm_reasoned = bool(
+        ctx.candidate_hypotheses or ctx.investigation_plan
+        or ctx.remediation_activities or ctx.investigation_activities
+        or ctx.information_gaps
+    )
+
+    # ---- ROOT CAUSE: never stronger than a VERIFIED causal claim ----------
+    has_verified_cause = any(
+        cc.is_causal and cc.evidence_status == "VERIFIED" and cc.cause_ref
+        for cc in ctx.causal_claims
+    )
+    if ctx.causal_alternatives_unresolved or not has_verified_cause:
+        if ctx.root_cause_status == "ESTABLISHED":
+            ctx.root_cause_status = "NOT_ESTABLISHED"
+        ctx.leading_hypothesis_id = None
+
+    # ---- CANDIDATE HYPOTHESES ------------------------------------------
+    # Role = HYPOTHESIS: a possible explanation. Not gated on finding
+    # vocabulary. Only constrained on epistemic status and de-duplicated;
+    # every finding-enumerated alternative is guaranteed present, POSSIBLE,
+    # and never ranked.
+    kept_hyps = []
+    seen_ids: set[str] = set()
+    seen_stmts: set[frozenset] = set()
+    for h in ctx.candidate_hypotheses:
+        if h.hypothesis_id in seen_ids or not (h.statement or "").strip():
+            continue
+        _sk = frozenset(_sig_words(h.statement))
+        if _sk and _sk in seen_stmts:
+            continue
+        seen_ids.add(h.hypothesis_id)
+        if _sk:
+            seen_stmts.add(_sk)
+        if h.epistemic == "SUPPORTED" and not (
+            has_verified_cause and h.hypothesis_id == ctx.leading_hypothesis_id
+        ):
+            h.epistemic = "POSSIBLE"
+        h.source_evidence_ids = [e for e in h.source_evidence_ids if e in _valid_evidence_ids(len(evidence_ledger))]
+        kept_hyps.append(h)
+    if _llm_reasoned:
+        # The LLM engaged the reasoning contract -> every finding-enumerated
+        # alternative MUST be represented (never silently dropped, §5).
+        for i, alt in enumerate(ctx.stated_causal_alternatives or []):
+            alt_w = _sig_words(alt)
+            _match = next(
+                (h for h in kept_hyps if alt_w and alt_w <= _sig_words(h.statement)), None
+            )
+            if _match is not None:
+                _match.from_finding_text = True
+                if _match.epistemic == "SUPPORTED":
+                    _match.epistemic = "POSSIBLE"
+                continue
+            from app.services.canonical_semantic_models import SemHypothesis
+            kept_hyps.append(SemHypothesis(
+                hypothesis_id=f"HALT{i + 1}", statement=alt.strip(),
+                epistemic="POSSIBLE", from_finding_text=True,
+            ))
+    ctx.candidate_hypotheses = kept_hyps
+    if ctx.leading_hypothesis_id and ctx.leading_hypothesis_id not in {h.hypothesis_id for h in kept_hyps}:
+        ctx.leading_hypothesis_id = None
+    # If the finding enumerates alternatives, none of them leads.
+    if ctx.causal_alternatives_unresolved:
+        ctx.leading_hypothesis_id = None
+
+    # ---- INVESTIGATION PLAN ------------------------------------------
+    # Role = INVESTIGATION REQUEST: a proposal for obtaining evidence. The
+    # evidence it names need NOT be in the finding. Rejected ONLY when the
+    # `unknown` presupposes an unverified cause / act of blame as fact
+    # (spec §4 / §2B). Duplicate-unknown collapse only.
+    kept_steps = []
+    seen_unknowns: set[frozenset] = set()
+    valid_hyp_ids = {x.hypothesis_id for x in ctx.candidate_hypotheses}
+    for s in ctx.investigation_plan:
+        u = (s.unknown or "").strip()
+        if not u or _asserts_as_fact(u):
+            continue
+        _uk = frozenset(_sig_words(u))
+        if _uk and _uk in seen_unknowns:
+            continue
+        if _uk:
+            seen_unknowns.add(_uk)
+        s.related_hypothesis_ids = [h for h in s.related_hypothesis_ids if h in valid_hyp_ids]
+        kept_steps.append(s)
+    ctx.investigation_plan = kept_steps
+
+    # Role = UNKNOWN: a statement of what is not established. Kept unless it
+    # actually asserts a cause/blame as fact.
+    ctx.information_gaps = [
+        g for g in ctx.information_gaps if (g or "").strip() and not _asserts_as_fact(g)
+    ]
+
+    # ---- REMEDIATION OBLIGATION ----------------------------------
+    # Consistency between the LLM's own top-level semantic decisions (spec
+    # §"REMEDIATION OBLIGATION" / §"CURRENT DEMONSTRATED CASE"). All triggers
+    # here are the model's OWN flags -- comparison / causal_alternatives_
+    # unresolved / root_cause_status / causal_claims -- never a verb or
+    # keyword rule.
+    _has_verified_corrective_evidence = any(
+        cc.is_causal and cc.evidence_status == "VERIFIED" and cc.cause_ref
+        for cc in ctx.causal_claims
+    )
+    _cause_or_condition_established = (
+        ctx.root_cause_status == "ESTABLISHED" or _has_verified_corrective_evidence
+    )
+    # An UNRESOLVED COMPARISON whose competing mechanisms are not resolved and
+    # whose root cause is not established is a discrepancy to RECONCILE first --
+    # a corrective obligation is not yet supported regardless of what the model
+    # labelled it.
+    _unresolved_discrepancy = bool(
+        ctx.comparison is not None
+        and ctx.causal_alternatives_unresolved
+        and not _cause_or_condition_established
+    )
+
+    # NORMALISE the obligation against the model's OWN higher-level signals
+    # (spec INVARIANT 20 -- a downstream layer may downgrade / make explicit,
+    # never escalate). No verbs, no keywords.
+    if _unresolved_discrepancy:
+        ctx.remediation_obligation = "RECONCILIATION_REQUIRED"
+    elif ctx.remediation_obligation == "NOT_DETERMINED":
+        # The model abstained. Resolve it from what it DID establish: a
+        # confirmed cause / verified corrective evidence -> a corrective
+        # obligation; otherwise the safe reading is that only investigation
+        # has been established so far.
+        ctx.remediation_obligation = (
+            "ESTABLISHED_CORRECTIVE_OBLIGATION" if _cause_or_condition_established
+            else "INVESTIGATION_REQUIRED"
+        )
+    elif (
+        ctx.remediation_obligation == "ESTABLISHED_CORRECTIVE_OBLIGATION"
+        and ctx.causal_alternatives_unresolved
+        and not _cause_or_condition_established
+    ):
+        # A SYSTEMIC corrective obligation cannot be established while the
+        # competing mechanisms are unresolved.
+        ctx.remediation_obligation = (
+            "RECONCILIATION_REQUIRED" if ctx.comparison is not None else "INVESTIGATION_REQUIRED"
+        )
+
+    # INVARIANT 2 / 5 / 20: when the model's OWN obligation is
+    # investigation/reconciliation-only, NO remediation activity is established
+    # yet -- every activity it listed under remediation is premature and is
+    # preserved in `investigation_activities`, `remediation_activities` forced []
+    # (never dropped, never priced, never conditional). This enforces the
+    # model's own top-level decision against its own activity list; it is not a
+    # re-classification of the activities.
+    _remediation_not_established = ctx.remediation_obligation in (
+        "RECONCILIATION_REQUIRED", "INVESTIGATION_REQUIRED",
+    )
+    _no_systemic_obligation = ctx.remediation_obligation in (
+        "RECONCILIATION_REQUIRED", "INVESTIGATION_REQUIRED", "NO_SYSTEMIC_REMEDIATION_JUSTIFIED",
+    )
+
+    # ---- ACTIVITIES: partition INVESTIGATION from REMEDIATION -----------
+    # Spec §2/§14: the two are DIFFERENT layers. The partition is on the LLM's
+    # own declared `disposition` -- the deterministic layer never re-classifies
+    # an activity by its verb (§2/§17). Deterministic constraints are epistemic
+    # only:
+    #  - CORRECTIVE_ACTION addresses a CONFIRMED cause -> valid only when root
+    #    cause is ESTABLISHED, else it is cause-dependent (conditional).
+    #  - a concrete systemic prescription / an activity asserting the cause as
+    #    fact cannot be CONFIRMED while the cause is unconfirmed -> CONDITIONAL
+    #    (never deleted).
+    #  - when the evidence has NOT established a systemic obligation, a
+    #    systemic/corrective activity stays CONDITIONAL; investigation,
+    #    immediate correction, containment, effectiveness checks are untouched.
+    from app.remediation.activities import is_unsupported_concrete_intervention
+
+    contingent = ctx.root_cause_status != "ESTABLISHED"
+    seen_acts: set[frozenset] = set()
+    _investigation: list = []
+    _remediation: list = []
+    # LLM-declared investigation activities first (force disposition), then the
+    # activities it put in remediation_activities -- partitioned by disposition.
+    _tagged = [(a, True) for a in ctx.investigation_activities] + [
+        (a, False) for a in ctx.remediation_activities
+    ]
+    for a, _declared_investigation in _tagged:
+        act = (a.activity or "").strip()
+        if not act:
+            continue
+        _ak = frozenset(_sig_words(act))
+        if _ak and _ak in seen_acts:
+            continue
+        if _ak:
+            seen_acts.add(_ak)
+        if _declared_investigation:
+            a.disposition = "INVESTIGATION"
+        if a.disposition == "INVESTIGATION":
+            # Investigation/verification work -- NOT remediation, never
+            # conditional (its dependency is on nothing; it IS the enquiry).
+            a.depends_on_root_cause = False
+            _investigation.append(a)
+            continue
+        if contingent and a.disposition == "CORRECTIVE_ACTION":
+            a.disposition = "CONDITIONAL_SYSTEMIC"
+            a.depends_on_root_cause = True
+        if contingent and (
+            a.disposition == "CONDITIONAL_SYSTEMIC"
+            or a.depends_on_root_cause
+            or is_unsupported_concrete_intervention(act)
+            or _asserts_as_fact(act)
+            or (_no_systemic_obligation and a.disposition not in (
+                "IMMEDIATE_CORRECTION", "CONTAINMENT", "EFFECTIVENESS_CHECK"))
+        ):
+            a.disposition = "CONDITIONAL_SYSTEMIC"
+            a.depends_on_root_cause = True
+        _remediation.append(a)
+
+    # Model's own obligation says only investigation/reconciliation is required
+    # (or this is an unresolved discrepancy): no remediation activity is
+    # established -> every listed remediation activity is premature and is
+    # preserved as investigation, never dropped, never priced, never conditional
+    # remediation.
+    if _remediation_not_established and _remediation:
+        for a in _remediation:
+            a.disposition = "INVESTIGATION"
+            a.depends_on_root_cause = False
+            if not any(frozenset(_sig_words(a.activity)) == frozenset(_sig_words(x.activity)) for x in _investigation):
+                _investigation.append(a)
+        _remediation = []
+
+    ctx.investigation_activities = _investigation
+    ctx.remediation_activities = _remediation  # MAY be empty -- valid (§9)
+
+    # Keep the flat projections consistent with dispositions.
+    ctx.immediate_actions = [
+        a.activity for a in _remediation
+        if a.disposition in ("IMMEDIATE_CORRECTION", "CONTAINMENT")
+    ]
+    ctx.conditional_actions = [
+        a.activity for a in _remediation if a.disposition == "CONDITIONAL_SYSTEMIC"
+    ]
+
+    # ---- PRICING: downstream of remediation (§10/§11/§12) --------------
+    # Every priceable item must map to a genuine remediation activity. An item
+    # that points at investigation work, or at nothing while remediation
+    # activities exist, is dropped -- pricing is never manufactured ahead of an
+    # established remediation scope. A pure "observed value in the finding"
+    # note is kept (it is the §12 firewall, not a price).
+    ft = finding_text or ""
+    _rem_ids = {a.action_id for a in _remediation}
+    kept_pricing = []
+    for p in ctx.pricing_information:
+        if p.pricing_basis and any(ch.isdigit() for ch in p.pricing_basis):
+            p.pricing_basis = None  # a basis is a category, never a figure
+        _is_observed_note = bool(p.observed_value_in_finding)
+        if _is_observed_note:
+            digits = re.findall(r"\d[\d,.]*", p.observed_value_in_finding)
+            if digits and not any(d.rstrip(".,") in ft for d in digits):
+                p.observed_value_in_finding = None
+                _is_observed_note = False
+        # An observed value in the finding is NEVER a remediation cost here --
+        # only the finding text can establish that, and this field is the §12
+        # firewall, not a price.
+        p.observed_value_is_remediation_cost = False
+        # Pricing is strictly downstream of an established remediation (§8/§11):
+        # keep an item ONLY if it maps to a genuine remediation activity, or it
+        # is purely a §12 observed-value note. Everything else -- an item that
+        # points at investigation work, at nothing, or exists while there is no
+        # remediation activity at all -- is dropped.
+        if p.action_id in _rem_ids or _is_observed_note:
+            kept_pricing.append(p)
+    ctx.pricing_information = kept_pricing
 
 
 def get_affected_object_candidate(context: CanonicalFindingContext | None) -> str | None:

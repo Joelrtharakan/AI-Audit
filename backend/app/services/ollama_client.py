@@ -8,23 +8,19 @@ from __future__ import annotations
 import contextvars
 from typing import Any
 
+from app.services.llm.call_metadata import (
+    get_last_call_metadata as get_last_call_metadata,  # re-export -> shared ContextVar
+)
 from app.services.llm.exceptions import LLMError
 from app.services.llm.providers.ollama_provider import OllamaProvider
 
 _current_node: contextvars.ContextVar[str] = contextvars.ContextVar(
     "ollama_current_node", default="unknown"
 )
-_last_call_metadata: contextvars.ContextVar[dict] = contextvars.ContextVar(
-    "ollama_last_call_metadata", default={}
-)
 
 
 def set_current_node(node: str) -> None:
     _current_node.set(node)
-
-
-def get_last_call_metadata() -> dict:
-    return _last_call_metadata.get()
 
 
 class OllamaError(LLMError):
@@ -71,7 +67,8 @@ class OllamaClient(OllamaProvider):
             timeout_seconds=timeout_seconds,
             **kwargs,
         )
-        _last_call_metadata.set(response.raw_metadata or {})
+        from app.services.llm.call_metadata import set_last_call_metadata
+        set_last_call_metadata(response.raw_metadata or {})
         return response.content
 
 

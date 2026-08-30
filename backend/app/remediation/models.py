@@ -55,6 +55,17 @@ class RemediationConfidence(str, Enum):
     NOT_ASSESSABLE = "NOT_ASSESSABLE"
 
 
+class RemediationUnresolvedDriver(BaseModel):
+    """A cost component that is a PRICING representation of work (not distinct
+    work) and could not be attached to any implementation activity. The
+    `component_id` links to the `cost_components` row that carries the full
+    pricing detail (amount, currency, basis, evidence refs) -- so no monetary
+    information is hidden or lost, and it is never a phantom activity."""
+
+    component_id: str
+    description: str
+
+
 class RemediationCostComponentResult(BaseModel):
     """One cost driver, after deterministic validation + arithmetic."""
 
@@ -100,6 +111,13 @@ class RemediationCostResult(BaseModel):
     alternative_strategies: list[str] = Field(default_factory=list)
     implementation_activities: list[str] = Field(default_factory=list)
 
+    # Investigation / verification work the canonical interpretation identified
+    # (reconcile, compare, determine comparability, establish the basis, ...).
+    # Shown to the auditor so the required next step is explicit, but NEVER
+    # part of the remediation scope and NEVER priced -- it establishes the
+    # facts, it does not correct an established condition.
+    investigation_activities: list[str] = Field(default_factory=list)
+
     cost_components: list[RemediationCostComponentResult] = Field(default_factory=list)
     currency: str | None = None
 
@@ -114,6 +132,21 @@ class RemediationCostResult(BaseModel):
     # least one priced and at least one unpriced component coexist.
     unpriced_activities: list[str] = Field(default_factory=list)
     is_partial_estimate: bool = False
+
+    # Activities whose NECESSITY is contingent on first confirming the
+    # underlying cause (systemic/preventive remediation when root cause is
+    # NOT_ESTABLISHED). A subset of `implementation_activities`, surfaced so
+    # the renderer can mark them "conditional" rather than "confirmed".
+    conditional_activities: list[str] = Field(default_factory=list)
+
+    # Cost drivers the LLM produced that are a PRICING representation of work
+    # (e.g. "labour for X") rather than a distinct unit of work, and which
+    # could not be attached to any activity. Kept for audit -- their full
+    # pricing detail is in `cost_components`; listing them here (NOT in
+    # `implementation_activities`) records the unresolved relationship
+    # explicitly (with the `component_id` that carries the money) so a pricing
+    # phrase never becomes an implementation activity and no amount is hidden.
+    unresolved_pricing_drivers: list[RemediationUnresolvedDriver] = Field(default_factory=list)
 
     low_estimate: float | None = None
     most_likely_estimate: float | None = None

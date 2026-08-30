@@ -174,6 +174,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 evidence_ledger,
                 canonical_subject=getattr(canonical, "finding_subject", None),
                 canonical_state=canonical,
+                semantic_context=state.get("canonical_semantic_context"),
             )
             inv.questions = fallback_plan.questions
             if not inv.areas:
@@ -534,7 +535,13 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             finding_text, _reported_for_specificity, mechanism.status if mechanism else None,
             canonical.deviation_condition if canonical else None,
         )
-        if specificity == "LOW":
+        # A finding that EXPLICITLY enumerates its own competing causal
+        # mechanisms is not hypothesis-thin -- the finding handed us the
+        # mechanisms. Its stated-alternative hypotheses are licensed by the
+        # finding text and must not be dropped as "no grounding" (spec 9/28).
+        from app.agent.causal_guard import extract_stated_causal_alternatives as _esca_spec
+        _stated_alts_present = len(_esca_spec(finding_text)) >= 2
+        if specificity == "LOW" and not _stated_alts_present:
             existing_hyps = rc.candidate_hypotheses or []
             dropped_low = [h for h in existing_hyps if not _is_recurrence_hyp(h.statement)]
             if dropped_low:
@@ -707,7 +714,26 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         _referenced_docs = canonical.referenced_documents if canonical else None
         filtered_final_hyps = []
         _had_authoritatively_refuted_hyp = False
+        # A hypothesis the FINDING TEXT itself enumerates as a competing
+        # mechanism ("could have resulted from A, B, or C") is licensed by the
+        # finding -- the destructive prose-pattern checks below (which assume
+        # an LLM invented the statement) must not remove it (spec 9/28).
+        from app.agent.causal_guard import extract_stated_causal_alternatives as _esca_ff
+        from app.services.text_grounding import significant_words as _ff_sig
+        _ff_alt_keys = [
+            frozenset(_ff_sig(a) or []) for a in (_esca_ff(finding_text) or [])
+        ]
+
+        def _ff_is_stated_alt(_h) -> bool:
+            if not _ff_alt_keys:
+                return False
+            _hw = set(_ff_sig(getattr(_h, "statement", "") or "") or [])
+            return any(k and k <= _hw for k in _ff_alt_keys)
+
         for h in rc.candidate_hypotheses:
+            if _ff_is_stated_alt(h) and h.status != "REFUTED":
+                filtered_final_hyps.append(h)
+                continue
             if h.status == "REFUTED":
                 if getattr(h, "status_locked", False):
                     # Phase 20 Part C: this hypothesis was legitimately
@@ -1044,17 +1070,16 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                     "none for a finding with sufficient specificity to support hypothesis generation"
                 ))
                 if capa is not None:
-                    from app.services.semantic_subject import extract_semantic_subject, topic_word
+                    from app.services.semantic_subject import topic_word
+                    # PART 1: the canonical subject is authoritative. When it
+                    # is unresolved, use the shared UNRESOLVED representation
+                    # -- never re-parse the raw finding for a new subject.
                     backfill_subject = getattr(canonical, "finding_subject", None)
-                    if not backfill_subject or backfill_subject == "UNKNOWN":
-                        # canonical extraction isn't always populated on
-                        # every path into this node -- falling back to the
-                        # RAW finding text as "subject" makes topic_word()
-                        # extract a garbled topic (e.g. "operator" from a
-                        # training finding) and dumps the entire finding
-                        # into the CAPA action's tail phrase. Extract a real
-                        # subject directly from the finding text instead.
-                        backfill_subject = extract_semantic_subject(finding_text).finding_subject or finding_text
+                    if not backfill_subject or str(backfill_subject).strip().upper().startswith(
+                        ("UNKNOWN", "UNRESOLVED", "NOT ESTABLISHED")
+                    ):
+                        from app.services.semantic_subject import UNRESOLVED_SUBJECT_DISPLAY
+                        backfill_subject = UNRESOLVED_SUBJECT_DISPLAY
                     capa.conditional_actions = build_conditional_capa_actions(
                         backfill_hyps, backfill_subject, topic_word(backfill_subject)
                     )
@@ -1154,22 +1179,43 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             if canonical and canonical.finding_subject and canonical.finding_subject != "UNKNOWN" else None
         )
         if not _subj_words:
-            # canonical extraction isn't always populated on every path into
-            # this node (e.g. a hand-built state in a fallback/recovery
-            # branch) -- without SOME subject exclusion, a hypothesis that
-            # merely repeats the finding's own subject nouns ("daily
-            # equipment inspection checklist") would spuriously overlap the
-            # finding's own VERIFIED claim and be scored VERIFIED_SUPPORT
-            # for restating what the finding is about, not for being
-            # corroborated. Fall back to extracting the subject directly
-            # from the raw finding text.
+            # PART 1: canonical_finding_state is the ONE *canonical* subject
+            # source and nothing here is written back to it. This is a purely
+            # NODE-LOCAL stopword set for the topical-overlap grounding
+            # heuristic: without it a hypothesis that merely repeats the
+            # finding's own subject nouns would spuriously score
+            # VERIFIED_SUPPORT against the finding's own claim. When the
+            # canonical subject is unresolved (e.g. a hand-built state on a
+            # fallback/recovery path) fall back to reading the finding's
+            # subject nouns directly -- this value never leaves this scoring
+            # block and is never surfaced as "the subject".
             from app.services.semantic_subject import extract_semantic_subject
             _fallback_subject = extract_semantic_subject(finding_text).finding_subject
             _subj_words = _sig_words(_fallback_subject) if _fallback_subject else None
         _eligible_hyps = []
         _demoted_ids = set()
         _new_areas = []
+        # A hypothesis the FINDING TEXT itself explicitly enumerates as a
+        # competing causal mechanism ("could have resulted from A, B, or C")
+        # is licensed by the finding's own statement -- it is NOT mere topical
+        # overlap and must not be demoted to an "investigation area" (spec
+        # 6/9). It stays POSSIBLE with root cause NOT_ESTABLISHED.
+        from app.agent.causal_guard import extract_stated_causal_alternatives as _esca
+        _stated_alt_keys = [
+            frozenset(_sig_words(a) or [])
+            for a in (_esca(finding_text) or [])
+        ]
+
+        def _is_stated_alternative(_h) -> bool:
+            if not _stated_alt_keys:
+                return False
+            _hw = _sig_words(getattr(_h, "statement", "") or "") or set()
+            return any(k and k <= set(_hw) for k in _stated_alt_keys)
+
         for h in rc.candidate_hypotheses:
+            if _is_stated_alternative(h):
+                _eligible_hyps.append(h)
+                continue
             if getattr(h, "status_locked", False):
                 # Phase 20 Part C: already authoritatively evaluated by the
                 # evidence-reconciliation evaluator -- never demote it back
@@ -1835,6 +1881,7 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
                 evidence_ledger,
                 canonical_subject=getattr(canonical, "finding_subject", None),
                 canonical_state=canonical,
+                semantic_context=state.get("canonical_semantic_context"),
             )
             if inv is None:
                 inv = fallback_plan

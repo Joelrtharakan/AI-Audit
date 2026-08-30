@@ -268,8 +268,15 @@ def build_semantic_graph(
     evidence_claims: list[EvidenceClaim] | list[EvidenceItem],
     propositions: list[Proposition],
     conflicts: list[EvidenceConflict] | None = None,
+    resolved_deviation=None,
 ) -> SemanticGraph:
-    """Build the formal Semantic Graph with atomic entity/event/state nodes and directed relations."""
+    """Build the formal Semantic Graph with atomic entity/event/state nodes and directed relations.
+
+    `resolved_deviation` -- when the caller already computed the finding's
+    `DeviationInfo` (understand_finding_node does), it is passed in so this
+    function does NOT re-run resolve_deviation(): one semantic interpretation
+    per investigation. Falls back to computing it for legacy callers.
+    """
     from app.models.agent import (
         SemanticEdge,
         SemanticGraph,
@@ -329,8 +336,11 @@ def build_semantic_graph(
     for ent in extract_entities(finding_text):
         _get_or_create_node(ent, SemanticNodeType.ENTITY, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)
 
-    from app.services.semantic_subject import resolve_deviation
-    _dev_res = resolve_deviation(finding_text)
+    if resolved_deviation is not None:
+        _dev_res = resolved_deviation
+    else:
+        from app.services.semantic_subject import resolve_deviation
+        _dev_res = resolve_deviation(finding_text)
     if _dev_res and _dev_res.matched:
         if _dev_res.affected_process and _dev_res.affected_process not in ("UNKNOWN", "NOT_ESTABLISHED", "UNRESOLVED", "Operational process"):
             _get_or_create_node(_dev_res.affected_process, SemanticNodeType.PROCESS, EvidenceStatus.VERIFIED, EpistemicSource.AUDIT_OBSERVATION)

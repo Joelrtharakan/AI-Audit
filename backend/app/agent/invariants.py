@@ -431,6 +431,7 @@ def _check_entity_not_evidence_proposition(state: dict[str, Any]) -> tuple[bool,
     from app.services.semantic_subject import (
         _ACCORDING_TO_EVIDENCE_PREFIX_RE,
         _SELF_REFERENTIAL_EVIDENCE_PREFIX_RE,
+        looks_like_evidence_proposition,
     )
     canonical = state.get("canonical_finding_state")
     impact = state.get("impact_assessment")
@@ -443,7 +444,13 @@ def _check_entity_not_evidence_proposition(state: dict[str, Any]) -> tuple[bool,
     if impact and getattr(impact, "affected_object", None):
         fields_to_check.append(("impact.affected_object", impact.affected_object))
     for label, val in fields_to_check:
-        if _SELF_REFERENTIAL_EVIDENCE_PREFIX_RE.search(val) or _ACCORDING_TO_EVIDENCE_PREFIX_RE.search(val):
+        if str(val).strip().upper().startswith(("UNKNOWN", "UNRESOLVED", "NOT ESTABLISHED")):
+            continue  # honest unresolved marker, not a badly-shaped entity
+        if (
+            _SELF_REFERENTIAL_EVIDENCE_PREFIX_RE.search(val)
+            or _ACCORDING_TO_EVIDENCE_PREFIX_RE.search(val)
+            or looks_like_evidence_proposition(val)
+        ):
             return False, f"{label} is an evidence proposition, not a noun-phrase entity: {val!r}"
     return True, None
 
@@ -485,8 +492,21 @@ def _check_comparison_finding_preserves_both_sides(state: dict[str, Any]) -> tup
     canonical = state.get("canonical_finding_state")
     if not canonical or getattr(canonical, "semantic_type", None) != "COMPARISON":
         return True, None
-    deviation = getattr(canonical, "observed_deviation", None) or ""
-    if "did not match" not in deviation.lower() and "not matched" not in deviation.lower():
+    deviation = (getattr(canonical, "observed_deviation", None) or "").lower()
+    # The deviation text must still READ as a comparison -- either the classic
+    # "did not match" phrasing, or any explicit comparison relationship
+    # (differed from / shortfall / variance / exceeded / below / above the
+    # reference). A quantified comparison ("shortfall of 120 units below the
+    # system record") preserves MORE, not less, so it must pass here.
+    _rel_re = re.compile(
+        r"did not match|not matched|differed from|differ\w* by|"
+        r"shortfall|surplus|variance|discrepancy|deficit|overage|underage|"
+        r"exceeded|fell (?:short|below)|dropped below|"
+        r"\b(?:above|below|over|under)\s+the\b|inconsistent with|did not reconcile|"
+        r"did not agree with",
+        re.IGNORECASE,
+    )
+    if not _rel_re.search(deviation):
         return False, f"COMPARISON finding's observed_deviation lost the comparison relationship: {deviation!r}"
     return True, None
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import time
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Provider failover removed: one investigation = one provider + one model via the LiteLLM boundary (no fan-out, no fallback). See app/services/llm/execution.py.")
 from unittest.mock import AsyncMock, patch
 
 from app.services.gemini_client import GeminiServerError

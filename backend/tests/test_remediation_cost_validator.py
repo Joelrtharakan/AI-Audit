@@ -21,15 +21,18 @@ def _interp(components, proposals=None):
     )
 
 
-def test_unsupported_verified_claim_is_downgraded():
+def test_unsupported_verified_claim_is_downgraded_and_stripped():
     interp = _interp([{
         "component_id": "C0", "description": "labor", "cost_category": "labor",
         "unit_cost": 5000, "unit_cost_basis": "VERIFIED", "currency": "INR",
         "amount_type": "TOTAL", "source_reference_ids": [],  # nothing cited
     }])
     comps, _, outcome = validate_and_plan(interp, EV)
-    assert comps[0].unit_cost_basis in ("ESTIMATED", "ASSUMED")
+    # A VERIFIED claim with no cited evidence is downgraded AND, having no
+    # evidence anchor, its number is removed -- the driver survives unpriced.
     assert any("downgraded" in d for d in outcome.llm_disagreements)
+    assert comps[0].unit_cost is None
+    assert comps[0].unit_cost_basis == "NOT_ESTABLISHED"
 
 
 def test_verified_claim_with_real_evidence_ref_survives():
@@ -62,7 +65,7 @@ def test_invented_pricing_without_basis_is_stripped():
     comps, _, outcome = validate_and_plan(interp, EV)
     assert comps[0].unit_cost is None
     assert comps[0].unit_cost_basis == "NOT_ESTABLISHED"
-    assert any("removed" in d for d in outcome.llm_disagreements)
+    assert any("pricing not established" in d.lower() or "no evidence" in d.lower() for d in outcome.llm_disagreements)
 
 
 def test_total_amount_type_never_keeps_a_quantity():

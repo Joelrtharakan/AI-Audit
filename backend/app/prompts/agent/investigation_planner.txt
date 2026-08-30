@@ -55,6 +55,12 @@ A question is only useful if it is:
   (4) EVIDENCE-TARGETED: Names the specific document/record type that would answer it (the "evidence" field).
   (5) CONDITIONAL STRUCTURE: If a question depends on an antecedent outcome, specify "activation_condition" and "depends_on".
 
+If the finding text ITSELF states competing causal mechanisms ("could have resulted from A, B,
+or C"), you MUST include a P1 discrimination question naming those mechanisms and asking for the
+objective evidence (contemporaneous execution/transaction records, system audit trail and
+timestamps, independent verification/recount, secondary records) that would be uniquely
+consistent with ONE mechanism and not the others. Do not replace it with generic questions.
+
 Priority rules:
   P1: Resolve direct evidence conflicts.
   P2: Establish whether the alleged deviation/event actually occurred.

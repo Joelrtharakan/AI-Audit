@@ -138,7 +138,13 @@ def assemble_estimate(
     est = AssembledEstimate()
 
     currencies = {c.currency for c in components if c.currency}
-    est.currency = next(iter(currencies), None) if len(currencies) == 1 else None
+    # The single working currency, if the evidence establishes exactly one.
+    # Currency is NEVER invented or defaulted (spec section 7): a priced
+    # component with no currency may only ADOPT this one when it exists;
+    # with no currency anywhere its figure cannot be meaningfully expressed
+    # and the component is carried as an unpriced cost driver instead.
+    working_currency = next(iter(currencies), None) if len(currencies) == 1 else None
+    est.currency = working_currency
     if len(currencies) > 1:
         est.uncertainty_reasons.append(
             f"Cost components are stated in multiple currencies ({sorted(currencies)}); they are "
@@ -149,10 +155,19 @@ def assemble_estimate(
     #     (single working currency only; mixed-currency components still render).
     results: list[RemediationCostComponentResult] = []
     rows: list[_Row] = []
+    _currency_dropped: list[str] = []
     for c in components:
         pt = _point_amount(c)
         lo = _bound_amount(c, "low")
         hi = _bound_amount(c, "high")
+
+        # Currency resolution for THIS component -- adopt the single working
+        # currency when the component stated none, never invent one.
+        eff_currency = c.currency or (working_currency if pt is not None else None)
+        # A figure with no currency and none to adopt is not a usable amount.
+        currency_unusable = pt is not None and eff_currency is None
+        render_amount = None if currency_unusable else pt
+
         results.append(RemediationCostComponentResult(
             component_id=c.component_id,
             description=c.description,
@@ -160,25 +175,37 @@ def assemble_estimate(
             quantity=c.quantity,
             quantity_unit=c.quantity_unit,
             quantity_basis=_basis(c.quantity_basis),
-            unit_cost=c.unit_cost,
-            unit_cost_basis=_basis(c.unit_cost_basis),
-            currency=c.currency,
-            calculated_amount=pt,
-            calculated_amount_low=lo if (lo is not None and pt is not None and lo != pt) else None,
-            calculated_amount_high=hi if (hi is not None and pt is not None and hi != pt) else None,
-            calculation_formula=_formula(c),
+            unit_cost=None if currency_unusable else c.unit_cost,
+            unit_cost_basis=_basis("NOT_ESTABLISHED" if currency_unusable else c.unit_cost_basis),
+            currency=eff_currency,
+            calculated_amount=render_amount,
+            calculated_amount_low=lo if (lo is not None and render_amount is not None and lo != render_amount) else None,
+            calculated_amount_high=hi if (hi is not None and render_amount is not None and hi != render_amount) else None,
+            calculation_formula="pricing basis stated without a currency" if currency_unusable else _formula(c),
             recurrence=c.recurrence,
             recurring_period=c.recurring_period,
-            confidence=_CONF_FROM_BASIS.get(c.unit_cost_basis, RemediationConfidence.LOW),
+            confidence=RemediationConfidence.LOW if currency_unusable else _CONF_FROM_BASIS.get(c.unit_cost_basis, RemediationConfidence.LOW),
             source_reference_ids=list(c.source_reference_ids),
             assumptions=list(c.assumptions),
             rationale=c.rationale,
         ))
+        if currency_unusable:
+            _currency_dropped.append(c.component_id)
+            est.unpriced_component_ids.append(c.component_id)
+            continue
         if pt is None:
             est.unpriced_component_ids.append(c.component_id)
             continue
-        if c.currency and (est.currency is None or c.currency == est.currency):
-            rows.append(_Row(c, pt, lo if lo is not None else pt, hi if hi is not None else pt))
+        if eff_currency and (working_currency is None or eff_currency == working_currency):
+            _row_c = c if c.currency else c.model_copy(update={"currency": eff_currency})
+            rows.append(_Row(_row_c, pt, lo if lo is not None else pt, hi if hi is not None else pt))
+
+    if _currency_dropped:
+        est.uncertainty_reasons.append(
+            f"{len(_currency_dropped)} cost component(s) provided a figure with no currency, and the "
+            "evidence does not establish one; those figures are not expressed as an amount and the "
+            "activities are carried as unpriced cost drivers."
+        )
 
     _results_by_id = {r.component_id: r for r in results}
 

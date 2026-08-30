@@ -48,7 +48,100 @@ def build_deterministic_five_why(
 
     fact_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
+
+    # PRECEDENCE + CONVERGENCE (Part 2/7/12): if the finding TEXT explicitly
+    # enumerates competing causal mechanisms, that enumeration IS the 5-Why
+    # boundary. Source the subject/observation from the CANONICAL state
+    # (authoritative, post-merge) -- resolve_deviation() is deferred so a
+    # competing-causes finding never triggers a redundant deterministic
+    # re-parse.
+    from app.agent.causal_guard import extract_stated_causal_alternatives as _esca0
+    _early_alts = (
+        list(getattr(canonical_state, "stated_causal_alternatives", []) or [])
+        or _esca0(finding_text)
+    )
+    if len(_early_alts) >= 2:
+        from app.services.semantic_subject import (
+            _strip_framing as _sf0,
+            format_deviation_why_question as _fdwq0,
+        )
+        _cf_subj = getattr(canonical_state, "finding_subject", None)
+        _cf_cond = getattr(canonical_state, "deviation_condition", None)
+        _cf_obs = getattr(canonical_state, "observed_deviation", None)
+        if not (_cf_subj and _cf_cond):
+            resolved = resolve_deviation(finding_text, fact_claims)
+            _cf_subj = _cf_subj or getattr(resolved, "finding_subject", None)
+            _cf_cond = _cf_cond or resolved.condition
+            _cf_obs = _cf_obs or resolved.deviation
+        _obs = (fact_claims[0] if fact_claims else (_cf_obs or finding_text))
+        _obs = _sf0(_obs).strip().rstrip(".")
+        if _obs and _obs[0].isupper() and not _obs.split()[0].isupper():
+            _obs = _obs[0].lower() + _obs[1:]
+        _aj = "; ".join(a.rstrip(". ").strip() for a in _early_alts)
+        _subj0 = _cf_subj if _cf_subj else "the affected process"
+        return FiveWhyAnalysis(
+            steps=[FiveWhyStep(
+                question=_fdwq0(_subj0, _cf_cond, None),
+                answer=(
+                    f"The available evidence establishes that {_obs}, but does not establish "
+                    f"which mechanism is responsible. The finding states the plausible "
+                    f"mechanisms remaining are: {_aj}. Investigation is required to "
+                    f"discriminate between them."
+                ),
+                status="UNKNOWN",
+            )],
+            is_complete=False,
+            status_note=(
+                "EVIDENCE BOUNDARY — Competing causal mechanisms stated by the finding remain "
+                "unresolved; investigation must discriminate between them."
+            ),
+        )
+
+    # CANONICAL CAUSAL STATE IS AUTHORITATIVE (spec §13). When a valid
+    # canonical interpretation exists and it did NOT establish a root cause,
+    # 5-Why is a STRUCTURED PRESENTATION of that canonical reasoning -- it
+    # stops at the evidence boundary and never runs a second deterministic
+    # causal inference (resolve_deviation + multi-level chaining). The
+    # deterministic chain below is the fail-closed floor for when there is no
+    # canonical context at all.
+    if semantic_context is not None:
+        _rcs = getattr(semantic_context, "root_cause_status", None)
+        if _rcs in (None, "NOT_ESTABLISHED", "STATED_UNVERIFIED", "CONTRADICTED"):
+            from app.services.canonical_context_validator import get_affected_object_candidate
+            _pd = getattr(semantic_context, "primary_deviation", None)
+            _cond = getattr(semantic_context, "observed_condition", None)
+            _subj = _pd or get_affected_object_candidate(semantic_context) or "the affected process"
+            _obs = (fact_claims[0] if fact_claims else (_pd or _cond or "the reported condition"))
+            _hyps = [h.statement.strip().rstrip(".") for h in
+                     (getattr(semantic_context, "candidate_hypotheses", []) or []) if getattr(h, "statement", None)]
+            _gaps = [str(g).strip().rstrip(".") for g in
+                     (getattr(semantic_context, "information_gaps", []) or []) if str(g).strip()]
+            _ans = (
+                f"The available evidence establishes that {str(_obs).strip().rstrip('.')}, but does "
+                "not establish why it occurred. Root cause is NOT_ESTABLISHED."
+            )
+            if _hyps:
+                _ans += " Possible explanations that remain unverified: " + "; ".join(_hyps) + "."
+            if _gaps:
+                _ans += " The following must first be established: " + "; ".join(_gaps) + "."
+            _ans += " Investigation is required before a causal conclusion can be drawn."
+            _q1 = f"Why did the observed condition affecting {_subj} occur?"
+            return FiveWhyAnalysis(
+                steps=[FiveWhyStep(question=_q1, answer=_ans, status="UNKNOWN")],
+                is_complete=False,
+                status_note=(
+                    "EVIDENCE BOUNDARY — the canonical interpretation did not establish a root "
+                    "cause; investigation is required."
+                ),
+            )
+
+    # The deterministic 5-Why below needs the resolver's full DeviationInfo
+    # (condition, comparison_*, recurrence_*, transition_type, actors, ...) --
+    # more than canonical_finding_state exposes -- so it is the fail-closed
+    # floor for every non-competing-causes shape (and for a canonical context
+    # that DID establish the cause -- it presents the established chain).
     resolved = resolve_deviation(finding_text, fact_claims)
+
     # Generic degraded-subject fallback -- deliberately domain-agnostic
     # ("the affected process") rather than guessing a specific entity from
     # finding vocabulary. A keyword-triggered fabricated entity (e.g.
@@ -72,19 +165,24 @@ def build_deterministic_five_why(
         _canonical_affected = get_affected_object_candidate(semantic_context)
         noun_sub = _semantic_primary_deviation or _canonical_affected or _GENERIC_SUBJECT_FALLBACK
     elif canonical_subject is not None:
+        from app.services.semantic_subject import is_established_subject
         if isinstance(canonical_subject, str):
-            if canonical_subject not in _DEGRADED_SUBJECTS:
-                noun_sub = canonical_subject
-            else:
-                noun_sub = resolved.finding_subject or resolved.subject or _GENERIC_SUBJECT_FALLBACK
+            subj_val = canonical_subject
         else:
             subj_val = getattr(canonical_subject, "finding_subject", getattr(canonical_subject, "subject", None))
-            if subj_val and subj_val not in _DEGRADED_SUBJECTS:
-                noun_sub = subj_val
-            else:
-                noun_sub = resolved.finding_subject or resolved.subject or _GENERIC_SUBJECT_FALLBACK
+        if is_established_subject(subj_val):
+            noun_sub = subj_val
+        elif is_established_subject(resolved.finding_subject or resolved.subject):
+            noun_sub = resolved.finding_subject or resolved.subject
+        else:
+            noun_sub = _GENERIC_SUBJECT_FALLBACK
     else:
-        noun_sub = resolved.finding_subject or resolved.subject or _GENERIC_SUBJECT_FALLBACK
+        from app.services.semantic_subject import is_established_subject
+        noun_sub = (
+            (resolved.finding_subject or resolved.subject)
+            if is_established_subject(resolved.finding_subject or resolved.subject)
+            else _GENERIC_SUBJECT_FALLBACK
+        )
     # The canonical primary_deviation (Why-1's actual subject, per Section
     # 6 of the promotion pass) takes priority over the raw-text resolver's
     # `deviation` whenever a validated semantic context supplied one --
@@ -377,7 +475,9 @@ def build_deterministic_five_why(
         )
         if resolved.measurement_value is not None:
             qual = f"{resolved.measurement_qualifier} " if resolved.measurement_qualifier else ""
-            magnitude_phrase = f"{qual}{resolved.measurement_value}{resolved.measurement_unit or ''} discrepancy"
+            _u = resolved.measurement_unit or ""
+            _unit_txt = _u if _u == "%" else (f" {_u}" if _u else "")
+            magnitude_phrase = f"{qual}{resolved.measurement_value:g}{_unit_txt} discrepancy"
         else:
             magnitude_phrase = "discrepancy"
         from app.services.semantic_subject import (
@@ -649,10 +749,32 @@ def build_deterministic_five_why(
     if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
         deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
 
-    why_boundary_answer = (
-        f"The available evidence establishes that {deviation_clause}, but does not establish the specific "
-        "underlying mechanism or root cause responsible."
+    # Preserve any causal differential the finding states explicitly -- the
+    # boundary answer must NOT collapse "A, B, or C remain unresolved" into a
+    # bare "root cause unknown" (spec 8 / 16).
+    from app.agent.causal_guard import extract_stated_causal_alternatives
+    _stated_alts = (
+        list(getattr(canonical_state, "stated_causal_alternatives", []) or [])
+        or extract_stated_causal_alternatives(finding_text)
     )
+    if len(_stated_alts) >= 2:
+        _alts_join = "; ".join(a.rstrip(". ").strip() for a in _stated_alts)
+        why_boundary_answer = (
+            f"The available evidence establishes that {deviation_clause}, but does not "
+            f"establish which mechanism is responsible. The finding states the plausible "
+            f"mechanisms remaining are: {_alts_join}. Investigation is required to "
+            f"discriminate between them."
+        )
+        _note = (
+            "EVIDENCE BOUNDARY — Competing causal mechanisms stated by the finding remain "
+            "unresolved; investigation must discriminate between them."
+        )
+    else:
+        why_boundary_answer = (
+            f"The available evidence establishes that {deviation_clause}, but does not establish the specific "
+            "underlying mechanism or root cause responsible."
+        )
+        _note = "EVIDENCE BOUNDARY — Causal mechanism requires investigation."
 
     steps.append(FiveWhyStep(
         question=format_deviation_why_question(
@@ -664,5 +786,5 @@ def build_deterministic_five_why(
     return FiveWhyAnalysis(
         steps=steps,
         is_complete=False,
-        status_note="EVIDENCE BOUNDARY — Causal mechanism requires investigation.",
+        status_note=_note,
     )

@@ -75,6 +75,13 @@ _EVIDENCE_PREDICATES = {
     "acknowledges", "acknowledged", "mention", "mentions", "mentioned",
     "indicate", "indicates", "indicated", "declare", "declares", "declared",
     "certify", "certifies", "certified", "testify", "testifies", "testified",
+    # verbs of factual assertion / accusation: "X alleged/asserted/attested
+    # that <event>" asserts that a concrete event occurred (the speaker
+    # merely distancing themselves from proof) -- a REPORTED claim about the
+    # world, handled as attributed speech, NOT the speaker's opinion ABOUT
+    # the world. (Still never VERIFIED without deterministic validation.)
+    "allege", "alleges", "alleged", "assert", "asserts", "asserted",
+    "attest", "attests", "attested", "affirm", "affirms", "affirmed",
     # existential / copular fillers that can precede "that"
     "is", "was", "are", "were", "be", "been", "means", "meant", "requires",
     "required", "ensures", "ensured", "provided", "specifies", "specified",
@@ -209,6 +216,7 @@ def _split_complement_clause(text: str) -> tuple[str, str, str, bool] | None:
 _IMPERSONAL_STANCE_RE = re.compile(
     r"^(?:it\s+(?:is|was)\s+(?P<verb1>[a-z]+ed)\s+that\s+(?P<claim1>.+)"
     r"|in\s+the\s+(?:opinion|view|judg?ement|estimation|belief)\s+of\s+(?P<holder2>[^,]{2,60}),?\s+(?P<claim2>.+)"
+    r"|in\s+(?P<holder5>[A-Za-z][\w\s'&-]{0,40}?)['’]s\s+(?:opinion|view|judg?ement|estimation|assessment|belief|mind|estimate),?\s+(?P<claim5>.+)"
     r"|(?P<holder3>[A-Za-z][\w\s'&-]{0,60}?)\s+(?:is|are|was|were)\s+of\s+the\s+(?:opinion|view|belief|impression|understanding)\s+that\s+(?P<claim3>.+)"
     r"|(?:according\s+to\s+)?(?P<holder4>[A-Za-z][\w\s'&-]{0,60}?)['’]s\s+(?:opinion|view|belief|assumption|suspicion|impression)\s+(?:is|was)\s+that\s+(?P<claim4>.+))$",
     re.IGNORECASE,
@@ -251,8 +259,8 @@ def classify_epistemic_stance(sentence: str | None) -> StanceStatement | None:
     if m_imp:
         g = m_imp.groupdict()
         verb = (g.get("verb1") or "believed").lower()
-        holder = next((g[k] for k in ("holder2", "holder3", "holder4") if g.get(k)), None)
-        claim = next((g[k] for k in ("claim1", "claim2", "claim3", "claim4") if g.get(k)), None)
+        holder = next((g[k] for k in ("holder2", "holder3", "holder4", "holder5") if g.get(k)), None)
+        claim = next((g[k] for k in ("claim1", "claim2", "claim3", "claim4", "claim5") if g.get(k)), None)
         if claim:
             return StanceStatement(
                 holder=holder.strip() if holder else None,

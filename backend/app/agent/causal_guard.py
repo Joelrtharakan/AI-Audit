@@ -219,6 +219,117 @@ def extract_immediate_mechanism(
 
 
 # ---------------------------------------------------------------------------
+# 1b. Explicitly stated competing causal mechanisms
+# ---------------------------------------------------------------------------
+#
+# A finding can hand the investigation its own causal differential:
+#   "the discrepancy could have resulted from A, B, or C"
+#   "may have been caused by A or B"
+#   "the available records did not allow these to be distinguished"
+#
+# Those alternatives are STRUCTURALLY present in the finding text. Losing
+# them -- collapsing "A, B, or C remain unresolved" into a bare "root cause
+# unknown" -- discards information the finding already gave (spec 2C / 6 /
+# 16). This is a clearly-bounded GRAMMATICAL frame (a causal connector + a
+# coordinated 2+ item list), not a general causal-reasoning engine: it only
+# preserves an enumeration the finding makes explicit, and never infers,
+# ranks, or invents a mechanism.
+_STATED_ALT_CONNECTOR_RE = re.compile(
+    r"\b(?:could|may|might|can|would)\s+(?:not\s+)?(?:have\s+)?(?:been\s+)?"
+    r"(?:result(?:ed)?\s+from|be(?:en)?\s+caused\s+by|be(?:en)?\s+(?:due|attributable)\s+to|"
+    r"stem(?:med)?\s+from|aris(?:e|en)\s+from|be\s+explained\s+by|"
+    r"be\s+the\s+result\s+of|originate(?:d)?\s+(?:from|in))\b"
+    r"|(?:was|were|is|are)\s+(?:possibly|potentially|perhaps)\s+"
+    r"(?:caused\s+by|due\s+to|the\s+result\s+of)\b"
+    r"|\b(?:possible|potential|candidate|plausible)\s+"
+    r"(?:causes?|mechanisms?|explanations?|reasons?|contributing\s+factors?)\s*"
+    r"(?:include|are|were|:)"
+    # "did not establish WHETHER <X> resulted from A, B, or C" -- the causal
+    # frame after "whether/if" is a bare (non-modal) past/present tense.
+    r"|\b(?:whether|if)\s+(?:the\s+|a\s+|an\s+)?[\w\s'-]{0,50}?\s+"
+    r"(?:result(?:ed|s)?\s+from|(?:was|were|is|are)\s+(?:caused\s+by|due\s+to|"
+    r"attributable\s+to)|stem(?:med|s)?\s+from|arose\s+from|originate[ds]?\s+(?:from|in))",
+    re.IGNORECASE,
+)
+# "could not distinguish / determine which / did not allow these to be
+# distinguished / remained unresolved".
+_ALTERNATIVES_UNRESOLVED_RE = re.compile(
+    r"\b(?:could|did|does|do|can|was|were)\s*n[o']?'?t\s+"
+    r"(?:be\s+)?(?:distinguish\w*|determine\w*|establish\w*|ascertain\w*|"
+    r"isolate\w*|tell\s+(?:apart|which)|identif\w*\s+which|rule\s+out\s+(?:any|each))"
+    r"|(?:did|does|do)\s+not\s+(?:allow|permit)\s+"
+    r"(?:these|them|the\s+\w+)\s+to\s+be\s+distinguished"
+    r"|(?:remain(?:ed|s)?|were|was|are|is)\s+(?:not\s+)?"
+    r"(?:unresolved|indistinguishable|undetermined|not\s+distinguishable)"
+    r"|no\s+(?:evidence|basis|records?)\s+(?:to\s+|was\s+available\s+to\s+)?"
+    r"(?:distinguish|discriminate|determine\s+which)",
+    re.IGNORECASE,
+)
+_ALT_LIST_SPLIT_RE = re.compile(r"\s*,\s*|\s+(?:or|and/or|nor)\s+", re.IGNORECASE)
+_ALT_LEADIN_RE = re.compile(
+    r"^(?:either\s+|any\s+(?:one\s+)?of\s+|one\s+of\s+(?:the\s+following[:,]?\s*)?|"
+    r"a\s+combination\s+of\s+)",
+    re.IGNORECASE,
+)
+
+
+def extract_stated_causal_alternatives(text: str | None) -> list[str]:
+    """Competing causal mechanisms a finding EXPLICITLY enumerates after a
+    causal connector. Returns [] unless the grammatical frame is clearly
+    present with >= 2 coordinated items. Structural only -- no domain
+    vocabulary, no causal inference, no ranking."""
+    if not text or not text.strip():
+        return []
+    for m in _STATED_ALT_CONNECTOR_RE.finditer(text):
+        tail = text[m.end():].lstrip(" :—-")
+        # stop at the first sentence break or an added-clause connector
+        tail = re.split(
+            r"[.;\n]|,?\s+(?:and|but|although|however|while)\s+"
+            r"(?:the\s+)?(?:available|current|existing|the)\s+",
+            tail, maxsplit=1,
+        )[0]
+        tail = _ALT_LEADIN_RE.sub("", tail).strip()
+        raw = [p.strip(" \t,.-–—").strip() for p in _ALT_LIST_SPLIT_RE.split(tail)]
+        parts: list[str] = []
+        for p in raw:
+            p = re.sub(r"^(?:or|and|nor|and/or)\s+", "", p, flags=re.IGNORECASE).strip()
+            # the coordinated causal frame often repeats its preposition on
+            # each item ("resulted from A or from B", "caused by X or by Y").
+            p = re.sub(
+                r"^(?:from|by|through|via|because\s+of|due\s+to|owing\s+to|"
+                r"on\s+account\s+of|as\s+a\s+result\s+of)\s+",
+                "", p, flags=re.IGNORECASE,
+            ).strip()
+            if not p or len(p) < 4:
+                continue
+            if len(p.split()) > 16:
+                continue
+            if not re.search(r"[A-Za-z]{3,}", p):
+                continue
+            parts.append(p)
+        if len(parts) >= 2:
+            seen: set[str] = set()
+            out: list[str] = []
+            for p in parts:
+                k = re.sub(r"\s+", " ", p.lower())
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(p)
+                if len(out) >= 6:
+                    break
+            if len(out) >= 2:
+                return out
+    return []
+
+
+def stated_alternatives_unresolved(text: str | None) -> bool:
+    """True when the finding explicitly says the competing mechanisms could
+    not be distinguished from the available evidence."""
+    return bool(text) and bool(_ALTERNATIVES_UNRESOLVED_RE.search(text))
+
+
+# ---------------------------------------------------------------------------
 # 2. Contradiction detection
 # ---------------------------------------------------------------------------
 

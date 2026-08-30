@@ -1090,6 +1090,7 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
         resolve_deviation,
         split_topic_and_tail,
         strip_leading_article,
+        is_established_subject,
         strip_quantity_prefix,
         topic_word,
         validate_semantic_subject,
@@ -1107,13 +1108,49 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
         _canonical_affected = get_affected_object_candidate(semantic_context)
         clean_noun = _canonical_affected or "UNKNOWN — no affected object could be isolated from the finding text"
     else:
-        canon_subject = getattr(canonical, "finding_subject", None) if canonical else None
+        canon_subject = (
+            getattr(canonical, "finding_subject", None)
+            or getattr(canonical, "affected_object", None)
+        ) if canonical else None
+        _UNRESOLVED = "UNKNOWN — no affected object could be isolated from the finding text"
         if canon_subject and canon_subject != "UNKNOWN" and validate_semantic_subject(canon_subject):
             clean_noun = canon_subject
+        elif canon_subject and str(canon_subject).strip().upper().startswith(
+            ("UNKNOWN", "UNRESOLVED", "NOT ESTABLISHED")
+        ):
+            # The upstream resolver already established there is no isolable
+            # subject -- honour that, never independently re-derive one here.
+            clean_noun = _UNRESOLVED
+        elif canon_subject:
+            # PART 1 (architectural convergence): canonical_finding_state is
+            # the ONE authoritative subject source -- understand_finding_node
+            # already vetted it. Use it as-is even if this stricter local
+            # gate would reject it. NEVER re-parse the raw finding when a
+            # canonical subject exists.
+            clean_noun = canon_subject
+        elif canonical is not None:
+            # A canonical state is present but carries no subject -> honour
+            # that fail-closed result rather than re-deriving one.
+            clean_noun = _UNRESOLVED
         else:
+            # No canonical state at all (isolated/legacy call path): fall back
+            # to the deterministic floor resolver -- this is the floor itself,
+            # not a downstream re-derivation past a canonical subject.
             resolved = resolve_deviation(request_finding_text, [])
-            clean_noun = resolved.subject or "UNKNOWN — no affected object could be isolated from the finding text"
+            clean_noun = resolved.subject or _UNRESOLVED
     clean_noun = strip_quantity_prefix(clean_noun) or clean_noun
+    # Normalise every "no usable subject" marker the pipeline can store
+    # ("UNRESOLVED — ...", "Finding subject not specifically identified", a
+    # generic placeholder) to the ONE marker the branches below gate on with
+    # `.startswith("UNKNOWN")`. Without this, a subject that failed resolution
+    # upstream would still be fed into `topic_word(...)` and concatenated into
+    # a fabricated "<word> operational process" / "<word> and compliance
+    # control" -- inventing an affected process the evidence never established
+    # (spec §13/§34: prefer an explicit unresolved value over a plausible
+    # invention).
+    from app.services.semantic_subject import is_established_subject as _is_est_subj
+    if not _is_est_subj(clean_noun):
+        clean_noun = "UNKNOWN — no affected object could be isolated from the finding text"
     topic = topic_word(clean_noun)
     topic_cap = topic[0].upper() + topic[1:]
     temporal_clause = extract_temporal_clause(request_finding_text)
@@ -1169,7 +1206,8 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
     # override, exception, waiver, ...), not specific to any one domain.
     if canonical and getattr(canonical, "semantic_type", None) == "EVENT_SEQUENCE_CONTROL" and getattr(canonical, "transition_type", None):
         transition_label = canonical.transition_type.replace("_", " ").lower()
-        derived_obj = (canonical.finding_subject or transition_label)
+        _es_subject = canonical.finding_subject if is_established_subject(getattr(canonical, "finding_subject", None)) else None
+        derived_obj = (_es_subject or transition_label)
         derived_obj = derived_obj[0].upper() + derived_obj[1:] if derived_obj else transition_label.capitalize()
         derived_process = canonical.affected_process if (canonical.affected_process not in ("UNKNOWN", "NOT ESTABLISHED", "")) else f"{transition_label.capitalize()} control and authorization"
         downstream_clause = (
@@ -1178,9 +1216,9 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
             "downstream action was improper."
             if getattr(canonical, "downstream_action_present", False) else ""
         )
-        if canonical.finding_subject and canonical.finding_subject.lower() != transition_label:
+        if _es_subject and _es_subject.lower() != transition_label:
             derived_effect = (
-                f"The {canonical.finding_subject} {transition_label} occurred and the required justification is not documented, based on "
+                f"The {_es_subject} {transition_label} occurred and the required justification is not documented, based on "
                 f"the available evidence.{downstream_clause} The applicable control, change justification, and downstream consequences require assessment."
             )
         else:
@@ -1198,7 +1236,7 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
     # the recurrence OBSERVATION from any prior-action relationship (never
     # implied "ineffective") and from future recurrence RISK (a distinct
     # dimension, never inferred from the fact recurrence already occurred).
-    elif canonical and getattr(canonical, "semantic_type", None) == "RECURRENCE" and getattr(canonical, "finding_subject", None) not in (None, "UNKNOWN"):
+    elif canonical and getattr(canonical, "semantic_type", None) == "RECURRENCE" and is_established_subject(getattr(canonical, "finding_subject", None)):
         deviation_subject = canonical.finding_subject
         derived_obj = deviation_subject[0].upper() + deviation_subject[1:]
         derived_process = canonical.affected_process if (canonical.affected_process not in ("UNKNOWN", "NOT ESTABLISHED", "")) else f"{topic_word(deviation_subject).capitalize()} operational process"
@@ -1706,6 +1744,7 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         _, _area_plan = _build_area_plan(
             request.finding_text, evidence_ledger, canonical_subject=getattr(canonical, "finding_subject", None),
             canonical_state=canonical,
+            semantic_context=state.get("canonical_semantic_context"),
         )
         # Phase 17: an explicit, structurally-grounded NO_ACTIONABLE_
         # UNCERTAINTY judgment already made upstream (Stage A --
