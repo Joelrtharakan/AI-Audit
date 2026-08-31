@@ -38,6 +38,10 @@ class CostBasis(str, Enum):
     VERIFIED = "VERIFIED"
     REPORTED = "REPORTED"
     ESTIMATED = "ESTIMATED"
+    # Quantity only: the LLM combined explicit evidenced values with a stated
+    # relationship (spec Pass 32 §5). Treated as evidence-anchored for
+    # confidence, since every operand is itself evidenced.
+    DERIVED = "DERIVED"
     ASSUMED = "ASSUMED"
     NOT_ESTABLISHED = "NOT_ESTABLISHED"
 
@@ -139,6 +143,15 @@ class RemediationCostResult(BaseModel):
     recurring_cost: float | None = None
     recurring_period: str | None = None
 
+    # A recurring cost totalled over an EXPLICITLY established horizon only
+    # (spec Pass 33 §7/§24). Null when no horizon is established -- the
+    # recurring cost is then reported as a periodic amount and NOTHING is
+    # multiplied out. `recurring_horizon` is the count in `recurring_period`
+    # units; `recurring_horizon_basis` is the LLM's provenance for it.
+    recurring_horizon_total: float | None = None
+    recurring_horizon: float | None = None
+    recurring_horizon_basis: str = ""
+
     # Spec section 14: when some implementation activities are priced and others
     # cannot be, the priced portion is still calculated and reported -- the
     # result is NOT forced to NOT_ASSESSABLE. These name the activities/drivers
@@ -209,8 +222,8 @@ class RemediationCostResult(BaseModel):
     rejected_items: list[RemediationRejectedItem] = Field(default_factory=list)
 
     @field_validator(
-        "one_time_cost", "recurring_cost", "low_estimate",
-        "most_likely_estimate", "high_estimate", mode="before",
+        "one_time_cost", "recurring_cost", "recurring_horizon_total", "recurring_horizon",
+        "low_estimate", "most_likely_estimate", "high_estimate", mode="before",
     )
     @classmethod
     def _finite_value(cls, v: Any) -> float | None:

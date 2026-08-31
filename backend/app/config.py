@@ -69,19 +69,37 @@ class Settings(BaseSettings):
     # fails closed. `agent_overall_timeout_seconds` (see below) is sized so the
     # deterministic fallback path (core_synthesis + concurrent financial /
     # remediation LLM calls) still completes after a canonical timeout.
-    # §7 fast-fail: after the prompt compaction (§3/§30) the canonical call
-    # generates ~1.0-1.6K structured tokens against a ~4.5K-token prompt and
-    # completes in ~20-40s on qwen3:8b. 75s is the interactive ceiling before
-    # the request proceeds on the DETERMINISTIC_FALLBACK path -- NOT raised to
-    # improve success rate (was 110s, which blocked the user for ~2 min).
-    canonical_semantic_primary_timeout_seconds: float = 75.0
-    # §9: the compacted contract WITHOUT the (unused) financial sub-object
-    # rarely needs > 1.4K tokens; 1600 bounds generation time (was 2200) and
-    # is the single biggest canonical-latency lever on qwen3:8b. A finding
-    # that truncates is still salvaged field-by-field, never all-or-nothing.
-    canonical_semantic_max_tokens: int = 1600
+    # §7 fast-fail: after the prompt/schema compaction + dropping the unused
+    # `financial` sub-object, the canonical call is MEASURED at ~58-60s warm
+    # (isolated) on qwen3:8b -- was ~110s / timing out. 100s covers warm +
+    # cold-start + a large finding with real margin and is still below the
+    # old 110s (NOT raised to improve success rate). Pass 29 removes the
+    # redundant core_synthesis call (~20-150s), which is the real latency
+    # win; on a genuine canonical timeout the request proceeds on
+    # DETERMINISTIC_FALLBACK.
+    canonical_semantic_primary_timeout_seconds: float = 100.0
+    # §9 / Pass 36 M5: generation time is the dominant canonical latency cost on
+    # qwen3:8b, so this is the primary lever. The Pass-36 compact-output
+    # contract (per-field word caps, omit optional fields, reference evidence by
+    # E-id, no prose) puts a COMPLETE structured response well under 1.2K
+    # tokens; 1400 (was 1600, was 2200) is a safe ceiling with headroom for a
+    # large multi-hypothesis finding. Truncation is still salvaged field-by-
+    # field. The `LLM RESPONSE ... finish_reason=length` log line surfaces any
+    # real truncation so this can be re-tuned from data, never guessed.
+    # Spec Pass 49 §18: per-stage model override on the SAME configured
+    # provider. Empty -> the global model (`ollama_model` / `llm_model`). Set
+    # e.g. CANONICAL_SEMANTIC_MODEL=qwen3:14b to run the primary semantic
+    # interpretation on a stronger local model when qwen3:8b's structured
+    # accuracy on complex multi-component findings is insufficient -- WITHOUT
+    # a code change and WITHOUT switching providers. Never an automatic switch.
+    canonical_semantic_model: str = ""
+    remediation_cost_model: str = ""
+    canonical_semantic_max_tokens: int = 1400
     # §8: right-sized for the compacted prompt (~3K sys+schema tok + finding +
-    # evidence, typically ~4-4.5K input) + 1600 output. Was 12288.
+    # evidence, typically ~4-4.5K input) + output. num_ctx is NOT reduced
+    # (Pass 36 M6): the finding+evidence input is variable and an
+    # under-budgeted window makes the provider thrash. 8192 covers a large
+    # finding + full output with headroom.
     canonical_semantic_num_ctx: int = 8192
 
     # LLM-PRIMARY canonical semantic interpretation: when True, the LLM
@@ -120,20 +138,29 @@ class Settings(BaseSettings):
     # investigation, never a wrong result. Set to False to skip the section
     # entirely in a deployment with no LLM provider.
     remediation_cost_estimation_enabled: bool = True
-    # Fast-fail for an interactive request (§7): the compacted pricing prompt
-    # + right-sized num_ctx should complete in ~15-25s on qwen3:8b; 60s is the
-    # ceiling before we accept a NOT_ASSESSABLE fallback rather than block.
-    remediation_cost_estimation_timeout_seconds: float = 60.0
+    # Pass 52: 75s was too tight. MEASURED on the full compiled graph, qwen3:8b,
+    # multi-component finding (8 panels: materials + derived labour + fixed
+    # inspection) -- the remediation call takes >75s (prompt-eval on the fuller
+    # graph context + ~22 tok/s generation of a 3-component plan) and TIMED OUT,
+    # dropping the whole estimate to NOT_ASSESSABLE. This is a model/hardware
+    # throughput limit, not a prompt defect. Give it real headroom (parallels
+    # canonical primary 100s and OLLAMA_PRIMARY_SYNTHESIS_TIMEOUT_SECONDS=110).
+    # A stronger/faster configured model finishes well inside this.
+    remediation_cost_estimation_timeout_seconds: float = 150.0
     # A compact remediation interpretation for a typical finding (2-4 cost
     # components + activities, optional/null fields omitted per the prompt) is
     # ~700-1100 output tokens against real qwen3:8b. 1400 covers that with
     # headroom; a genuinely large multi-component finding that truncates is
-    # still recovered piece-by-piece by interpreter._salvage (valid
-    # components/activities/proposals are kept, only the malformed tail is
-    # dropped) -- never an all-or-nothing failure. Was 2200, which the model
-    # tended to fill (done_reason=length) and was the single largest latency
-    # contributor (~74s).
-    remediation_cost_max_tokens: int = 1400
+    # Pass 38: MEASURED against real qwen3:8b + Ollama native timing -- a
+    # 5-asset finding (5 inspections + 5 installs + recurring verification +
+    # activities + pricing_information + calc plans + auditor inputs) produced
+    # eval_count=1200 with done_reason=length, i.e. the Pass-36 1200 ceiling
+    # TRUNCATED it. Per the "if finish_reason=length, compact the contract, do
+    # not lower the limit -- then set it above observed legitimate size" rule,
+    # this is 1800: above the observed truncation, still salvage-protected.
+    # Was 2200 -> 1400 -> 1200 (too low) -> 1800. `LLM RESPONSE
+    # finish_reason=length` remains the re-tuning signal.
+    remediation_cost_max_tokens: int = 1800
     # Input for this call is the compacted pricing system prompt (~2.3K tok) +
     # schema hint (~0.6K tok) + the structured context block (canonical
     # remediation state + evidence, ~1-2K tok). 4096 could NOT hold that: the

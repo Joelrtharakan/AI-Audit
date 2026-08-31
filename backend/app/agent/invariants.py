@@ -232,13 +232,22 @@ def _check_recurrence_investigation_coverage(state: dict[str, Any]) -> tuple[boo
     question targeting CAPA implementation/effectiveness/scope, not rely
     solely on generic questions unrelated to that specific, stronger
     investigation lead."""
-    from app.agent.recurrence_guard import detect_recurrence
-    request = state.get("request")
-    finding_text = getattr(request, "finding_text", None) if request else None
-    if not finding_text:
-        return True, None
-    rec = detect_recurrence(finding_text)
-    if not (rec.is_recurring and rec.has_previous_capa_reference):
+    # Spec Pass 47 §28/§43: check the ESTABLISHED structured recurrence state,
+    # not a raw-text re-derivation. Prefer the canonical-LLM-owned
+    # `canonical_finding_state` signals; fall back to `detect_recurrence`
+    # only when there is no canonical/finding state at all.
+    _cfs = state.get("canonical_finding_state")
+    _is_recurring = bool(getattr(_cfs, "recurrence_signal", False)) if _cfs is not None else False
+    _has_prev_capa = bool(getattr(_cfs, "previous_capa_referenced", False)) if _cfs is not None else False
+    if _cfs is None:
+        request = state.get("request")
+        finding_text = getattr(request, "finding_text", None) if request else None
+        if not finding_text:
+            return True, None
+        from app.agent.recurrence_guard import detect_recurrence
+        _rec = detect_recurrence(finding_text)
+        _is_recurring, _has_prev_capa = _rec.is_recurring, _rec.has_previous_capa_reference
+    if not (_is_recurring and _has_prev_capa):
         return True, None
     inv = state.get("investigation_plan")
     if not inv or not getattr(inv, "questions", None):

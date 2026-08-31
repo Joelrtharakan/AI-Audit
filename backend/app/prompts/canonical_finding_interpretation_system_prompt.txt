@@ -8,6 +8,13 @@ JSON only. No prose, no markdown, no chain-of-thought. Match the schema at the e
 OMIT every field with no value (no null / "" / [] / defaults). Reasoning fields are concise
 structured facts, never explanatory paragraphs.
 
+OMISSION IS PREFERRED. When the evidence does not clearly establish a semantic classification,
+OMIT the optional field. An omitted field is CORRECT -- it means NOT_ESTABLISHED and is always
+safer than an unsupported classification. This applies especially to: comparison, recurrence,
+root_cause_status/hypotheses, causal_claims, missing_record_status, affected_process, impact.
+Never populate an optional field just because the schema lists it. Reason internally about the
+evidence basis for every field before emitting it; if you cannot name that basis, omit it.
+
 KIND (classify each extracted meaning)
 ENTITY = a real thing (record, machine, process, control, role, account, batch, location);
 never contains a state word. STATE = a condition ("incomplete","expired","overdue"); never
@@ -41,9 +48,33 @@ EVIDENCE RULES
   ACTIVITY_NOT_PERFORMED only if the finding explicitly says so; else ACTIVITY_NOT_RECORDED
   / RECORD_UNAVAILABLE / RECORD_MISSING / UNKNOWN, and set activity_performance_ambiguity
   true when it is open whether the activity ran.
-- COMPARISON: preserve both sides + magnitude. Direction ONLY from wording (shortfall/below
-  -> BELOW; surplus/exceeded -> ABOVE; bare "differed" -> MISMATCH). Never invent
-  magnitude/unit/direction.
+- COMPARISON: DEFAULT = OMIT `comparison`. First ask yourself: does the finding state or
+  clearly imply that these two values are EXPECTED TO BE EQUAL or consistent -- a measured
+  value against its specification / acceptance limit, an actual against a stated target or
+  baseline or prior result, two independent measurements of the same quantity? If you cannot
+  name that equality expectation from the finding's own words, OMIT `comparison`. Several
+  prices/rates/costs that make up ONE remediation (materials + labour + inspection) are a
+  COST COMPOSITION, to be added -- never a comparison. Two prices/quotes/budgets/estimates
+  for the same work are independent pricing inputs -- never a comparison unless the finding
+  explicitly says they must be reconciled. Emit `comparison` ONLY when the finding sets two
+  values against each other that are EXPECTED TO AGREE (same object, same basis, same period)
+  and you can state WHY in `why_comparable`. `status` (ACTUAL_CONFLICT | UNRESOLVED_COMPARISON)
+  and `why_comparable` are BOTH required when emitted.
+  HARD RULE -- these are NEVER a comparison; omit `comparison` entirely:
+    * cost/price figures for remediation or corrective work (inspection cost, installation
+      cost, per-unit rate, labour rate, monthly verification cost -- any pricing the finding
+      lists for work to be done);
+    * several prices for different activities, items, or line items;
+    * a component price and a subtotal/total;
+    * a quotation, an estimate, or a budget;
+    * an observed loss or an incurred/historical amount;
+    * any two numbers that simply appear in the same finding.
+  "left exists", "right exists", values differ, both are currency, both are numeric -- NONE
+  of these make a comparison. If the `comparison_basis` you would write is a cost / price /
+  rate / quotation / budget / "remediation cost" basis, you are describing PRICING, not a
+  discrepancy that must be reconciled -- OMIT `comparison`. When in doubt, OMIT. Direction ONLY from wording
+  (shortfall/below -> BELOW; surplus/exceeded -> ABOVE; bare "differed" -> MISMATCH). Never
+  invent magnitude/unit/direction.
 - RECURRENCE: "four failures in the previous six months" -> {count 4, event "failures",
   period "the previous six months"}. Never infer a root cause or systemic failure from a count.
 - COMPETING CAUSAL MECHANISMS: when the finding enumerates alternatives ("could have
@@ -124,6 +155,11 @@ No cause without a VERIFIED causal claim. No observation-restatement hypotheses.
 question templates. No arithmetic (identify inputs; the calculator computes).
 
 OUTPUT CONTRACT
-Return JSON matching this schema exactly:
+Return ONE compact JSON object matching this schema exactly. Reason internally; emit only
+the structured conclusion. Every string value is a short phrase: rationale / reason /
+why_it_matters / why_comparable <= 20 words; hypothesis statements, investigation `unknown`,
+condition and deviation text <= 15 words. Never restate finding or evidence text; cite
+evidence by E-id only. Omit every optional field you have no value for (do not emit null /
+"" / []). No markdown, no comments, no preamble, no trailing prose.
 
 {schema}

@@ -2161,17 +2161,13 @@ def should_generate_investigation_plan(
             if any(k in pt for k in ("EVIDENCE_STATE", "INVESTIGATION_QUESTION", "REPORTED_MECHANISM")):
                 return True
 
-    from app.agent.recurrence_guard import detect_recurrence
-    if detect_recurrence(finding_text).is_recurring:
-        return True
-
-    _trigger_re = re.compile(
-        r"\b(?:missing|unavailable|not available|not provided|unconfirmed|unknown|unverified|disputed|conflicted|gap|lacking)\b",
-        re.IGNORECASE,
-    )
-    if _trigger_re.search(finding_text):
-        return True
-
+    # Spec Pass 48 §4/§42: the former `detect_recurrence(finding_text)` +
+    # keyword-regex triggers here were DEAD -- every remaining path returns
+    # True regardless -- and were the last raw-text semantic inspection in
+    # this function. Removed. The structural checks above (root-cause status,
+    # evidence conflicts, missing records, unresolved propositions) are the
+    # real signal; when none fire, an investigation plan is still generated
+    # (conservative default).
     return True
 
 
@@ -2183,10 +2179,19 @@ def detect_uncertainties(
     canonical_state: Any = None,
     evidence_ledger: list[Any] | None = None,
     finding_text: str = "",
+    canonical_success: bool = False,
+    canonical_context: Any = None,
 ) -> tuple[str, list[str], str, list[str]]:
-    """Deterministically detects primary uncertainty, secondary uncertainties,
-    causal readiness, and blocked reasoning steps from evidence structure and
-    canonical state.
+    """Derive primary uncertainty, secondary uncertainties, causal readiness,
+    and blocked reasoning steps.
+
+    Spec Pass 45 §4/§6/§7: when `canonical_success` is True the canonical LLM
+    is the semantic authority -- this function uses ONLY structured signals
+    that are themselves LLM-established (`semantic_type`, `missing_record_
+    status`, `comparison_type`, `recurrence_signal`, `mechanism_status`,
+    `evidence_conflicts`, `control_justification_missing`) and NEVER inspects
+    raw finding text. On the fallback path (`canonical_success` False) the
+    legacy raw-text regex signals still apply.
 
     Returns:
         (primary_uncertainty, secondary_uncertainties, causal_readiness, blocked_reasoning_steps)
@@ -2196,12 +2201,41 @@ def detect_uncertainties(
     blocked_steps: list[str] = []
     readiness = "NOT_READY"
 
-    text = (finding_text or getattr(canonical_state, "raw_finding", "") or "").strip()
+    # On the canonical-success path raw text is OUT OF BOUNDS -- every
+    # `re.search(..., text, ...)` below then matches nothing and only the
+    # structured LLM-established signals drive the classification.
+    text = "" if canonical_success else (finding_text or getattr(canonical_state, "raw_finding", "") or "").strip()
     sem_type = getattr(canonical_state, "semantic_type", None)
     req_status = getattr(canonical_state, "requirement_status", "UNKNOWN")
     mech_status = getattr(canonical_state, "mechanism_status", "UNKNOWN") or getattr(canonical_state, "immediate_mechanism_status", "UNKNOWN")
     conflicts = getattr(canonical_state, "evidence_conflicts", []) or []
     has_unresolved_conflict = any(getattr(c, "status", "UNRESOLVED") == "UNRESOLVED" for c in conflicts)
+    # Structured LLM-established signals for the checks that were regex-only.
+    # Prefer the canonical CONTEXT (the LLM source, always populated) over the
+    # canonical STATE (populated later in the node's control flow).
+    _src = canonical_context if canonical_context is not None else canonical_state
+    _mrs = getattr(_src, "missing_record_status", None) or getattr(canonical_state, "missing_record_status", "UNKNOWN") or "UNKNOWN"
+    _canon_doc_uncertain = _mrs in (
+        "RECORD_MISSING", "RECORD_INCOMPLETE", "RECORD_UNAVAILABLE", "ACTIVITY_NOT_RECORDED",
+    )
+    if canonical_context is not None:
+        try:
+            from app.services.canonical_semantic_models import comparison_is_active
+            _canon_comparison = comparison_is_active(getattr(canonical_context, "comparison", None))
+        except Exception:
+            _canon_comparison = getattr(canonical_context, "comparison", None) is not None
+        _rec = getattr(canonical_context, "recurrence", None)
+        _canon_recurrence = bool(
+            (getattr(_rec, "count", None) is not None)
+            or getattr(canonical_context, "explicit_previous_capa_reference", False)
+        )
+        if sem_type is None and _canon_doc_uncertain:
+            sem_type = "MISSING_RECORD"
+        if sem_type is None and _canon_comparison:
+            sem_type = "COMPARISON"
+    else:
+        _canon_comparison = bool(getattr(canonical_state, "comparison_type", None))
+        _canon_recurrence = bool(getattr(canonical_state, "recurrence_signal", False))
 
     # 1. Check for Conflicts
     if has_unresolved_conflict:
@@ -2228,6 +2262,7 @@ def detect_uncertainties(
     # 3. Missing record / documentation check
     is_doc_uncertain = (
         sem_type == "MISSING_RECORD"
+        or _canon_doc_uncertain
         or bool(re.search(
             r"\b(?:was\s+not\s+document(?:ed)?|were\s+not\s+document(?:ed)?|"
             r"was\s+not\s+recorded|were\s+not\s+recorded|"
@@ -2256,14 +2291,14 @@ def detect_uncertainties(
     ))
 
     # 6. Recurrence check
-    is_recurrence_uncertain = bool(re.search(
+    is_recurrence_uncertain = _canon_recurrence or bool(re.search(
         r"\b(?:the\s+same|a\s+similar|this)\s+[\w\s-]{1,40}?\s+(?:was|were)\s+"
         r"(?:identified|observed|found|noted|detected|reported)\s+(?:in|across|on)\s+",
         text, re.IGNORECASE,
     ))
 
     # 7. Comparison / mismatch check
-    is_comparison = sem_type == "COMPARISON" or bool(re.search(
+    is_comparison = sem_type == "COMPARISON" or _canon_comparison or bool(re.search(
         r"\b(?:did\s+not\s+match|differed\s+from|was\s+inconsistent\s+with|exceeded|was\s+below)\b",
         text, re.IGNORECASE,
     ))

@@ -168,12 +168,19 @@ def analyze_financial_exposure(
     observation_period_months: float | None = None,
     annual_event_frequency: float | None = None,
     frequency_range: tuple[float, float] | None = None,
+    remediation_cost_context: list[str] | None = None,
 ) -> FinancialAnalysisResult:
-    """Analyze financial exposure and cost-of-recurrence strictly from evidence."""
+    """Analyze financial exposure and cost-of-recurrence strictly from evidence.
+
+    `remediation_cost_context` carries the canonical LLM's own
+    `pricing_information` text -- amounts it appears in are EXPECTED
+    remediation cost, never an incurred DIRECT_LOSS (Pass 29 §9-§13).
+    """
     observations, has_conflict, currency_conflicts = extract_financial_observations(
         finding_text,
         evidence_ledger=evidence_ledger,
         evidence_claims=evidence_claims,
+        remediation_cost_context=remediation_cost_context,
     )
 
     if not observations:

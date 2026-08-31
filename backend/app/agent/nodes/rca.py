@@ -189,13 +189,18 @@ async def root_cause_node(state: AgentState) -> AgentState:
     # computed mechanism when available, else derive it directly from the
     # evidence ledger — self-contained so this node works standalone too.
     canonical = state.get("canonical_finding_state")
+    _canonical_llm = state.get("canonical_semantic_context") is not None
     if canonical and canonical.immediate_mechanism:
         mechanism = MechanismInfo(
             statement=canonical.immediate_mechanism,
             status=canonical.immediate_mechanism_status,
         )
-        from app.agent.causal_guard import classify_mechanism_polarity
-        mechanism.polarity = classify_mechanism_polarity(canonical.immediate_mechanism)
+    elif _canonical_llm:
+        # Spec Pass 48 §2/§3: canonical LLM succeeded and established NO
+        # immediate mechanism -> it IS NOT_ESTABLISHED. Never activate the
+        # deterministic evidence-prose extractor to "fill in" a mechanism the
+        # semantic authority did not establish.
+        mechanism = MechanismInfo(statement=None, status="UNKNOWN", polarity=None)
     else:
         reported = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
         verified = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]

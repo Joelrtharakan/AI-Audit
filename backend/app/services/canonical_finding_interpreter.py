@@ -56,6 +56,9 @@ _SCHEMA_HINT = (
     '"observed_condition": str|null, '
     '"epistemic_status": "VERIFIED"|"REPORTED"|"BELIEF"|"INFERRED"|"UNKNOWN"|null, '
     '"comparison": {"left": str|null, "right": str|null, "reference": str|null, '
+    '"status": "NONE"|"LEGITIMATE_MULTIPLE_PRICES"|"SUBTOTAL_TOTAL_RELATIONSHIP"|"ACTUAL_CONFLICT"|"UNRESOLVED_COMPARISON" (REQUIRED when comparison present), '
+    '"why_comparable": str (REQUIRED for ACTUAL_CONFLICT/UNRESOLVED_COMPARISON -- why the two values are expected to agree), '
+    '"comparison_basis": str|null, "evidence_refs": [str], '
     '"direction": "ABOVE"|"BELOW"|"MISMATCH"|"UNKNOWN", "magnitude": number|null, "unit": str|null}|null, '
     '"recurrence": {"count": int|null, "event": str|null, "period": str|null}|null, '
     '"stated_causal_alternatives": [str], "causal_alternatives_unresolved": bool, '
@@ -168,17 +171,38 @@ async def interpret_finding_canonically_with_status(
     _prompt_chars = 0
 
     def _log(status: CanonicalInterpretStatus, *, resp_len: int = 0, detail: str = "") -> None:
+        # Provider timing/token detail when the provider exposed it (Ollama:
+        # prompt_eval_count / eval_count / *_duration ns). Makes it obvious
+        # whether latency is model load, prompt processing, or generation
+        # (spec Pass 35 §30).
+        _meta: dict = {}
+        try:
+            from app.services.llm.call_metadata import get_last_call_metadata
+            _meta = get_last_call_metadata() or {}
+        except Exception:
+            _meta = {}
+
         logger.info(
             "CANONICAL SEMANTIC INTERPRETATION status=%s latency_ms=%d timeout_s=%s "
-            "prompt_chars=%d max_tokens=%s num_ctx=%s response_chars=%d%s",
+            "prompt_chars=%d prompt_tokens=%s output_tokens=%s finish_reason=%s "
+            "load_ms=%s prompt_eval_ms=%s gen_ms=%s total_ms=%s tok_per_s=%s "
+            "max_tokens=%s num_ctx=%s response_chars=%d%s",
             status, int((time.monotonic() - _t0) * 1000), effective_timeout,
-            _prompt_chars, settings.canonical_semantic_max_tokens,
+            _prompt_chars, _meta.get("prompt_eval_count", "?"), _meta.get("eval_count", "?"),
+            _meta.get("done_reason", "?"),
+            _meta.get("native_load_ms", "?"), _meta.get("native_prompt_eval_ms", "?"),
+            _meta.get("native_gen_ms", "?"), _meta.get("native_total_ms", "?"),
+            _meta.get("native_gen_tok_per_s", "?"),
+            settings.canonical_semantic_max_tokens,
             settings.canonical_semantic_num_ctx, resp_len,
             (f" detail={detail}" if detail else ""),
         )
 
     try:
-        llm_client = client or get_llm_client(timeout_seconds=effective_timeout)
+        llm_client = client or get_llm_client(
+            timeout_seconds=effective_timeout,
+            model=(settings.canonical_semantic_model or None),
+        )
     except Exception as exc:
         _log("PROVIDER_UNAVAILABLE", detail=repr(exc))
         return "PROVIDER_UNAVAILABLE", None
@@ -213,6 +237,22 @@ async def interpret_finding_canonically_with_status(
     except Exception as exc:
         _log("INVALID_JSON", resp_len=len(str(raw)), detail=type(exc).__name__)
         return "INVALID_JSON", None
+
+    # Enum-spelling tolerance for the (CORE) comparison.status field so a weak
+    # model's near-miss ("legitimate prices", "no conflict") does not fail the
+    # whole interpretation closed. Structural only -- an unrecognised value is
+    # dropped to the model default, never remapped semantically.
+    if isinstance(parsed, dict) and isinstance(parsed.get("comparison"), dict):
+        _cmp = parsed["comparison"]
+        _st = str(_cmp.get("status", "") or "").strip().upper().replace(" ", "_").replace("-", "_")
+        _valid = {
+            "NOT_ESTABLISHED", "NONE", "LEGITIMATE_MULTIPLE_PRICES",
+            "SUBTOTAL_TOTAL_RELATIONSHIP", "ACTUAL_CONFLICT", "UNRESOLVED_COMPARISON",
+        }
+        if _st in _valid:
+            _cmp["status"] = _st
+        else:
+            _cmp.pop("status", None)
 
     context, salvaged = _validate_or_salvage(parsed)
     if context is None:

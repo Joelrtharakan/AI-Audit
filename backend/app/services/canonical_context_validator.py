@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import re
 
-from app.agent.recurrence_guard import detect_recurrence
 from app.models.agent import EvidenceItem
 from app.services.canonical_semantic_models import CanonicalFindingContext
 
@@ -136,18 +135,19 @@ def validate_canonical_context(
         sanitized_causal.append(cc)
     sanitized.causal_claims = sanitized_causal
 
-    # 14. Previous CAPA: never trusted from the LLM alone -- must ALSO be
-    # confirmed by the existing deterministic structural detector
-    # (app.agent.recurrence_guard.detect_recurrence), which recognizes
-    # explicit prior-CAPA phrasing independent of language-model output.
-    # Both must agree; recurrence/historical/repeated wording alone can
-    # never satisfy this on its own from either side.
+    # 14. Previous CAPA (spec Pass 42 §5/§15/§29): LLM-owned, validated
+    # STRUCTURALLY -- an `explicit_previous_capa_reference` claim must cite at
+    # least one evidence id that actually resolves. The former raw-finding-text
+    # `detect_recurrence` deterministic-agreement re-check is removed: on the
+    # canonical-success path semantic recurrence comes only from the LLM, and a
+    # deterministic re-interpretation of the finding prose would violate the
+    # authority boundary. A bare claim with no resolvable evidence id is
+    # dropped (fail-closed).
     if sanitized.explicit_previous_capa_reference:
         has_real_evidence = bool(sanitized.previous_capa_evidence_ids) and all(
             eid in valid_ids for eid in sanitized.previous_capa_evidence_ids
         )
-        deterministic_confirms = detect_recurrence(finding_text).has_previous_capa_reference
-        if not (has_real_evidence and deterministic_confirms):
+        if not has_real_evidence:
             sanitized.explicit_previous_capa_reference = False
             sanitized.previous_capa_evidence_ids = []
 
@@ -247,6 +247,24 @@ def _validate_llm_primary_fields(ctx: CanonicalFindingContext, finding_text: str
     ):
         ctx.missing_record_status = "ACTIVITY_NOT_RECORDED"
         ctx.activity_performance_ambiguity = True
+
+    # COMPARISON REALITY (spec Pass 34 §9/§11/§36). Two separate ideas:
+    #  (a) A comparison the LLM explicitly classified as NOT a discrepancy
+    #      (NONE / legitimate multiple prices / subtotal-total) is cleared
+    #      entirely -- it must never reach a downstream layer.
+    #  (b) Otherwise the object is KEPT for structural preservation of the
+    #      stated values (magnitude / direction / measurement), but it is an
+    #      ACTIVE semantic comparison -- one that drives a reconciliation
+    #      obligation or a comparability investigation question -- ONLY when the
+    #      LLM explicitly classified it ACTUAL_CONFLICT / UNRESOLVED_COMPARISON
+    #      AND stated why the two values belong together. The fail-closed
+    #      NOT_ESTABLISHED default is non-activating. `comparison_is_active`
+    #      carries this one decision to every consumer; no consumer re-derives
+    #      it, and nothing inspects finding prose.
+    if ctx.comparison is not None and getattr(ctx.comparison, "status", "NOT_ESTABLISHED") in (
+        "NONE", "LEGITIMATE_MULTIPLE_PRICES", "SUBTOTAL_TOTAL_RELATIONSHIP",
+    ):
+        ctx.comparison = None
 
     # COMPARISON DIRECTION: a stated ABOVE/BELOW needs a directional word in
     # the finding; otherwise it is a bare "differed" -> MISMATCH.
@@ -510,8 +528,10 @@ def _validate_llm_reasoning_fields(
     # whose root cause is not established -- and where the model did NOT
     # establish any direct-correction work -- is a discrepancy to RECONCILE
     # first, not a corrective obligation.
+    from app.services.canonical_semantic_models import comparison_is_active
+    _cmp_active = comparison_is_active(ctx.comparison)
     _unresolved_discrepancy = bool(
-        ctx.comparison is not None
+        _cmp_active
         and ctx.causal_alternatives_unresolved
         and not _cause_or_condition_established
         and not _has_direct_remediation
@@ -541,7 +561,7 @@ def _validate_llm_reasoning_fields(
         # model established of the observed condition still stands.
         ctx.remediation_obligation = (
             "IMMEDIATE_CORRECTION_ONLY" if _has_direct_remediation
-            else "RECONCILIATION_REQUIRED" if ctx.comparison is not None
+            else "RECONCILIATION_REQUIRED" if _cmp_active
             else "INVESTIGATION_REQUIRED"
         )
 

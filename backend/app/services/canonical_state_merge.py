@@ -1,20 +1,31 @@
-"""Merge the validated LLM `CanonicalFindingContext` into the deterministic
-`CanonicalFindingState` -- making the LLM the PRIMARY semantic interpreter
-while `resolve_deviation` stays the fail-closed FLOOR.
+"""Project the validated LLM `CanonicalFindingContext` into the shapes the
+`CanonicalFindingState` constructor consumes -- the canonical-SUCCESS
+semantic source.
 
-Contract (spec Phase 4/5):
-  1. LLM value present AND passes validation  -> use the LLM value.
-  2. LLM value present but fails validation    -> reject it, keep deterministic.
-  3. LLM omitted the field                     -> keep the deterministic value.
-  4. LLM + deterministic conflict on a value   -> keep deterministic, record it.
-  5. Deterministic extracted material info the LLM dropped
-     (measurement / comparison / recurrence / stated alternatives)
-     -> NEVER let the omission erase it; the deterministic value survives.
-  6. `semantic_context is None`                -> pure no-op (the entire
-     deterministic test baseline runs through here unchanged).
+Post-Pass-41/42/43/44 this module is NOT a "merge". On canonical success the
+semantic state is built ENTIRELY from the LLM context via:
+  * `deviation_info_from_canonical(ctx)`   -> DeviationInfo (subject / condition
+                                             / process / period / scope /
+                                             entities / active comparison /
+                                             recurrence)
+  * `recurrence_info_from_canonical(ctx)`  -> RecurrenceInfo (count / event /
+                                             period / explicit_previous_capa)
+  * `mechanism_info_from_canonical(ctx)`   -> MechanismInfo (a causal_claim the
+                                             LLM marked is_causal, else UNKNOWN)
+  * `apply_canonical_provenance_fields(cs, ctx)` -> copies the remaining
+                                             context-only provenance fields
+                                             (evidence_source /
+                                             reported_observation /
+                                             finding_epistemic_status /
+                                             affected_period / scope) + a
+                                             structural subject-safety re-check.
 
-This module does DATA MERGING ONLY -- no LLM calls, no arithmetic, no
-re-parsing of raw text.
+Every one of these is a straight structural projection: NO regex, NO keyword
+logic, NO raw-finding-text inspection, NO deterministic semantic inference.
+An LLM field the model did not establish stays at its non-activating
+sentinel. On the FALLBACK path (ctx is None) the projections return None and
+`apply_canonical_provenance_fields` is a no-op -- the deterministic resolver
+owns semantics there.
 """
 
 from __future__ import annotations
@@ -114,9 +125,152 @@ def _has_det_measurement(cs) -> bool:
     return getattr(cs, "measurement", None) is not None
 
 
-def merge_semantic_context_into_canonical(canonical_state, semantic_context):
-    """Return (canonical_state, MergeOutcome). `canonical_state` is mutated in
-    place. No-op when `semantic_context` is None."""
+def deviation_info_from_canonical(ctx):
+    """Spec Pass 41 §3/§7: build a `DeviationInfo`-shaped object PURELY from the
+    validated canonical LLM context, so the canonical-SUCCESS path in
+    `understand_finding_node` never calls `resolve_deviation`. Every field the
+    LLM did not establish stays at its `DeviationInfo` default (the
+    non-activating sentinel). No raw-finding-text inspection, no keyword logic,
+    no regex -- a straight structural projection of the LLM's own fields.
+    Returns None if `ctx` is None (caller then uses the deterministic
+    fallback)."""
+    if ctx is None:
+        return None
+    from app.services.canonical_semantic_models import comparison_is_active
+    from app.services.semantic_subject import DeviationInfo
+
+    subj = (getattr(ctx, "finding_subject", None) or "").strip() or None
+    cond = (getattr(ctx, "observed_condition", None) or "").strip() or None
+    proc = (getattr(ctx, "affected_process", None) or "").strip() or None
+    period = (getattr(ctx, "affected_period", None) or "").strip() or None
+    scope = (getattr(ctx, "scope", None) or "").strip() or None
+    ents = [e.name for e in (getattr(ctx, "entities", None) or []) if getattr(e, "name", None)]
+
+    di = DeviationInfo(
+        subject=subj,
+        finding_subject=subj,
+        affected_object=subj,
+        affected_process=proc,
+        condition=cond,
+        deviation=cond,
+        date=period,
+        entities=ents,
+        matched=subj is not None,
+        # Spec Pass 42 §11: no implicit semantic classification. `semantic_type`
+        # is set below ONLY when the LLM explicitly establishes a COMPARISON or
+        # RECURRENCE; otherwise it stays None (NOT_ESTABLISHED). "OBJECT" was a
+        # silent default and is gone.
+        semantic_type=None,
+        occurrence_population=scope,
+        extraction_confidence="RESOLVED" if subj else "UNRESOLVED",
+        subject_unresolved=subj is None,
+        requirement_status="UNKNOWN",
+    )
+
+    # RECURRENCE -- only what the LLM stated.
+    rec = getattr(ctx, "recurrence", None)
+    if rec is not None and getattr(rec, "count", None) is not None:
+        di.recurrence_count = int(rec.count)
+        di.recurrence_event = getattr(rec, "event", None)
+        di.recurrence_period = getattr(rec, "period", None)
+        di.semantic_type = "RECURRENCE"
+
+    # COMPARISON -- only when the LLM explicitly ACTIVATED it.
+    cmp_ = getattr(ctx, "comparison", None)
+    if comparison_is_active(cmp_):
+        di.comparison_type = _DIR_TO_COMPARISON_TYPE.get(
+            getattr(cmp_, "direction", None) or "UNKNOWN", "MISMATCH"
+        )
+        di.comparison_left = getattr(cmp_, "left", None) or subj
+        di.comparison_right = getattr(cmp_, "right", None) or getattr(cmp_, "reference", None)
+        di.comparison_basis = getattr(cmp_, "reference", None) or getattr(cmp_, "right", None)
+        _mag = getattr(cmp_, "magnitude", None)
+        if _mag is not None:
+            di.measurement_value = float(_mag)
+            di.measurement_unit = getattr(cmp_, "unit", None)
+        di.semantic_type = "COMPARISON"
+
+    return di
+
+
+def recurrence_info_from_canonical(ctx):
+    """Spec Pass 42 §4/§5: build a `RecurrenceInfo`-shaped object PURELY from
+    the validated canonical LLM context, so the canonical-SUCCESS path never
+    calls `recurrence_guard.detect_recurrence(finding_text)`. Recurrence and
+    previous-CAPA reference are LLM-owned: `ctx.recurrence` (explicit stated
+    count) + `ctx.explicit_previous_capa_reference`. `previous_capa_status` /
+    `previous_capa_effectiveness` have no generic canonical representation ->
+    they stay at the schema default (NOT_ESTABLISHED). No raw-text inspection,
+    no regex, no keyword list. Returns None when `ctx` is None."""
+    if ctx is None:
+        return None
+    from app.agent.recurrence_guard import RecurrenceInfo
+
+    rec = getattr(ctx, "recurrence", None)
+    count = getattr(rec, "count", None) if rec is not None else None
+    prev_capa = bool(getattr(ctx, "explicit_previous_capa_reference", False))
+    is_recurring = bool(count is not None or prev_capa)
+    return RecurrenceInfo(
+        is_recurring=is_recurring,
+        has_previous_capa_reference=prev_capa,
+        previous_capa_status=None,
+        previous_capa_effectiveness="NOT_VERIFIED",
+        rationale=(
+            "The canonical interpretation established a repeated occurrence."
+            if count is not None else
+            "The canonical interpretation established a reference to a previous corrective action."
+            if prev_capa else None
+        ),
+        recurrence_count=int(count) if count is not None else None,
+        recurrence_event=getattr(rec, "event", None) if rec is not None else None,
+        recurrence_period=getattr(rec, "period", None) if rec is not None else None,
+    )
+
+
+def mechanism_info_from_canonical(ctx):
+    """Spec Pass 43 §8: build a `MechanismInfo`-shaped object PURELY from the
+    validated canonical LLM context, so the canonical-SUCCESS path never runs
+    `extract_immediate_mechanism` (deterministic causal-signal detection over
+    evidence claims). The immediate mechanism is LLM-owned: a `causal_claim`
+    the LLM marked `is_causal`, with its own `evidence_status`. If the LLM
+    established none, the mechanism is UNKNOWN (NOT_ESTABLISHED). No regex, no
+    keyword list, no evidence re-interpretation. Returns None when `ctx` is
+    None."""
+    if ctx is None:
+        return None
+    from app.agent.causal_guard import MechanismInfo
+
+    causal = [
+        c for c in (getattr(ctx, "causal_claims", None) or [])
+        if getattr(c, "is_causal", False) and (getattr(c, "statement", None) or "").strip()
+    ]
+    if not causal:
+        return MechanismInfo(statement=None, status="UNKNOWN", polarity=None, source_claim=None)
+    # Prefer a VERIFIED causal claim; else the first stated one (REPORTED).
+    verified = next((c for c in causal if getattr(c, "evidence_status", "") == "VERIFIED"), None)
+    chosen = verified or causal[0]
+    _st = getattr(chosen, "evidence_status", "UNVERIFIED")
+    status = "VERIFIED" if _st == "VERIFIED" else ("REPORTED" if _st == "REPORTED" else "UNKNOWN")
+    return MechanismInfo(
+        statement=chosen.statement.strip(),
+        status=status,
+        polarity=None,
+        source_claim=chosen.statement.strip(),
+    )
+
+
+def apply_canonical_provenance_fields(canonical_state, semantic_context):
+    """PROVENANCE ONLY -- NOT a semantic merge (spec Pass 44 §3). The
+    canonical-SUCCESS `canonical_state` is already built entirely from THIS
+    `semantic_context` (via `deviation_info_from_canonical` /
+    `recurrence_info_from_canonical` / `mechanism_info_from_canonical`). This
+    function only copies the remaining context-only provenance fields the
+    builders don't carry -- evidence_source / reported_observation /
+    finding_epistemic_status / affected_period / scope -- and runs a structural
+    subject-safety re-check. It NEVER recovers a semantic value from
+    deterministic state (there is none on this path). No-op when
+    `semantic_context` is None (fallback path). Returns (canonical_state,
+    MergeOutcome) for call-site compatibility."""
     out = MergeOutcome([], [], [], [])
     ctx = semantic_context
     cs = canonical_state
@@ -157,14 +311,32 @@ def merge_semantic_context_into_canonical(canonical_state, semantic_context):
         pass
 
     # ---- OBSERVED CONDITION -----------------------------------------
+    # LLM-PRIMARY (spec Pass 38 §1/§11): a condition the canonical LLM stated
+    # wins outright; the deterministic floor's condition is used only when the
+    # LLM omitted one.
     llm_cond = (getattr(ctx, "observed_condition", None) or "").strip() or None
-    _det_cond = (getattr(cs, "deviation_condition", None) or "").strip().lower()
-    if llm_cond and _det_cond in ("", "status unconfirmed", "condition unconfirmed", "unknown", "not noted"):
+    if llm_cond:
         cs.deviation_condition = llm_cond
         out.fields_from_llm.append("deviation_condition")
 
     # ---- COMPARISON ------------------------------------------------
+    # Spec Pass 36 §B/§C: ONLY an LLM-declared ACTIVE comparison (explicit
+    # ACTUAL_CONFLICT / UNRESOLVED_COMPARISON status + a stated why_comparable)
+    # may contribute semantic_type=COMPARISON, a comparison-derived
+    # measurement, or the comparison deviation phrasing. An inactive /
+    # unclassified comparison object stays on `ctx` for provenance but has NO
+    # effect on the canonical finding state. Decided by the structured status,
+    # never by inspecting the numbers or the prose.
+    # Only an LLM-declared ACTIVE comparison (explicit ACTUAL_CONFLICT /
+    # UNRESOLVED_COMPARISON status + a stated why_comparable) contributes any
+    # comparison semantics. Pass 40: the floor comparison fields were already
+    # wiped by `reset_llm_owned_semantic_fields`, so there is nothing to clear
+    # here -- only populate.
+    from app.services.canonical_semantic_models import comparison_is_active
     cmp_ = getattr(ctx, "comparison", None)
+    if not comparison_is_active(cmp_):
+        cmp_ = None
+
     if cmp_ is not None and (cmp_.magnitude is not None or cmp_.left or cmp_.right):
         if not _has_det_comparison(cs):
             cs.comparison_type = _DIR_TO_COMPARISON_TYPE.get(cmp_.direction or "UNKNOWN", "MISMATCH")
@@ -208,19 +380,21 @@ def merge_semantic_context_into_canonical(canonical_state, semantic_context):
         out.fields_conserved.append("comparison")
 
     # ---- RECURRENCE ---------------------------------------------
+    # LLM-PRIMARY (spec Pass 38 §1/§15): a recurrence the canonical LLM stated
+    # wins outright (count + event + period), even when the deterministic floor
+    # also extracted one.
     rec = getattr(ctx, "recurrence", None)
     if rec is not None and rec.count is not None:
-        if not _has_det_recurrence(cs):
-            cs.recurrence_count = int(rec.count)
-            cs.recurrence_event = rec.event
-            cs.recurrence_period = rec.period
-            if not getattr(cs, "occurrence_population", None) and rec.event:
-                cs.occurrence_population = f"{rec.count} {rec.event}"
-            if rec.period and getattr(cs, "affected_period", "UNKNOWN") in (None, "", "UNKNOWN"):
-                cs.affected_period = rec.period
-            if cs.semantic_type in (None, "OBJECT", "ACTIVITY", "NON_ACTIONABLE"):
-                cs.semantic_type = "RECURRENCE"
-            out.fields_from_llm.append("recurrence")
+        cs.recurrence_count = int(rec.count)
+        cs.recurrence_event = rec.event
+        cs.recurrence_period = rec.period
+        if rec.event and not getattr(cs, "occurrence_population", None):
+            cs.occurrence_population = f"{rec.count} {rec.event}"
+        if rec.period and getattr(cs, "affected_period", "UNKNOWN") in (None, "", "UNKNOWN"):
+            cs.affected_period = rec.period
+        if cs.semantic_type in (None, "OBJECT", "ACTIVITY", "NON_ACTIONABLE"):
+            cs.semantic_type = "RECURRENCE"
+        out.fields_from_llm.append("recurrence")
     elif _has_det_recurrence(cs):
         out.fields_conserved.append("recurrence")
 
@@ -292,6 +466,12 @@ def merge_semantic_context_into_canonical(canonical_state, semantic_context):
         out.fields_rejected.append("affected_process(deterministic-guess)")
         cs.affected_process = "UNKNOWN"
 
+    # Pass 40: the historical "SEMANTIC AUTHORITY SWEEP" (Pass 37-39) that reset
+    # stale `resolve_deviation` floor values is GONE -- `reset_llm_owned_
+    # semantic_fields` already wiped them all before this function ran, so every
+    # LLM-owned semantic field is either populated above from the canonical
+    # context or sitting at its non-activating sentinel. Nothing to sweep.
+
     return cs, out
 
 
@@ -302,3 +482,10 @@ def _is_established(subject: str | None) -> bool:
     except Exception:  # pragma: no cover
         s = (subject or "").strip()
         return bool(s) and not s.upper().startswith(("UNKNOWN", "UNRESOLVED", "NOT ESTABLISHED"))
+
+
+# Backward-compatible alias: the name predates Pass 43/44 (when this became
+# provenance-only). Retained so existing importers (incl. a test module that
+# must not be modified) keep working; production code uses
+# `apply_canonical_provenance_fields`.
+merge_semantic_context_into_canonical = apply_canonical_provenance_fields

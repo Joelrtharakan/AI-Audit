@@ -350,6 +350,51 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     fact_claims = [e.claim for e in ledger if e.status == EvidenceStatus.VERIFIED]
     reported_claims = [e.claim for e in ledger if e.status == EvidenceStatus.REPORTED]
 
+    # ------------------------------------------------------------------
+    # LLM-FIRST SEMANTIC AUTHORITY (spec Pass 41 §2/§3/§46). The canonical
+    # semantic interpretation happens HERE -- BEFORE any deterministic
+    # semantic-state construction -- and the branch is taken now:
+    #   SUCCESS -> `resolved` is projected PURELY from the validated canonical
+    #              LLM context (`deviation_info_from_canonical`);
+    #              resolve_deviation() is NOT called.
+    #   FAILURE -> resolve_deviation() runs as the fail-closed fallback.
+    # Only INPUT/EVIDENCE PREPARATION (segments, quarantine, ledger) precedes
+    # this point; all semantic-state construction follows it.
+    # ------------------------------------------------------------------
+    canonical_semantic_context = state.get("canonical_semantic_context")
+    canonical_semantic_status = state.get("canonical_semantic_status") or (
+        "REUSED" if canonical_semantic_context is not None else "NOT_ATTEMPTED"
+    )
+    if settings.canonical_semantic_llm_primary and canonical_semantic_context is None:
+        try:
+            from app.services.canonical_context_validator import validate_canonical_context
+            from app.services.canonical_finding_interpreter import (
+                interpret_finding_canonically_with_status,
+            )
+
+            canonical_semantic_status, _raw_ctx = await interpret_finding_canonically_with_status(
+                finding_text=request.finding_text,
+                evidence_ledger=ledger,
+                timeout_seconds=None,
+            )
+            if _raw_ctx is not None:
+                canonical_semantic_context = validate_canonical_context(
+                    _raw_ctx, ledger, request.finding_text
+                )
+        except Exception as exc:  # noqa: BLE001 - fail-closed by design
+            logger.warning("LLM-primary semantic interpretation failed (%s); deterministic floor used.", exc)
+            canonical_semantic_context = None
+            canonical_semantic_status = "UNEXPECTED_ERROR"
+
+    from app.services.canonical_state_merge import (
+        apply_canonical_provenance_fields,
+        deviation_info_from_canonical,
+        mechanism_info_from_canonical,
+        recurrence_info_from_canonical,
+    )
+    _canonical_success = canonical_semantic_context is not None
+    _resolved_from_canonical = deviation_info_from_canonical(canonical_semantic_context)
+
     # Semantic subject/condition resolution: the deterministic structural
     # resolver (resolve_deviation -> extract_semantic_subject, including
     # its entity-noun-phrase extraction: "balance BAL-014", "pipette
@@ -402,28 +447,57 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     # the trusted full text (untrusted injections still excluded) exhibits
     # this shape, resolve on that instead so both assessments and their
     # provenance are conserved.
-    from app.services.semantic_subject import _extract_dual_assessment_comparison
-    _trusted_full = " ".join(s for s in segments if s not in untrusted_segments)
-    if (
-        _trusted_full
-        and _extract_dual_assessment_comparison(_trusted_full)
-        and not _extract_dual_assessment_comparison(resolution_text)
-    ):
-        resolution_text = _trusted_full
-
-    resolved = resolve_deviation(resolution_text, fact_claims)
-    source_words = significant_words(resolution_text)
+    # Spec Pass 41/43: on the canonical-SUCCESS path `resolved` is a straight
+    # projection of the validated LLM context -- resolve_deviation() and every
+    # other deterministic semantic helper (including the dual-assessment
+    # comparison text-shape detector) are NOT invoked. They run ONLY on the
+    # deterministic-fallback path.
+    if _resolved_from_canonical is not None:
+        resolved = _resolved_from_canonical
+        source_words = set()
+    else:
+        from app.services.semantic_subject import _extract_dual_assessment_comparison
+        _trusted_full = " ".join(s for s in segments if s not in untrusted_segments)
+        if (
+            _trusted_full
+            and _extract_dual_assessment_comparison(_trusted_full)
+            and not _extract_dual_assessment_comparison(resolution_text)
+        ):
+            resolution_text = _trusted_full
+        resolved = resolve_deviation(resolution_text, fact_claims)
+        source_words = significant_words(resolution_text)
     _DEGRADED_SUBJECTS = {"process compliance", None, ""}
     # A bare fragment ("The"), a generic placeholder, or an explicit
     # unresolved marker must all count as "resolver did NOT succeed" so the
     # LLM-subject / best-fragment / honest-marker fallback below runs.
     resolver_succeeded = is_established_subject(resolved.finding_subject or resolved.subject)
 
-    if resolver_succeeded:
+    if _canonical_success:
+        # Spec Pass 41 §13/§14: the canonical LLM is authoritative. Its subject
+        # (or its ABSENCE) stands -- NO raw-text noun-phrase extraction, NO
+        # degraded-extraction fallback, NO grounding heuristics.
+        _canon_subj = resolved.finding_subject or resolved.subject
+        deviation_subject = _canon_subj or "UNRESOLVED — the canonical interpretation did not establish an affected object"
+        deviation_condition = resolved.condition or "UNKNOWN"
+        deviation_actor = resolved.actor
+        deviation_date = resolved.date
+        _entity_resolution = "RESOLVED" if _canon_subj else "UNRESOLVED"
+        _entity_note = None if _canon_subj else (
+            "The canonical semantic interpretation did not establish a specific "
+            "affected object."
+        )
+        if _entity_note:
+            trace.append(AgentTraceStep.warn(f"Entity fidelity: {_entity_note}"))
+        observed_deviation = deviation_subject
+        if deviation_condition and deviation_condition != "UNKNOWN":
+            observed_deviation = f"{deviation_subject} — {deviation_condition}"
+    elif resolver_succeeded:
         deviation_subject = resolved.finding_subject or resolved.subject
         deviation_condition = resolved.condition or "UNKNOWN"
         deviation_actor = resolved.actor or (extraction.deviation_actor if extraction else None)
         deviation_date = resolved.date or (extraction.timeframe if extraction else None)
+        _entity_resolution = getattr(resolved, "extraction_confidence", "RESOLVED")
+        _entity_note = None
     else:
         llm_subject = extraction.deviation_subject if extraction else None
         if llm_subject and phrase_is_grounded(llm_subject, source_words) and validate_semantic_subject(llm_subject):
@@ -437,70 +511,79 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             deviation_actor = resolved.actor or (extraction.deviation_actor if extraction else None)
             deviation_date = resolved.date or (extraction.timeframe if extraction else None)
 
-    # Defect 3 — entity fidelity. The old line here was
-    #     deviation_subject = resolved.finding_subject or "process compliance"
-    # which fabricated a confident-sounding generic identity whenever
-    # extraction failed, and then propagated it into affected_object,
-    # impact.affected_object and CAPA potential_areas with no connection to
-    # the finding. A placeholder is now NEVER emitted as if it were a real
-    # entity: we take the best genuine noun-phrase fragment the resolver
-    # recovered and mark the extraction as PARTIAL/UNRESOLVED so the
-    # invariant layer and the investigation planner can both see it.
-    _entity_resolution = getattr(resolved, "extraction_confidence", "RESOLVED")
-    _entity_note: str | None = None
-    if not deviation_subject or not validate_semantic_subject(deviation_subject):
-        _fragment = (
-            resolved.finding_subject
-            or getattr(resolved, "partial_subject_fragment", None)
-            or best_partial_noun_phrase(resolution_text)
-        )
-        if _fragment and validate_semantic_subject(_fragment):
-            deviation_subject = _fragment
-            _entity_resolution = "PARTIAL"
-            _entity_note = (
-                "Entity extraction was uncertain — the specific affected "
-                "object/record/equipment could not be isolated from the finding text; "
-                f"'{_fragment}' is a best-effort fragment and must be confirmed."
+    # Defect 3 — entity fidelity (FALLBACK PATH ONLY, spec Pass 41 §13). The
+    # canonical-success branch above already set the subject / resolution /
+    # observed_deviation directly from the LLM; this raw-text best-fragment
+    # recovery must never run on that path.
+    if not _canonical_success:
+        _entity_resolution = getattr(resolved, "extraction_confidence", "RESOLVED")
+        _entity_note = None
+        if not deviation_subject or not validate_semantic_subject(deviation_subject):
+            _fragment = (
+                resolved.finding_subject
+                or getattr(resolved, "partial_subject_fragment", None)
+                or best_partial_noun_phrase(resolution_text)
             )
-        else:
-            deviation_subject = "UNRESOLVED — the specific entity involved could not be isolated from the finding text"
-            _entity_resolution = "UNRESOLVED"
+            if _fragment and validate_semantic_subject(_fragment):
+                deviation_subject = _fragment
+                _entity_resolution = "PARTIAL"
+                _entity_note = (
+                    "Entity extraction was uncertain — the specific affected "
+                    "object/record/equipment could not be isolated from the finding text; "
+                    f"'{_fragment}' is a best-effort fragment and must be confirmed."
+                )
+            else:
+                deviation_subject = "UNRESOLVED — the specific entity involved could not be isolated from the finding text"
+                _entity_resolution = "UNRESOLVED"
+                _entity_note = (
+                    "Entity extraction failed — the finding text does not name a "
+                    "specific affected object, record, or equipment item."
+                )
+        elif getattr(resolved, "subject_unresolved", False):
+            _entity_resolution = getattr(resolved, "extraction_confidence", "PARTIAL")
             _entity_note = (
-                "Entity extraction failed — the finding text does not name a "
-                "specific affected object, record, or equipment item."
+                "Entity extraction was uncertain — the affected object is a best-effort "
+                "noun-phrase fragment and must be confirmed during investigation."
             )
-    elif getattr(resolved, "subject_unresolved", False):
-        _entity_resolution = getattr(resolved, "extraction_confidence", "PARTIAL")
-        _entity_note = (
-            "Entity extraction was uncertain — the affected object is a best-effort "
-            "noun-phrase fragment and must be confirmed during investigation."
+        if _entity_note:
+            trace.append(AgentTraceStep.warn(f"Entity fidelity: {_entity_note}"))
+
+        observed_deviation = deviation_subject
+        if deviation_condition and deviation_condition != "UNKNOWN":
+            observed_deviation = f"{deviation_subject} — {deviation_condition}"
+
+    # Immediate mechanism (spec Pass 43 §8): LLM-owned on the canonical-success
+    # path (a `causal_claim` the LLM marked `is_causal`, with its own
+    # evidence_status). The deterministic `extract_immediate_mechanism`
+    # (regex causal-signal detection over evidence claims) runs ONLY on the
+    # fallback path.
+    mechanism = mechanism_info_from_canonical(canonical_semantic_context)
+    if mechanism is None:
+        from app.agent.causal_guard import extract_immediate_mechanism
+        mechanism = extract_immediate_mechanism(reported_claims, fact_claims)
+
+    # Stated causal alternatives (spec Pass 44 §8): LLM-OWNED on the
+    # canonical-success path -- the canonical LLM's own
+    # `stated_causal_alternatives` / `causal_alternatives_unresolved`. The
+    # deterministic text extractor runs ONLY on the fallback path. The raw
+    # finding text itself is preserved on `raw_finding` for audit/provenance.
+    if _canonical_success:
+        _stated_causal_alternatives = list(
+            getattr(canonical_semantic_context, "stated_causal_alternatives", None) or []
         )
-    if _entity_note:
-        trace.append(AgentTraceStep.warn(f"Entity fidelity: {_entity_note}"))
-
-    observed_deviation = deviation_subject
-    if deviation_condition and deviation_condition != "UNKNOWN":
-        observed_deviation = f"{deviation_subject} — {deviation_condition}"
-
-    # Immediate mechanism extraction (Layer 2): does the finding/evidence
-    # already state HOW the deviation happened (an action-level claim, e.g.
-    # "the check was missed"), as opposed to just describing the artifact's
-    # state (Layer 1, e.g. "the log was incomplete")? Structural detection
-    # only -- see app/agent/causal_guard.py.
-    from app.agent.causal_guard import extract_immediate_mechanism
-    mechanism = extract_immediate_mechanism(reported_claims, fact_claims)
-
-    # Preserve any causal differential the finding states explicitly
-    # ("could have resulted from A, B, or C") -- structural, no inference.
-    from app.agent.causal_guard import (
-        extract_stated_causal_alternatives,
-        stated_alternatives_unresolved,
-    )
-    _stated_causal_alternatives = extract_stated_causal_alternatives(request.finding_text)
-    _causal_alternatives_unresolved = bool(_stated_causal_alternatives) and (
-        stated_alternatives_unresolved(request.finding_text)
-        or mechanism.status == "UNKNOWN"
-    )
+        _causal_alternatives_unresolved = bool(
+            getattr(canonical_semantic_context, "causal_alternatives_unresolved", False)
+        )
+    else:
+        from app.agent.causal_guard import (
+            extract_stated_causal_alternatives,
+            stated_alternatives_unresolved,
+        )
+        _stated_causal_alternatives = extract_stated_causal_alternatives(request.finding_text)
+        _causal_alternatives_unresolved = bool(_stated_causal_alternatives) and (
+            stated_alternatives_unresolved(request.finding_text)
+            or mechanism.status == "UNKNOWN"
+        )
 
     # Claim-level decomposition with full provenance (Phase 2): decomposes
     # the finding into individual claims, each with its own attribution and
@@ -516,13 +599,21 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             f"Evidence conflict(s) detected: {len(evidence_conflicts)} — "
             + "; ".join(c.proposition for c in evidence_conflicts)
         ))
-    # If evidence conflicts exist and the mechanism was derived from
-    # REPORTED claims, the mechanism status must reflect the conflict.
+    # STRUCTURAL CONSISTENCY DOWNGRADE (spec Pass 46 §13): a REPORTED mechanism
+    # cannot be treated as established while claims about the SAME proposition
+    # structurally conflict. This is a validation downgrade, NOT a re-
+    # interpretation -- the deterministic layer rejects an unestablishable
+    # claim, it never invents a replacement mechanism. Provenance preserves
+    # BOTH what was claimed and what validation did.
     if evidence_conflicts and mechanism.status == "REPORTED":
+        _orig_mech_status = mechanism.status
         mechanism.status = "UNKNOWN"
         trace.append(AgentTraceStep.warn(
-            "Mechanism status downgraded to UNKNOWN due to evidence conflict(s) "
-            "— conflicting reported statements prevent establishing the mechanism"
+            "Mechanism validation: original_status=%s validated_status=UNKNOWN "
+            "reason=EVIDENCE_CONFLICT action=DOWNGRADE — %d conflicting claim(s) about "
+            "the same proposition prevent establishing the reported mechanism; no "
+            "replacement mechanism is inferred."
+            % (_orig_mech_status, len(evidence_conflicts))
         ))
 
     from app.services.semantic_subject import resolve_referenced_documents
@@ -538,8 +629,13 @@ async def understand_finding_node(state: AgentState) -> AgentState:
             + " — content treated as UNKNOWN, not usable as evidence"
         ))
 
-    from app.agent.recurrence_guard import detect_recurrence
-    recurrence = detect_recurrence(request.finding_text)
+    # Spec Pass 42 §4/§5: recurrence + previous-CAPA reference are LLM-owned on
+    # the canonical-success path. `recurrence_guard.detect_recurrence`
+    # (raw-finding-text regex) runs ONLY on the deterministic-fallback path.
+    recurrence = recurrence_info_from_canonical(canonical_semantic_context)
+    if recurrence is None:
+        from app.agent.recurrence_guard import detect_recurrence
+        recurrence = detect_recurrence(request.finding_text)
     if recurrence.is_recurring:
         trace.append(AgentTraceStep.warn(
             "Recurrence signal detected: " + (recurrence.rationale or "a similar finding was previously identified")
@@ -554,9 +650,14 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     # per investigation (build_semantic_graph must not re-run resolve_deviation).
     # Only reuse it when it was computed from the SAME text the graph builder
     # would use (byte-equivalence for the segment-filtered path).
+    # Spec Pass 47 §5: on the canonical-success path `resolved` is the
+    # canonical LLM projection -- always pass it so `build_semantic_graph`
+    # never falls back to its internal `resolve_deviation(finding_text)`.
+    # On the fallback path keep the legacy quarantine guard.
+    _rd_for_graph = resolved if (_canonical_success or resolution_text == request.finding_text) else None
     semantic_graph = build_semantic_graph(
         request.finding_text, evidence_claims, propositions, evidence_conflicts,
-        resolved_deviation=(resolved if resolution_text == request.finding_text else None),
+        resolved_deviation=_rd_for_graph,
     )
 
     # Typed measurement (Section 8): a discrepancy magnitude ("approximately
@@ -699,11 +800,19 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     if not canonical_state.is_actionable:
         canonical_state.investigation_mode = InvestigationMode.NON_ACTIONABLE
 
+    # Spec Pass 45 §4/§6/§7: on the canonical-success path uncertainty is
+    # derived ONLY from LLM-established structured signals -- no raw finding
+    # text. `canonical_success=True` makes `detect_uncertainties` ignore the
+    # raw-text regex disjuncts and use `semantic_type` / `missing_record_
+    # status` / `comparison_type` / `recurrence_signal` / `mechanism_status` /
+    # `evidence_conflicts` (all LLM-owned on success).
     from app.agent.causal_guard import detect_uncertainties
     prim_unc, sec_unc, c_ready, blk_steps = detect_uncertainties(
         canonical_state=canonical_state,
         evidence_ledger=ledger,
-        finding_text=request.finding_text,
+        finding_text="" if _canonical_success else request.finding_text,
+        canonical_success=_canonical_success,
+        canonical_context=canonical_semantic_context if _canonical_success else None,
     )
     canonical_state.primary_uncertainty = prim_unc
     canonical_state.secondary_uncertainties = sec_unc
@@ -755,51 +864,26 @@ async def understand_finding_node(state: AgentState) -> AgentState:
         )
 
     # ------------------------------------------------------------------
-    # LLM-PRIMARY semantic interpretation (spec Phase 3/4). The LLM builds
-    # the structured semantic representation; a deterministic validator
-    # constrains it; validated fields are MERGED into canonical_finding_state
-    # with resolve_deviation() as the fail-closed floor. Gated OFF by default
-    # -- when disabled, or the LLM returns None/invalid, the merge is a pure
-    # no-op and canonical_finding_state is exactly what resolve_deviation
-    # produced. Computed ONCE here and reused by every downstream node via
-    # state["canonical_semantic_context"].
+    # Spec Pass 41-44: the canonical LLM interpretation already ran near the
+    # top of this node, and on the SUCCESS path `canonical_state` was built
+    # ENTIRELY from the validated LLM context (deviation_info_from_canonical /
+    # recurrence_info_from_canonical / mechanism_info_from_canonical). This
+    # step only copies the remaining context-only PROVENANCE fields
+    # (evidence_source / reported_observation / finding_epistemic_status /
+    # affected_period / scope) + the structural subject-safety re-check. It is
+    # NOT a semantic merge -- there is no deterministic semantic state on this
+    # path. On the FAILURE path `canonical_semantic_context` is None and this
+    # is a no-op.
     # ------------------------------------------------------------------
-    canonical_semantic_context = state.get("canonical_semantic_context")
-    canonical_semantic_status = state.get("canonical_semantic_status") or (
-        "REUSED" if canonical_semantic_context is not None else "NOT_ATTEMPTED"
-    )
-    if settings.canonical_semantic_llm_primary and canonical_semantic_context is None:
-        try:
-            from app.services.canonical_context_validator import validate_canonical_context
-            from app.services.canonical_finding_interpreter import (
-                interpret_finding_canonically_with_status,
-            )
-            from app.services.canonical_state_merge import merge_semantic_context_into_canonical
-
-            # timeout_seconds=None -> production `canonical_semantic_primary_timeout_seconds`,
-            # NOT the 8s shadow timeout: this is the PRIMARY semantic authority.
-            canonical_semantic_status, _raw_ctx = await interpret_finding_canonically_with_status(
-                finding_text=request.finding_text,
-                evidence_ledger=ledger,
-                timeout_seconds=None,
-            )
-            if _raw_ctx is not None:
-                canonical_semantic_context = validate_canonical_context(
-                    _raw_ctx, ledger, request.finding_text
-                )
-                canonical_state, _merge = merge_semantic_context_into_canonical(
-                    canonical_state, canonical_semantic_context
-                )
-                if _merge.fields_from_llm or _merge.fields_rejected:
-                    trace.append(AgentTraceStep.ok(
-                        "Understanding: LLM-primary semantic merge — "
-                        f"from_llm={_merge.fields_from_llm} rejected={_merge.fields_rejected} "
-                        f"conserved={_merge.fields_conserved}"
-                    ))
-        except Exception as exc:  # noqa: BLE001 - fail-closed by design
-            logger.warning("LLM-primary semantic interpretation failed (%s); deterministic floor retained.", exc)
-            canonical_semantic_context = None
-            canonical_semantic_status = "UNEXPECTED_ERROR"
+    if canonical_semantic_context is not None:
+        canonical_state, _prov = apply_canonical_provenance_fields(
+            canonical_state, canonical_semantic_context
+        )
+        if _prov.fields_from_llm or _prov.fields_rejected:
+            trace.append(AgentTraceStep.ok(
+                "Understanding: canonical LLM semantic state — "
+                f"from_llm={_prov.fields_from_llm} rejected={_prov.fields_rejected}"
+            ))
 
     # Explicit, observable semantic mode (spec §3/§20): the report must never
     # imply canonical LLM reasoning occurred when the canonical call failed.

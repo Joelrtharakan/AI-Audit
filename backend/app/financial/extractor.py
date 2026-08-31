@@ -432,10 +432,34 @@ def _parse_count_token(val: str | None) -> int | None:
         return None
 
 
+def _remediation_pricing_amounts(context_strings: list[str] | None) -> set[float]:
+    """Parse the numeric values out of the canonical LLM's own
+    `pricing_information` text (observed_value_in_finding / pricing_basis /
+    rationale). These are the amounts the LLM classified as remediation-cost
+    inputs -- structural extraction of LLM output, no semantic rule."""
+    if not context_strings:
+        return set()
+    out: set[float] = set()
+    for s in context_strings:
+        for m in re.finditer(r"\d[\d,]*(?:\.\d+)?", str(s)):
+            try:
+                out.add(float(m.group(0).replace(",", "")))
+            except ValueError:
+                continue
+    return out
+
+
+def _amount_in_remediation_pricing(amt: float | None, pricing_amounts: set[float]) -> bool:
+    if amt is None or not pricing_amounts:
+        return False
+    return any(abs(amt - p) < 0.01 for p in pricing_amounts)
+
+
 def extract_financial_observations(
     finding_text: str,
     evidence_ledger: list[EvidenceItem] | None = None,
     evidence_claims: list[EvidenceClaim] | None = None,
+    remediation_cost_context: list[str] | None = None,
 ) -> tuple[list[FinancialObservation], bool, list[str]]:
     """Extract structured FinancialObservation facts strictly maintaining source verification status.
 
@@ -451,6 +475,8 @@ def extract_financial_observations(
     # preserved purely as rendering provenance -- v_stat (element 2)
     # remains the sole authoritative calculation bucket and is computed
     # exactly as before; nothing about eligibility/aggregation changes.
+    remediation_cost_amounts = _remediation_pricing_amounts(remediation_cost_context)
+
     sources: list[tuple[str, str, str, str | None, str | None]] = []
     if evidence_ledger:
         for idx, item in enumerate(evidence_ledger):
@@ -739,6 +765,20 @@ def extract_financial_observations(
                     amt_type = FinancialAmountType.REMEDIATION_COST
                 elif _COMPENSATION_RE.search(text):
                     amt_type = FinancialAmountType.CUSTOMER_COMPENSATION
+
+            # CANONICAL PRICING OVERRIDE (spec Pass 29 §9-§13): the canonical
+            # LLM's `pricing_information` already declared which monetary
+            # values in the finding are REMEDIATION-COST inputs (a replacement
+            # unit price, a labour rate, an effort figure). A verified status
+            # on the evidence item makes such an amount an EXPECTED remediation
+            # cost, NOT an incurred DIRECT_LOSS -- honour the LLM's semantic
+            # classification rather than defaulting to loss. Not a keyword
+            # rule: `remediation_cost_amounts` is the LLM's own output.
+            if (
+                amt_type in (FinancialAmountType.DIRECT_LOSS, FinancialAmountType.POTENTIAL_EXPOSURE)
+                and _amount_in_remediation_pricing(amt, remediation_cost_amounts)
+            ):
+                amt_type = FinancialAmountType.REMEDIATION_COST
 
             rec_stat = RecoveryStatus.VERIFIED_ZERO_RECOVERY if (has_zero_rec and v_stat == "VERIFIED") else RecoveryStatus.REQUIRES_VERIFICATION
 

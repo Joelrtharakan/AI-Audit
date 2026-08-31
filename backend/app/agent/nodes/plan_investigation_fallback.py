@@ -147,7 +147,17 @@ def _plan_from_canonical_structure(
                "Resolve an information gap identified in the canonical interpretation")
 
         cmp_ = getattr(sc, "comparison", None)
-        if cmp_ is not None and (getattr(cmp_, "left", None) or getattr(cmp_, "right", None)):
+        # Only a genuine conflict / unresolved comparability question warrants a
+        # comparability investigation step (spec Pass 34 §9/§11/§12). The
+        # canonical LLM's own `status` + stated `why_comparable` decide this via
+        # `comparison_is_active` -- the single authority. Legitimate multiple
+        # prices / a subtotal relationship / an unclassified comparison never
+        # activate. This node consumes structured state; it never inspects
+        # finding prose to rediscover a comparison.
+        from app.services.canonical_semantic_models import comparison_is_active
+        if comparison_is_active(cmp_) and (
+            getattr(cmp_, "left", None) or getattr(cmp_, "right", None)
+        ):
             _l = getattr(cmp_, "left", None) or "the first value"
             _r = getattr(cmp_, "right", None) or getattr(cmp_, "reference", None) or "the second value"
             _q("Q_COMPARABILITY",

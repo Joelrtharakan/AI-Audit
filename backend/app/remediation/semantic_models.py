@@ -39,7 +39,14 @@ Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 # NOT_ESTABLISHED means no basis at all. The validator re-checks every
 # VERIFIED/REPORTED claim against real evidence and downgrades unsupported ones.
 CostBasisStr = Literal["VERIFIED", "REPORTED", "ESTIMATED", "ASSUMED", "NOT_ESTABLISHED"]
-QuantityBasisStr = Literal["EVIDENCED", "ASSUMED", "NOT_ESTABLISHED"]
+# EVIDENCED  -- an evidence item states the quantity outright.
+# DERIVED    -- the LLM combined two or more explicit evidenced values with a
+#               transparent relationship it must state (e.g. "2 machines x 6
+#               h/machine = 12 h"). This is the LLM's reasoning, never code's:
+#               deterministic code only executes the arithmetic the LLM supplies
+#               in the linked calculation plan (spec Pass 32 §5).
+# ASSUMED / NOT_ESTABLISHED -- placeholder / no basis; never yields a number.
+QuantityBasisStr = Literal["EVIDENCED", "DERIVED", "ASSUMED", "NOT_ESTABLISHED"]
 
 # The semantic ROLE of this component's monetary figure relative to the
 # remediation plan (spec sections 4, 6, 7, 19). The deterministic calculator
@@ -69,7 +76,7 @@ ActivityDisposition = Literal[
     "CONDITIONAL_SYSTEMIC", "EFFECTIVENESS_CHECK", "INVESTIGATION",
 ]
 
-CalcOperation = Literal["MULTIPLY", "SUM", "SUBTRACT"]
+CalcOperation = Literal["MULTIPLY", "SUM", "SUBTRACT", "DIVIDE"]
 
 Produces = Literal["LOW", "MOST_LIKELY", "HIGH", "COMPONENT_AMOUNT"]
 
@@ -134,9 +141,31 @@ class RemediationCostComponent(BaseModel):
     description: str
     activity_ids: list[str] = Field(default_factory=list)
     cost_category: str = "other"
+    # What the monetary value semantically IS (spec Pass 34 §21 / Pass 35 §1).
+    # The LLM MUST classify every monetary input. The default is the
+    # fail-closed NOT_ESTABLISHED: an omitted classification NEVER silently
+    # becomes a remediation cost -- the validator strips the number for that
+    # one component (keeping it as an unpriced driver) unless a VERIFIED /
+    # REPORTED cited evidence basis independently anchors it. Deterministic
+    # code never recovers the missing meaning from text.
+    # REMEDIATION_COST / UNIT_RATE / QUOTED_PRICE / BUDGET / ESTIMATE are
+    # priceable remediation inputs; OBSERVED_FINANCIAL_LOSS /
+    # HISTORICAL_EXPENDITURE describe the finding, not the fix.
+    value_kind: Literal[
+        "REMEDIATION_COST", "UNIT_RATE", "QUOTED_PRICE", "BUDGET", "ESTIMATE",
+        "OBSERVED_FINANCIAL_LOSS", "HISTORICAL_EXPENDITURE", "OTHER", "NOT_ESTABLISHED",
+    ] = "NOT_ESTABLISHED"
     quantity: float | None = None
     quantity_unit: str | None = None
     quantity_basis: QuantityBasisStr = "NOT_ESTABLISHED"
+    # Required when quantity_basis == "DERIVED": the LLM's transparent, one-line
+    # statement of how the quantity was obtained from explicit evidenced values
+    # ("2 machines x 6 h/machine = 12 h"). Deterministic code never fills this
+    # and never derives a quantity itself (spec Pass 32 §5/§6).
+    quantity_derivation: str = ""
+    # Optional link to the calculation_proposals entry whose operands establish
+    # a DERIVED quantity -- lets the arithmetic executor re-check the product.
+    derived_from_calculation_id: str | None = None
     unit_cost: float | None = None
     unit_cost_low: float | None = None       # optional LLM-expressed range for this driver
     unit_cost_high: float | None = None
@@ -163,17 +192,68 @@ class RemediationCostComponent(BaseModel):
         return _finite(v)
 
 
+class CalcOperand(BaseModel):
+    """One explicit input to a calculation plan. The LLM supplies the numeric
+    VALUE and its meaning; deterministic arithmetic only combines the values it
+    is given (spec Pass 32 §3/§4/§29/§30). `source_component_id` optionally ties
+    the operand back to a cost component; `evidence_refs` cite where the value
+    is stated."""
+
+    label: str = ""                       # "machine count", "hours per machine", "hourly rate"
+    value: float | None = None
+    unit: str | None = None               # "machine", "hour", "currency/hour"
+    source_component_id: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _finite_value(cls, v: Any) -> float | None:
+        return _finite(v)
+
+
 class RemediationCalculationProposal(BaseModel):
-    """A proposed calculation. `proposed_result_*` is retained ONLY for audit /
-    disagreement logging -- never authoritative. The real number is
-    re-executed deterministically in `app.remediation.calculator`."""
+    """The LLM's explicit calculation plan for one figure. The LLM decides the
+    operands, the operation, the frequency and what the result represents; the
+    deterministic executor in `app.remediation.calculator` evaluates the
+    arithmetic exactly as specified (spec Pass 32 §3-§5, §29-§31).
+
+    `proposed_result_*` and the executed value are retained for the audit trail
+    only -- the authoritative estimate numbers still come from role-based
+    (`amount_type`) component assembly, never from this proposal."""
 
     calculation_id: str
     operation: CalcOperation
+    # Legacy / simple form: reference cost components and let the executor read
+    # their point amounts. Still fully supported.
     component_ids: list[str] = Field(default_factory=list)
+    # Rich form (Pass 32): explicit operands with values + provenance. When
+    # present these are what the executor evaluates.
+    operands: list[CalcOperand] = Field(default_factory=list)
     produces: Produces = "COMPONENT_AMOUNT"
+    # Which component this plan prices (spec Pass 35 §15). Optional -- legacy
+    # plans reference components only through `component_ids`.
+    target_component_id: str | None = None
+    # The frequency of the RESULT this plan produces. NO semantic default
+    # (spec Pass 35 §6): a rich self-describing plan (one carrying explicit
+    # `operands`) with `frequency` absent is structurally incomplete and is
+    # rejected -- the LLM must state ONE_TIME or RECURRING. MUST match the
+    # target component's `recurrence`. A "per month/week/quarter/year" rate is
+    # RECURRING with `recurring_period` set -- the result is the PERIODIC
+    # amount, never multiplied out to a lifetime (spec Pass 33 §2/§6).
+    frequency: Recurrence | None = None
+    recurring_period: str | None = None
+    # An explicit time horizon over which a RECURRING cost is to be totalled.
+    # ONLY when the evidence or the auditor's request establishes it. Never
+    # inferred (spec Pass 33 §3/§7/§9). `horizon` is the count, `horizon_unit`
+    # must equal `recurring_period`.
+    horizon: float | None = None
+    horizon_unit: str | None = None
+    horizon_basis: Literal["EXPLICIT", "DERIVED", "UNKNOWN", "NOT_APPLICABLE"] = "NOT_APPLICABLE"
+    currency: str | None = None
+    result_represents: str = ""           # "one-time sensor-installation labour cost"
     proposed_result_value: float | None = None
     proposed_result_currency: str | None = None
+    rationale: str = ""
     reason: str = ""
 
     @field_validator("proposed_result_value", mode="before")
@@ -255,7 +335,14 @@ class RemediationCalculationTrace(BaseModel):
     calculation_id: str
     operation: str = ""
     component_ids: list[str] = Field(default_factory=list)
+    operands: list[CalcOperand] = Field(default_factory=list)
     produces: str = "COMPONENT_AMOUNT"
+    frequency: str = "ONE_TIME"
+    recurring_period: str | None = None
+    horizon: float | None = None
+    horizon_unit: str | None = None
+    horizon_basis: str = "NOT_APPLICABLE"
+    result_represents: str = ""
     currency: str | None = None
     formula: str = ""
     llm_proposed_result: float | None = None

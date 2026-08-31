@@ -233,11 +233,23 @@ class LiteLLMProvider(LLMProvider):
             reasoning_tokens = getattr(_details, "reasoning_tokens", None)
         finish_reason = getattr(completion.choices[0], "finish_reason", "stop") or "stop"
 
+        # Native provider timing breakdown (Ollama exposes load_duration /
+        # prompt_eval_duration / eval_duration / total_duration in ns). LiteLLM
+        # sometimes carries these through on the raw response or _hidden_params;
+        # capture whatever is actually present, never fabricate (spec Pass 36
+        # M1/M2 -- makes the bottleneck observable: load vs prompt-eval vs
+        # generation).
+        _timing = _extract_native_timing(completion)
+
         logger.info(
             "LLM RESPONSE request_id=%s provider=%s model=%s litellm_route=%s node=%s elapsed_ms=%d "
-            "prompt_tokens=%s output_tokens=%s reasoning_tokens=%s finish_reason=%s retries=%d success=true",
+            "prompt_tokens=%s output_tokens=%s reasoning_tokens=%s finish_reason=%s retries=%d "
+            "load_ms=%s prompt_eval_ms=%s gen_ms=%s total_ms=%s tok_per_s=%s success=true",
             request_id, cfg.provider, cfg.model, cfg.litellm_model, node, elapsed_ms,
             prompt_tokens, output_tokens, reasoning_tokens, finish_reason, num_retries,
+            _timing.get("load_ms", "?"), _timing.get("prompt_eval_ms", "?"),
+            _timing.get("gen_ms", "?"), _timing.get("total_ms", "?"),
+            _timing.get("gen_tok_per_s", "?"),
         )
 
         set_last_call_metadata({
@@ -253,6 +265,7 @@ class LiteLLMProvider(LLMProvider):
             "done_reason": finish_reason,
             "node": node,
             "success": True,
+            **{f"native_{k}": v for k, v in _timing.items()},
         })
 
         return LLMResponse(
@@ -271,6 +284,60 @@ class LiteLLMProvider(LLMProvider):
                 "hit_output_limit": finish_reason == "length",
             },
         )
+
+
+def _extract_native_timing(completion: Any) -> dict[str, float]:
+    """Pull an Ollama-style timing breakdown out of whatever LiteLLM handed
+    back, wherever it landed. Returns {} when the provider exposed nothing --
+    never fabricates. Durations are converted ns -> ms."""
+    _sources: list[Any] = []
+    for attr in ("_hidden_params", "model_extra", "__dict__"):
+        v = getattr(completion, attr, None)
+        if isinstance(v, dict):
+            _sources.append(v)
+    _u = getattr(completion, "usage", None)
+    if _u is not None:
+        _sources.append(getattr(_u, "__dict__", {}) or {})
+        _sources.append(getattr(_u, "model_extra", {}) or {})
+
+    def _find(key: str) -> float | None:
+        for src in _sources:
+            if key in src and isinstance(src[key], (int, float)) and src[key] >= 0:
+                return float(src[key])
+            nested = src.get("additional_headers") if isinstance(src, dict) else None
+            if isinstance(nested, dict) and key in nested:
+                try:
+                    return float(nested[key])
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    out: dict[str, float] = {}
+    _map = {
+        "load_duration": "load_ms",
+        "prompt_eval_duration": "prompt_eval_ms",
+        "eval_duration": "gen_ms",
+        "total_duration": "total_ms",
+    }
+    for raw_key, out_key in _map.items():
+        ns = _find(raw_key)
+        if ns is not None:
+            out[out_key] = round(ns / 1_000_000, 1)
+    _ec = _find("eval_count")
+    if _ec and out.get("gen_ms"):
+        out["gen_tok_per_s"] = round(_ec / (out["gen_ms"] / 1000.0), 1)
+    # LiteLLM's ollama_chat route does NOT surface Ollama's native
+    # load/prompt_eval/eval durations (verified) -- fall back to what LiteLLM
+    # DOES expose so the provider vs generation split is still partly visible.
+    _hp = getattr(completion, "_hidden_params", None)
+    if isinstance(_hp, dict):
+        _ov = _hp.get("litellm_overhead_time_ms")
+        if isinstance(_ov, (int, float)):
+            out["litellm_overhead_ms"] = round(float(_ov), 1)
+    _rm = getattr(completion, "_response_ms", None)
+    if isinstance(_rm, (int, float)) and "total_ms" not in out:
+        out["provider_response_ms"] = round(float(_rm), 1)
+    return out
 
 
 def _map_litellm_error(exc: Exception, cfg: LLMExecutionConfig, timeout_s: float) -> LLMProviderError:

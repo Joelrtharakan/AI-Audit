@@ -81,11 +81,21 @@ class AssembledEstimate:
     low: float | None = None
     most_likely: float | None = None
     high: float | None = None
+    # A recurring cost totalled over an EXPLICIT horizon the LLM supplied in a
+    # calculation proposal (never inferred). Null otherwise -- the periodic
+    # `recurring_cost` stands alone (spec Pass 33 §3/§7/§24).
+    recurring_horizon_total: float | None = None
+    recurring_horizon: float | None = None
+    recurring_horizon_basis: str = ""
     estimate_classification: CostBasis = CostBasis.NOT_ESTABLISHED
     estimation_method: str = ""
     uncertainty_reasons: list[str] = field(default_factory=list)
     contributing_bases: list[str] = field(default_factory=list)
     unpriced_component_ids: list[str] = field(default_factory=list)
+    # True when a stated SUBTOTAL/TOTAL does not reconcile with the itemised
+    # components -- the figure is genuinely uncertain, never a clean EXACT
+    # estimate (Pass 30 §8/§10). The engine reads this to set PARTIAL/RANGE.
+    has_reconciliation_conflict: bool = False
 
 
 def _multiplies(c: RemediationCostComponent) -> bool:
@@ -228,6 +238,27 @@ def assemble_estimate(
                 "Recurring costs are stated over different periods; they are not combined into a "
                 "single recurring figure."
             )
+        # EXPLICIT horizon only (spec Pass 33 §3/§7): a proposal that targets a
+        # recurring component and carries horizon_basis == "EXPLICIT" with a
+        # matching unit lets the periodic cost be totalled. Nothing is inferred
+        # -- absent an explicit horizon, the periodic amount stands alone.
+        _rec_cids = {r.c.component_id for r in recurring}
+        _horizons = [
+            (p.horizon, (p.horizon_unit or "").strip().lower(), p.horizon_basis)
+            for p in accepted_proposals
+            if str(getattr(p, "horizon_basis", "")).upper() == "EXPLICIT"
+            and getattr(p, "horizon", None)
+            and (set(p.component_ids) & _rec_cids
+                 or getattr(p, "target_component_id", None) in _rec_cids
+                 or any(o.source_component_id in _rec_cids for o in getattr(p, "operands", [])))
+        ]
+        _rec_period = (est.recurring_period or "").strip().lower()
+        _matched = [h for h in _horizons if not h[1] or not _rec_period or h[1].rstrip("s") == _rec_period.rstrip("s")]
+        if est.recurring_cost is not None and len(_matched) == 1 and est.recurring_period:
+            _h = _matched[0][0]
+            est.recurring_horizon = _h
+            est.recurring_horizon_basis = "EXPLICIT"
+            est.recurring_horizon_total = _round(est.recurring_cost * _h)
 
     if one_time:
         low, ml, high, method = _aggregate_one_time(one_time, _results_by_id, est)
@@ -271,9 +302,11 @@ def _aggregate_one_time(
                 results_by_id[st.c.component_id].is_derived = True
             methods.append("stated subtotal matched the itemised components and was not double counted")
         elif additive:
+            est.has_reconciliation_conflict = True
             est.uncertainty_reasons.append(
                 f"A stated subtotal ({st.point:g}) does not reconcile with the sum of the itemised "
-                f"components ({additive_sum:g}); the itemised components were used."
+                f"components ({additive_sum:g}); the itemised components were used and the "
+                "estimate is treated as PARTIAL pending reconciliation."
             )
         else:
             additive.append(st)  # nothing to roll up -> treat as a component
@@ -335,6 +368,7 @@ def _aggregate_one_time(
             hi = max(gt.high, from_parts_high) if from_parts_high is not None else gt.high
             return _round(lo), _round(gt.point), _round(hi), "; ".join(methods)
         # Conflict: stated total vs itemised parts.
+        est.has_reconciliation_conflict = True
         est.uncertainty_reasons.append(
             f"The stated implementation total ({gt.point:g}) does not reconcile with the sum of the "
             f"itemised parts ({from_parts_ml:g}); both figures are shown and the range spans them."
@@ -362,30 +396,65 @@ def _max_basis_rank(rows: list[_Row]) -> int:
     return max((_BASIS_RANK.get(r.c.unit_cost_basis, 0) for r in rows), default=0)
 
 
+def _evaluate_plan(operation: str, values: list[float]) -> float | None:
+    """Pure arithmetic execution of an LLM-supplied calculation plan. NO
+    business meaning -- the LLM decided the operands and the operation; this
+    only combines the numbers (spec Pass 32 §3/§4/§29)."""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return None
+    if operation == "MULTIPLY":
+        out = 1.0
+        for v in vals:
+            out *= v
+        return _round(out)
+    if operation == "SUBTRACT" and len(vals) >= 2:
+        return _round(vals[0] - sum(vals[1:]))
+    if operation == "DIVIDE" and len(vals) >= 2:
+        denom = 1.0
+        for v in vals[1:]:
+            denom *= v
+        return _round(vals[0] / denom) if denom else None
+    return _round(sum(vals))
+
+
 def _fill_traces(
     proposals: list[RemediationCalculationProposal],
     by_id: dict[str, RemediationCostComponent],
     traces: list[RemediationCalculationTrace],
 ) -> None:
-    """Record what the deterministic executor computes for each proposed
-    calculation, purely for the audit trail. `produces: LOW/MOST_LIKELY/HIGH`
-    is NOT applied to the estimate -- the range comes only from component
-    structure (see _aggregate_one_time). Spec section 18: the LLM's proposed
-    result stays audit-only."""
+    """Execute each LLM calculation plan for the audit trail. The plan's
+    operands (explicit values the LLM supplied, or the point amounts of the
+    referenced components) are combined with the LLM-declared operation.
+    `produces: LOW/MOST_LIKELY/HIGH` is NOT applied to the estimate -- the
+    authoritative numbers come from role-based component assembly
+    (_aggregate_one_time). Spec Pass 32 §3-§5, §29: the LLM owns the plan, the
+    executor owns the arithmetic, neither drives the headline figure alone."""
     trace_by_id = {t.calculation_id: t for t in traces}
     for p in proposals:
-        operands = [by_id[cid] for cid in p.component_ids if cid in by_id]
-        amounts = [a for a in (_point_amount(o) for o in operands) if a is not None]
-        if not amounts:
-            continue
-        if p.operation == "SUBTRACT" and len(amounts) >= 2:
-            val = _round(amounts[0] - sum(amounts[1:]))
+        # Rich form: explicit operand values the LLM supplied.
+        explicit = [o.value for o in getattr(p, "operands", []) if o.value is not None]
+        if explicit:
+            values = explicit
+            operand_desc = ", ".join(
+                f"{o.label or '?'}={o.value:g}" for o in p.operands if o.value is not None
+            )
         else:
-            val = _round(sum(amounts))
+            operands = [by_id[cid] for cid in p.component_ids if cid in by_id]
+            values = [a for a in (_point_amount(o) for o in operands) if a is not None]
+            operand_desc = str(p.component_ids)
+        if not values:
+            continue
+        val = _evaluate_plan(p.operation, values)
         tr = trace_by_id.get(p.calculation_id)
         if tr is not None and val is not None:
             tr.executor_result = val
-            tr.formula = f"{p.operation} over {p.component_ids} -> {val:g} (audit only)"
+            _freq = f" [{p.frequency}]" if (getattr(p, "frequency", None) or "ONE_TIME") != "ONE_TIME" else ""
+            _rep = f" = {p.result_represents}" if getattr(p, "result_represents", "") else ""
+            tr.formula = f"{p.operation}({operand_desc}) -> {val:g}{_freq}{_rep} (audit only)"
+            if getattr(p, "result_represents", ""):
+                tr.result_represents = p.result_represents
+            tr.frequency = getattr(p, "frequency", None) or "ONE_TIME"
             if tr.llm_proposed_result is not None and not _close(tr.llm_proposed_result, val):
                 tr.disagreement = (
                     f"LLM proposed {tr.llm_proposed_result:g}; deterministic executor computed "

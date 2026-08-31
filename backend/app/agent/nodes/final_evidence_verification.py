@@ -504,13 +504,17 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # Extract immediate mechanism for invariant filter check
     from app.agent.causal_guard import MechanismInfo, extract_immediate_mechanism, hypothesis_contradicts_mechanism, mechanism_already_names_generic_hypothesis
     canonical = state.get("canonical_finding_state")
+    _canonical_llm = state.get("canonical_semantic_context") is not None
     if canonical and canonical.immediate_mechanism:
         mechanism = MechanismInfo(
             statement=canonical.immediate_mechanism,
             status=canonical.immediate_mechanism_status,
         )
-        from app.agent.causal_guard import classify_mechanism_polarity
-        mechanism.polarity = classify_mechanism_polarity(canonical.immediate_mechanism)
+    elif _canonical_llm:
+        # Spec Pass 48 §2/§3: canonical LLM succeeded, established no mechanism
+        # -> NOT_ESTABLISHED. No deterministic evidence-prose extraction, no
+        # regex polarity classification of an LLM statement.
+        mechanism = MechanismInfo(statement=None, status="UNKNOWN", polarity=None)
     else:
         reported = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
         verified = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.VERIFIED]
@@ -1390,9 +1394,15 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             rc.status = RootCauseStatus.NOT_ESTABLISHED
             rc.leading_hypothesis = None
             rc.leading_hypothesis_status = lead_status_literal
+        # Spec Pass 47 §5/§16: recurrence is LLM-owned on the canonical-success
+        # path -- source it from the validated canonical context, not
+        # `detect_recurrence(finding_text)` (raw-text regex).
         from app.agent.recurrence_guard import build_recurrence_rationale, detect_recurrence
-        _finding_txt = getattr(state.get("request"), "finding_text", "")
-        _rec = detect_recurrence(_finding_txt)
+        from app.services.canonical_state_merge import recurrence_info_from_canonical
+        _sc_fev = state.get("canonical_semantic_context")
+        _rec = recurrence_info_from_canonical(_sc_fev)
+        if _rec is None:
+            _rec = detect_recurrence(getattr(state.get("request"), "finding_text", ""))
         if _rec.is_recurring:
             rc.risk_of_recurrence = "HIGH"
             rc.risk_of_recurrence_rationale = build_recurrence_rationale(_rec)

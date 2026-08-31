@@ -269,11 +269,16 @@ class LLMRouter(LLMProvider):
                     max_tokens=max_tokens,
                     num_ctx=num_ctx,
                 )
-                _last_call_metadata.set({
+                # Preserve the provider's own timing/token metadata (Ollama
+                # sets prompt_eval_count / eval_count / *_duration) -- merge,
+                # don't overwrite (observability, spec Pass 35 §30).
+                _prev = dict(_last_call_metadata.get() or {})
+                _prev.update({
                     "provider_used": "ollama",
                     "fallback_used": False,
                     "provider_attempts": ["ollama"],
                 })
+                _last_call_metadata.set(_prev)
                 return result
             except Exception as exc:
                 logger.warning("Ollama call failed: %s; trying 1 fast retry...", exc)

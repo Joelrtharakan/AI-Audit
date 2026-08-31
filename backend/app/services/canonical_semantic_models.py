@@ -69,6 +69,41 @@ MissingRecordStatus = Literal[
     "ACTIVITY_NOT_RECORDED", "ACTIVITY_NOT_PERFORMED", "UNKNOWN",
 ]
 ComparisonDirection = Literal["ABOVE", "BELOW", "MISMATCH", "UNKNOWN"]
+# Whether two or more values the finding states actually constitute a
+# comparison/conflict the investigation must resolve (spec Pass 33 §10/§11).
+# The LLM decides this from MEANING -- multiple monetary values, a unit price,
+# or component + subtotal are NOT a comparison. Only ACTUAL_CONFLICT /
+# UNRESOLVED_COMPARISON drive a comparability investigation question.
+ComparisonStatus = Literal[
+    # Fail-closed default (spec Pass 34 §9/§36): the LLM did not establish that
+    # a comparison exists. NEVER activates a comparability investigation.
+    "NOT_ESTABLISHED",
+    "NONE",
+    "LEGITIMATE_MULTIPLE_PRICES",   # distinct prices for distinct things / activities
+    "SUBTOTAL_TOTAL_RELATIONSHIP",  # one value rolls up others
+    "ACTUAL_CONFLICT",              # two figures that should agree do not
+    "UNRESOLVED_COMPARISON",        # two quantified assessments, comparability unestablished
+]
+# The only statuses that make `comparison` an ACTIVE semantic comparison the
+# investigation must resolve. Anything else -> the validator clears the object.
+ACTIVE_COMPARISON_STATUSES = frozenset({"ACTUAL_CONFLICT", "UNRESOLVED_COMPARISON"})
+
+
+def comparison_is_active(comparison: object | None) -> bool:
+    """A `SemComparison` drives a reconciliation obligation / comparability
+    investigation question ONLY when the LLM explicitly classified it as a
+    genuine conflict / unresolved comparability AND stated why the two values
+    belong in a comparison (spec Pass 34 §9/§11/§36). Pure field read -- no
+    finding-text inspection, no numeric comparison. The one place this decision
+    is made; every consumer imports it."""
+    if comparison is None:
+        return False
+    if getattr(comparison, "status", "NOT_ESTABLISHED") not in ACTIVE_COMPARISON_STATUSES:
+        return False
+    return bool(
+        getattr(comparison, "why_comparable", None)
+        or getattr(comparison, "comparison_basis", None)
+    )
 FindingEpistemicStatus = Literal["VERIFIED", "REPORTED", "BELIEF", "INFERRED", "UNKNOWN"]
 
 
@@ -81,6 +116,17 @@ class SemComparison(BaseModel):
     left: str | None = None
     right: str | None = None
     reference: str | None = None      # the baseline/standard being compared against
+    # The LLM's classification of what this actually is. Fail-closed default:
+    # an unclassified comparison is NOT_ESTABLISHED and the validator clears it
+    # (spec Pass 34 §9/§36). Only ACTUAL_CONFLICT / UNRESOLVED_COMPARISON, WITH
+    # a stated `why_comparable`, survive as an active comparison.
+    status: ComparisonStatus = "NOT_ESTABLISHED"
+    # Why these two values belong in a comparison / are expected to agree. An
+    # active comparison MUST carry this -- the validator downgrades a
+    # comparison that cannot explain its own purpose (spec Pass 34 §11).
+    why_comparable: str | None = None
+    comparison_basis: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
     direction: ComparisonDirection = "UNKNOWN"
     magnitude: float | None = None
     unit: str | None = None           # "%", "units", "degrees", ...

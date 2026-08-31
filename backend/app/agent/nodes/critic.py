@@ -84,11 +84,23 @@ async def critic_node(state: AgentState) -> AgentState:
             return False
         return bool(ungrounded_entities(text, source_text)) or mentions_unsupported_domain(text, source_text)
 
+    # `root_cause_status = NOT_ESTABLISHED` with NO candidate hypotheses is a
+    # VALID terminal state (spec Pass 30 §17/§18): the canonical interpretation
+    # concluded the evidence establishes no causal mechanism. That is not a
+    # structural defect and must NOT trigger a critic LLM round-trip. Empty
+    # hypotheses is only a concern when the status CLAIMS something was
+    # established.
+    _rc_status = str(getattr(getattr(root_cause, "status", None), "value",
+                             getattr(root_cause, "status", None)) or "").upper()
+    _empty_hyps_is_valid = _rc_status in (
+        "NOT_ESTABLISHED", "NOT_APPLICABLE", "CONTRADICTED", "STATED_UNVERIFIED",
+    )
+
     has_ungrounded = False
     if root_cause:
         if _flagged(root_cause.narrative) or _flagged(root_cause.statement):
             has_ungrounded = True
-        if not root_cause.candidate_hypotheses:
+        if not root_cause.candidate_hypotheses and not _empty_hyps_is_valid:
             has_ungrounded = True
         for hyp in root_cause.candidate_hypotheses:
             if _flagged(hyp.statement) or _flagged(hyp.name):
@@ -97,7 +109,10 @@ async def critic_node(state: AgentState) -> AgentState:
     if five_why is not None and not five_why.steps:
         has_ungrounded = True
 
-    if state.get("analysis_mode") == "DEGRADED" or not has_ungrounded or (root_cause and root_cause.candidate_hypotheses and (five_why is None or five_why.steps)):
+    if state.get("analysis_mode") == "DEGRADED" or not has_ungrounded or (
+        root_cause and (root_cause.candidate_hypotheses or _empty_hyps_is_valid)
+        and (five_why is None or five_why.steps)
+    ):
         trace.append(AgentTraceStep.ok("Deterministic critic firewall: Analysis grounded & structurally valid (0ms fast path)"))
         state["critic_approved"] = True
         state["critic_feedback"] = "Deterministic verification approved."

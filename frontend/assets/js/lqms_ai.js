@@ -750,6 +750,13 @@
                     if (rcRec) html += "<strong>Recurring:</strong> " + rcRec + (rc.recurring_period ? " / " + safeEsc(rc.recurring_period) : "");
                     html += "</div>";
                 }
+                var rcHorizon = rcMoney(rc.recurring_horizon_total);
+                if (rcHorizon && rcNum(rc.recurring_horizon) && rc.recurring_period) {
+                    html += "<div style='font-size:12px; color:#475569; margin-bottom:10px;'>";
+                    html += "<strong>Recurring cost over " + safeEsc(String(rc.recurring_horizon)) + " " + safeEsc(rc.recurring_period);
+                    html += (rc.recurring_horizon > 1 ? "s" : "") + " (stated horizon):</strong> " + rcHorizon;
+                    html += "</div>";
+                }
 
                 if (rc.is_partial_estimate && rc.unpriced_activities && rc.unpriced_activities.length) {
                     html += "<div style='background:#fefce8; border:1px solid #fde68a; border-radius:8px; padding:8px 12px; margin-bottom:10px; font-size:12px; color:#713f12;'>";

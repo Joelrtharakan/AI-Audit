@@ -1552,14 +1552,32 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
         derived_effect = "Scope and downstream consequence require auditor assessment."
         derived_evidence_needed = "Auditor assessment of records relevant to this finding"
 
-    rel_change = (
-        canonical.relevant_change if (canonical and canonical.relevant_change)
-        else (
+    # Spec Pass 38 §6: `relevant_change` is a semantic reading of the finding.
+    # When the canonical LLM ran it is the authority -- use its value or leave
+    # it NOT ESTABLISHED. NEVER re-derive it from finding-text keywords
+    # ("revised" / "checklist") on the LLM-primary path.
+    if canonical and getattr(canonical, "relevant_change", None):
+        rel_change = canonical.relevant_change
+    elif semantic_context is not None:
+        rel_change = "NOT ESTABLISHED"
+    else:
+        rel_change = (
             "Revision of the inspection checklist" if ("revised" in request_finding_text.lower() and "checklist" in request_finding_text.lower())
             else ("Revision of the procedure" if ("revised" in request_finding_text.lower() or "revision" in request_finding_text.lower())
             else "NOT ESTABLISHED")
         )
-    )
+
+    # Spec Pass 38 §6: on the LLM-primary path a `process_at_risk` the canonical
+    # LLM did NOT establish must render NOT ESTABLISHED -- not a deterministic
+    # construction ("<subject> control", "<subject> operation and validated-use
+    # control", "<subject> distribution and delivery control", ...). The
+    # canonical LLM's `affected_process` is the only authority here.
+    if semantic_context is not None:
+        _canon_proc = (getattr(canonical, "affected_process", None) or "").strip()
+        if _canon_proc and _canon_proc.upper() not in ("UNKNOWN", "NOT ESTABLISHED", "NOT_ESTABLISHED"):
+            derived_process = _canon_proc
+        else:
+            derived_process = "NOT ESTABLISHED"
 
     derived_control = canonical.control_at_risk if (canonical and getattr(canonical, "control_at_risk", None)) else None
 
@@ -1580,6 +1598,122 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
         narrative="Assessment of scope and downstream consequences is required based on objective records.",
     )
     return impact, clean_noun, topic, actor
+
+
+class _CanonicalCausalReady(Exception):
+    """Control-flow signal: the validated canonical semantic interpretation
+    already carries the causal state core_synthesis would otherwise ask an
+    LLM to re-derive -- skip the synthesis LLM call entirely (Pass 29 §2)."""
+
+
+def _synthesize_from_canonical_state(
+    *, state, canonical, finding_text: str, evidence_ledger, observed_deviation: str,
+    has_unresolved_conflict: bool,
+):
+    """Build root_cause / 5-Why / hypotheses / CAPA / CA-draft / impact from the
+    VALIDATED canonical semantic interpretation -- NO synthesis LLM call. This
+    is structured-state propagation, not a second semantic reasoner: hypotheses
+    come from `semantic_context.candidate_hypotheses`, the 5-Why from
+    `build_deterministic_five_why(semantic_context=...)`, the causal verdict
+    from `semantic_context.root_cause_status` reconciled through the SAME
+    deterministic eligibility/selection helpers the fallback path uses. It is
+    identical in structure to the deterministic-fallback branch below, except
+    it is reached WITHOUT first burning ~20-150s on a redundant LLM call.
+    """
+    from app.agent.causal_graph import (
+        evaluate_root_cause_eligibility,
+        select_authoritative_leading_hypothesis,
+    )
+    from app.agent.analytical_validator import apply_conflict_tie_override
+    from app.agent.recurrence_guard import build_recurrence_rationale, detect_recurrence
+    from app.agent.nodes.five_why_fallback import build_deterministic_five_why
+    from app.agent.nodes.plan_investigation_fallback import (
+        build_conditional_capa_actions,
+        build_deterministic_investigation_plan,
+    )
+
+    sc = state.get("canonical_semantic_context")
+    canon_subject = getattr(canonical, "finding_subject", None)
+
+    five_why = build_deterministic_five_why(
+        finding_text, evidence_ledger, canonical_subject=canon_subject, semantic_context=sc,
+    )
+    hyps, plan = build_deterministic_investigation_plan(
+        finding_text, evidence_ledger, canonical_subject=canon_subject,
+        canonical_state=canonical, semantic_context=sc,
+    )
+    impact, clean_noun, topic, actor = _derive_deterministic_impact(
+        finding_text, canonical, observed_deviation, semantic_context=sc,
+    )
+
+    for h in hyps:
+        _el, _supp, _a, _b, _c_lvl, _promo = evaluate_root_cause_eligibility(
+            h, evidence_items=evidence_ledger,
+            conflicts=canonical.evidence_conflicts if canonical else None,
+            referenced_docs=canonical.referenced_documents if canonical else None,
+            canonical_state=canonical,
+        )
+        if _promo and _supp == SupportLevel.SUPPORTED:
+            h.status = "SUPPORTED"
+            h.causal_level = _c_lvl
+
+    lead_id, lead_mode, authoritative_rc_status, lead_rationale = select_authoritative_leading_hypothesis(
+        hyps, conflicts=canonical.evidence_conflicts if canonical else None,
+        evidence_ledger=evidence_ledger,
+    )
+    rc_basis = (
+        "Available evidence contains conflicting reported statements regarding completion. "
+        "Objective records are required to determine the actual state."
+        if has_unresolved_conflict
+        else ("Objective records establish the verified causal factor for this finding."
+              if authoritative_rc_status in (RootCauseStatus.ESTABLISHED, RootCauseStatus.SUPPORTED)
+              else "Root cause is not established from the available evidence alone; objective "
+                   "records are required to confirm the causal mechanism.")
+    )
+    lead_status_literal = "SELECTED" if lead_mode == "SELECTED" else ("TIED" if lead_mode == "TIED" else "NONE")
+    root_cause = RootCauseAnalysis(
+        status=authoritative_rc_status,
+        category="TO_BE_CONFIRMED",
+        candidate_hypotheses=hyps,
+        leading_hypothesis=lead_id if authoritative_rc_status != RootCauseStatus.NOT_ESTABLISHED else None,
+        leading_hypothesis_status=lead_status_literal,
+        leading_hypothesis_rationale=lead_rationale,
+        root_cause_basis=rc_basis,
+        evidence_required=["Auditor investigation and objective records required to confirm root cause."],
+        narrative=(
+            "The available evidence establishes the observed condition and verified records "
+            "confirm the underlying causal mechanism."
+            if authoritative_rc_status in (RootCauseStatus.ESTABLISHED, RootCauseStatus.SUPPORTED)
+            else "The available evidence establishes the observed condition but does not "
+                 "establish why it occurred. Auditor investigation is required to verify the "
+                 "candidate causal hypotheses."
+        ),
+    )
+    apply_conflict_tie_override(root_cause, has_unresolved_conflict)
+
+    # Spec Pass 47 §5/§16: recurrence is LLM-owned on the canonical-success
+    # path. `_synthesize_from_canonical_state` is the success path -- source
+    # recurrence from the validated canonical context, NEVER
+    # `detect_recurrence(finding_text)` (raw-text regex).
+    from app.services.canonical_state_merge import recurrence_info_from_canonical
+    recurrence_info = recurrence_info_from_canonical(state.get("canonical_semantic_context"))
+    if recurrence_info is None:  # defensive: reached only if context is absent
+        recurrence_info = detect_recurrence(finding_text)
+    if recurrence_info.is_recurring:
+        root_cause.risk_of_recurrence = "HIGH"
+        root_cause.risk_of_recurrence_rationale = build_recurrence_rationale(recurrence_info)
+
+    capa = CapaAnalysis(
+        status=CapaStatus.INVESTIGATION_REQUIRED,
+        potential_areas=plan.areas,
+        recommended_investigation=[
+            "Verify the candidate causal hypotheses above through objective record investigation."
+        ],
+        conditional_actions=build_conditional_capa_actions(hyps, clean_noun, topic),
+    )
+    ca_draft = build_ca_draft(_derive_ca_draft_fields(root_cause, impact, canonical))
+    ipo = None if getattr(state.get("investigation_plan"), "status", None) == "NO_ACTIONABLE_UNCERTAINTY" else plan
+    return root_cause, five_why, [], impact, capa, ca_draft, ipo
 
 
 async def core_synthesis_node(state: AgentState) -> AgentState:
@@ -1755,9 +1889,26 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
     import uuid
     _request_id = uuid.uuid4().hex[:8]
     synthesis_execution["request_id"] = _request_id
+
+    # Pass 29 §2/§20: when the validated canonical semantic interpretation
+    # already carries the causal state (it always sets root_cause_status, and
+    # the validator only returns a context when the core semantic fields are
+    # sound), the synthesis LLM call would only RE-DERIVE hypotheses / 5-Why /
+    # mechanism the canonical model already produced. Skip it -- consume the
+    # canonical structured state directly. NOT a deterministic semantic
+    # classifier: the semantics are the canonical LLM's; this branch only
+    # propagates and grades them through the existing deterministic helpers.
+    _sc_ctx = state.get("canonical_semantic_context")
+    _use_canonical_causal = _sc_ctx is not None and bool(
+        str(getattr(_sc_ctx, "root_cause_status", "") or "").strip()
+    )
+    synthesis_execution["synthesis_llm_calls"] = 0 if _use_canonical_causal else None
+
     llm_metrics.increment("llm_primary_attempted")
 
     try:
+        if _use_canonical_causal:
+            raise _CanonicalCausalReady()
         # Section 1/2: compact schema/prompt, sufficient-not-excessive token
         # ceiling. A response that fills the whole budget and still parses
         # as valid, schema-conformant JSON is ACCEPTED below -- reaching the
@@ -1869,6 +2020,36 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         synthesis_execution["recovery_used"] = False
         trace.append(AgentTraceStep.ok(
             "Core synthesis: primary LLM call produced verified causal analysis (RCA, 5-Why, Impact, CAPA)."
+        ))
+
+    except _CanonicalCausalReady:
+        # Pass 29 §2: NO synthesis LLM call. Consume the canonical semantic
+        # interpretation's causal state directly.
+        root_cause, five_why, contributing_factors, impact, capa, ca_draft, investigation_plan_override = (
+            _synthesize_from_canonical_state(
+                state=state, canonical=canonical, finding_text=request.finding_text,
+                evidence_ledger=evidence_ledger, observed_deviation=observed_deviation,
+                has_unresolved_conflict=has_unresolved_conflict,
+            )
+        )
+        recovery_used = False
+        provider_used = None
+        fallback_used = False
+        provider_attempts = []
+        analysis_mode = "LLM"
+        analysis_engine = "LLM"
+        synthesis_execution["source"] = "CANONICAL_STATE"
+        synthesis_execution["recovery_used"] = False
+        synthesis_execution["synthesis_llm_calls"] = 0
+        llm_metrics.increment("core_synthesis_canonical_state_reused")
+        llm_metrics.record_execution(
+            request_id=_request_id, node="core_synthesis", model="canonical_semantic_state",
+            phase="canonical_reuse",
+        )
+        trace.append(AgentTraceStep.ok(
+            "Core synthesis: consumed the canonical semantic interpretation's causal state "
+            "directly (root cause / 5-Why / hypotheses / investigation) — no redundant "
+            "synthesis LLM call."
         ))
 
     except Exception as primary_exc:

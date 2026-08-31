@@ -47,9 +47,19 @@ class LLMClient(Protocol):
     ) -> str: ...
 
 
-def get_llm_client(timeout_seconds: float | None = None) -> LLMProvider:
-    """Returns the authoritative LLM provider (Ollama, Copilot, or Cloud Router)."""
-    return get_llm_provider(timeout_seconds=timeout_seconds)
+def get_llm_client(
+    timeout_seconds: float | None = None, model: str | None = None
+) -> LLMProvider:
+    """Returns the authoritative LLM provider (Ollama, Copilot, or Cloud Router).
+
+    `model` (spec Pass 49 §18): optional per-call model override on the SAME
+    configured provider -- lets the two semantic stages use a stronger model
+    without touching code or switching providers. `None`/"" -> the global
+    configured model. This is configuration authority, never an automatic
+    silent switch.
+    """
+    _m = (model or "").strip() or None
+    return get_llm_provider(timeout_seconds=timeout_seconds, model=_m)
 
 
 __all__ = [

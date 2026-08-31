@@ -165,6 +165,9 @@ def _enforce_result_consistency(result: RemediationCostResult) -> RemediationCos
     if result.status == RemediationEstimateStatus.NOT_ASSESSABLE:
         result.one_time_cost = None
         result.recurring_cost = None
+        result.recurring_horizon_total = None
+        result.recurring_horizon = None
+        result.recurring_horizon_basis = ""
         result.low_estimate = None
         result.most_likely_estimate = None
         result.high_estimate = None
@@ -405,7 +408,12 @@ async def estimate_remediation_cost(
         return _scope_only_result(status, "")
 
     try:
-        valid_evidence_ids = {f"E{i}" for i in range(len(evidence_ledger))}
+        # The FINDING text is always a valid citable pricing source (spec Pass
+        # 51 sections 3-6/17-18): a rate/price/quantity/recurrence stated in the
+        # finding is evidence. Without this, a finding whose pricing facts live
+        # in its own text (no separate evidence ledger) can never be priced --
+        # every stated rate is stripped as "unanchored".
+        valid_evidence_ids = {f"E{i}" for i in range(len(evidence_ledger))} | {"FINDING"}
         # EVIDENCE-REFERENCE RESOLUTION (spec §2/§6/§22): the context block
         # feeds evidence as E0/E1/..., but a finding whose own text labels its
         # claims ("C1: ...", "C2: ...") leads the model to cite "C1"/"C2".
@@ -437,6 +445,10 @@ async def estimate_remediation_cost(
             _ref_alias.setdefault(str(_i), _eid)
             _ref_alias.setdefault(str(_i + 1), _eid)
             _ref_alias.setdefault(f"C{_i + 1}", _eid)
+        # Common ways a model refers to the finding text itself -> the reserved
+        # "FINDING" id (spec Pass 51 section 6). Structural id bookkeeping only.
+        for _alias in ("FINDING", "FINDINGTEXT", "THEFINDING", "F0", "F1", "FIND"):
+            _ref_alias.setdefault(_alias, "FINDING")
         if _ref_alias:
             def _canon_ref(r: str) -> str:
                 rr = str(r or "").strip()
@@ -465,7 +477,7 @@ async def estimate_remediation_cost(
 
     # --- Overall status.
     has_evidence_backed_component = any(
-        c.unit_cost_basis in ("VERIFIED", "REPORTED") or c.quantity_basis == "EVIDENCED"
+        c.unit_cost_basis in ("VERIFIED", "REPORTED") or c.quantity_basis in ("EVIDENCED", "DERIVED")
         for c in components
     )
     bounded = (
@@ -551,12 +563,63 @@ async def estimate_remediation_cost(
     else:
         overall = RemediationEstimateStatus.ASSUMPTION_BASED
 
+    # --- §8 NO SILENT DROPPING. The canonical interpretation's own
+    #     `pricing_information` lists the monetary values it identified as
+    #     pricing inputs for each established remediation activity. If a
+    #     material amount it named is NOT reflected in any priced component
+    #     (the pricing LLM lost it -- a known weak-model failure on a
+    #     multi-price activity), the estimate is NOT a clean EXACT: surface the
+    #     unaccounted amount and mark the result PARTIAL. Structural provenance
+    #     cross-check of two LLM outputs -- no keyword rule, no hard-coded value.
+    _dropped_pricing_inputs: list[str] = []
+    if _sc_remediation:
+        _priced_values: list[float] = []
+        for cr in est.component_results:
+            for v in (getattr(cr, "unit_cost", None), getattr(cr, "calculated_amount", None)):
+                if isinstance(v, (int, float)) and v:
+                    _priced_values.append(float(v))
+        _cur = est.currency or ""
+        for _pi in (getattr(_sc, "pricing_information", []) or []):
+            # `observed_value_in_finding` is the concrete monetary value the
+            # canonical layer read from the finding for this activity -- present
+            # regardless of the (unreliable) `evidence_available` judgement.
+            _txt = " ".join(str(getattr(_pi, f, "") or "") for f in
+                            ("observed_value_in_finding", "rationale"))
+            for _m in re.finditer(r"(\d[\d,]{3,})(?:\.\d+)?", _txt):
+                try:
+                    _val = float(_m.group(1).replace(",", ""))
+                except ValueError:
+                    continue
+                if _val < 1000:
+                    continue
+                if any(abs(_val - pv) < 0.5 or (pv and abs(_val - pv) / max(_val, pv) < 0.01)
+                       for pv in _priced_values):
+                    continue
+                # also skip a value that is a plausible quantity x rate product
+                # of two priced values (already captured indirectly)
+                _label = f"{_cur + ' ' if _cur else ''}{_val:g}"
+                if _label not in _dropped_pricing_inputs:
+                    _dropped_pricing_inputs.append(_label)
+        if _dropped_pricing_inputs:
+            logger.info(
+                "Remediation cost: %d pricing input(s) the canonical interpretation identified "
+                "are not reflected in the priced components (%s) -- estimate treated as PARTIAL.",
+                len(_dropped_pricing_inputs), ", ".join(_dropped_pricing_inputs),
+            )
+
     # Partial: some cost driver is priced and some remaining work (an unpriced
     # activity OR an unresolved pricing driver) is not. Component-level so it
     # does not depend on how a driver was reconciled.
     _unpriced_component_ids = set(est.unpriced_component_ids)
     is_partial = bounded and bool(_priced_ids) and (
-        bool(_unpriced_established_acts) or bool(_unpriced_component_ids)
+        bool(_unpriced_established_acts)
+        or bool(_unpriced_component_ids)
+        # A stated subtotal/total that does not reconcile with the itemised
+        # components is a genuine uncertainty -- never a clean EXACT estimate
+        # (Pass 30 §8/§10). No silent drop of the conflicting figure.
+        or getattr(est, "has_reconciliation_conflict", False)
+        # A pricing input the canonical layer named but the pricing LLM lost.
+        or bool(_dropped_pricing_inputs)
     )
 
     # --- Confidence.
@@ -614,6 +677,14 @@ async def estimate_remediation_cost(
             f"{'' if len(_unresolved_drivers) == 1 else 's'} could not be associated with a "
             "specific implementation activity and appear under cost drivers only."
         )
+    if _dropped_pricing_inputs:
+        uncertainty.append(
+            "The interpretation identified the following stated pricing input(s) that are "
+            f"not reflected in the priced components above: {', '.join(_dropped_pricing_inputs)}. "
+            "The estimate covers only the priced items -- confirm these amounts are included."
+        )
+        if confidence == RemediationConfidence.HIGH:
+            confidence = RemediationConfidence.MEDIUM
 
     # --- Strategy wording.
     # SINGLE SOURCE OF TRUTH (spec §20/§22): when the canonical interpretation
@@ -664,6 +735,9 @@ async def estimate_remediation_cost(
             one_time_cost=est.one_time_cost,
             recurring_cost=est.recurring_cost,
             recurring_period=est.recurring_period,
+            recurring_horizon_total=est.recurring_horizon_total,
+            recurring_horizon=est.recurring_horizon,
+            recurring_horizon_basis=est.recurring_horizon_basis,
             low_estimate=est.low,
             most_likely_estimate=est.most_likely,
             high_estimate=est.high,
@@ -688,6 +762,15 @@ async def estimate_remediation_cost(
     result.unresolved_pricing_drivers = [
         RemediationUnresolvedDriver(component_id=d.component_id, description=d.description)
         for d in _unresolved_drivers
+    ] + [
+        RemediationUnresolvedDriver(
+            component_id=f"CANON_PI_{i}",
+            description=(
+                f"{amt} -- identified by the canonical interpretation as a pricing input but "
+                "not reflected in any priced component"
+            ),
+        )
+        for i, amt in enumerate(_dropped_pricing_inputs)
     ]
 
     # Consistency with the canonical remediation-obligation verdict (spec §8/§13):
@@ -744,13 +827,14 @@ async def estimate_remediation_cost(
                 "(its own text states pricing is established) for activity %r.", _act[:80],
             )
             continue
-        # NO MANUFACTURED PRECISION: a "missing input" is a description of the
-        # evidence needed, never a value. Drop an entry that smuggles a
-        # concrete figure (currency symbol, or a 3+ digit run) into the
-        # evidence text.
+        # NO MANUFACTURED PRECISION (Pass 30 §11): the MISSING input is a
+        # description of the evidence needed -- never a value. Drop an entry
+        # that smuggles a concrete figure (currency symbol, or a 3+ digit run)
+        # into `missing_input` / `acceptable_evidence`. `current_pricing_
+        # evidence` LEGITIMATELY restates a KNOWN evidence amount ("Rs.3,000
+        # per refrigerator") and is NOT screened.
         _blob = " ".join(str(getattr(_air, f, "") or "") for f in
-                         ("missing_input", "current_pricing_evidence", "why_required",
-                          "acceptable_evidence"))
+                         ("missing_input", "acceptable_evidence"))
         if any(sym in _blob for sym in ("₹", "$", "€", "£", "¥")) or re.search(r"\d[\d,]{2,}", _blob):
             continue
         _valid_air.append(RemediationAuditorInput(

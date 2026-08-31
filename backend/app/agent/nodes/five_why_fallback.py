@@ -55,11 +55,14 @@ def build_deterministic_five_why(
     # (authoritative, post-merge) -- resolve_deviation() is deferred so a
     # competing-causes finding never triggers a redundant deterministic
     # re-parse.
+    # Spec Pass 47 §5/§6: on the canonical-success path the canonical LLM's
+    # own `stated_causal_alternatives` is authoritative -- the deterministic
+    # raw-text extractor (`_esca0`) is a FALLBACK disjunct that runs ONLY when
+    # there is no canonical context.
     from app.agent.causal_guard import extract_stated_causal_alternatives as _esca0
-    _early_alts = (
-        list(getattr(canonical_state, "stated_causal_alternatives", []) or [])
-        or _esca0(finding_text)
-    )
+    _early_alts = list(getattr(canonical_state, "stated_causal_alternatives", []) or [])
+    if not _early_alts and semantic_context is None:
+        _early_alts = _esca0(finding_text)
     if len(_early_alts) >= 2:
         from app.services.semantic_subject import (
             _strip_framing as _sf0,
@@ -68,7 +71,8 @@ def build_deterministic_five_why(
         _cf_subj = getattr(canonical_state, "finding_subject", None)
         _cf_cond = getattr(canonical_state, "deviation_condition", None)
         _cf_obs = getattr(canonical_state, "observed_deviation", None)
-        if not (_cf_subj and _cf_cond):
+        if not (_cf_subj and _cf_cond) and semantic_context is None:
+            # FALLBACK-ONLY raw-text recovery of subject/condition.
             resolved = resolve_deviation(finding_text, fact_claims)
             _cf_subj = _cf_subj or getattr(resolved, "finding_subject", None)
             _cf_cond = _cf_cond or resolved.condition

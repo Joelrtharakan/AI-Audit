@@ -368,17 +368,11 @@ async def generate_report_node(state: AgentState) -> AgentState:
     settings = get_settings()
     evidence_ledger = state.get("evidence_ledger", [])
 
-    # -- Internal-only financial context (never rendered as its own section).
-    financial_analysis = state.get("financial_analysis")
-    if financial_analysis is None:
-        financial_analysis = analyze_financial_exposure(
-            finding_text=finding_text,
-            evidence_ledger=evidence_ledger,
-            evidence_claims=evidence_claims,
-        )
-        financial_analysis.reasoning_source = "DETERMINISTIC_REGEX"
-
-    # -- Remediation Cost Estimate: the authoritative auditor-facing cost section.
+    # -- Remediation Cost Estimate: the authoritative auditor-facing cost
+    #    section. Computed BEFORE the financial-exposure engine (Pass 29
+    #    §9-§13) so its priced cost components can tell the financial engine
+    #    which monetary amounts are EXPECTED remediation cost -- never an
+    #    incurred loss. Neither depends on the other's result.
     remediation_cost = state.get("remediation_cost")
     _rem_reused = remediation_cost is not None
     _rem_ms = None
@@ -400,6 +394,39 @@ async def generate_report_node(state: AgentState) -> AgentState:
             from app.remediation.engine import honest_not_assessable
             remediation_cost = honest_not_assessable("LLM_UNAVAILABLE")
         _rem_ms = int((time.monotonic() - _t) * 1000)
+
+    # -- Internal-only financial-exposure context (never rendered as its own
+    #    section). The canonical LLM's pricing_information AND the priced
+    #    remediation cost components are the authority on which monetary
+    #    values are remediation-cost inputs -- an amount that appears there
+    #    is EXPECTED remediation expenditure, not an incurred DIRECT_LOSS
+    #    (Pass 29 §8-§13). Structural pass-through of LLM output, no rule.
+    financial_analysis = state.get("financial_analysis")
+    if financial_analysis is None:
+        _rem_cost_ctx: list[str] = []
+        _sc = state.get("canonical_semantic_context")
+        if _sc is not None:
+            for _p in (getattr(_sc, "pricing_information", []) or []):
+                for _f in ("observed_value_in_finding", "pricing_basis", "rationale"):
+                    _v = getattr(_p, _f, None)
+                    if _v:
+                        _rem_cost_ctx.append(str(_v))
+        for _c in (getattr(remediation_cost, "cost_components", []) or []):
+            for _f in ("description", "calculation_formula", "rationale"):
+                _v = getattr(_c, _f, None)
+                if _v:
+                    _rem_cost_ctx.append(str(_v))
+            for _n in ("unit_cost", "quantity", "calculated_amount"):
+                _v = getattr(_c, _n, None)
+                if _v is not None:
+                    _rem_cost_ctx.append(str(_v))
+        financial_analysis = analyze_financial_exposure(
+            finding_text=finding_text,
+            evidence_ledger=evidence_ledger,
+            evidence_claims=evidence_claims,
+            remediation_cost_context=_rem_cost_ctx or None,
+        )
+        financial_analysis.reasoning_source = "DETERMINISTIC_REGEX"
 
     logger.info(
         "REMEDIATION COST TIMING ms=%s reused=%s status=%s semantic_status=%s",
