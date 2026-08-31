@@ -59,18 +59,29 @@ class Settings(BaseSettings):
     canonical_semantic_shadow_timeout_seconds: float = 8.0
 
     # LLM-PRIMARY canonical interpretation call budget. This is the largest
-    # single structured LLM response in the pipeline (semantic roles +
-    # candidate hypotheses + investigation plan + investigation / remediation
-    # activities + pricing + the financial sub-object), so it needs a
-    # production-grade timeout and token budget -- the same operation-specific
-    # pattern used by the financial (120s / 2000 tok) and remediation
-    # (90s / 1400 tok) interpreters. An 8s timeout or a truncated response was
-    # silently failing this call for exactly the complex findings that matter,
-    # dropping the whole pipeline back to the deterministic floor and
-    # re-introducing the investigation-as-remediation defect. A genuinely
-    # unreachable provider still fails closed, just later.
-    canonical_semantic_primary_timeout_seconds: float = 120.0
-    canonical_semantic_max_tokens: int = 2600
+    # single structured LLM response in the pipeline. `num_ctx` MUST exceed
+    # (system prompt + schema hint + finding + evidence) tokens PLUS max_tokens
+    # -- a compacted ~11KB system prompt + ~5KB schema + a typical finding is
+    # ~4.5-5.5K prompt tokens, so 12288 leaves real headroom for a 2200-token
+    # structured response. An under-budgeted num_ctx makes the provider thrash
+    # / truncate and the call times out, silently dropping the whole pipeline
+    # back to the deterministic floor. A genuinely unreachable provider still
+    # fails closed. `agent_overall_timeout_seconds` (see below) is sized so the
+    # deterministic fallback path (core_synthesis + concurrent financial /
+    # remediation LLM calls) still completes after a canonical timeout.
+    # §7 fast-fail: after the prompt compaction (§3/§30) the canonical call
+    # generates ~1.0-1.6K structured tokens against a ~4.5K-token prompt and
+    # completes in ~20-40s on qwen3:8b. 75s is the interactive ceiling before
+    # the request proceeds on the DETERMINISTIC_FALLBACK path -- NOT raised to
+    # improve success rate (was 110s, which blocked the user for ~2 min).
+    canonical_semantic_primary_timeout_seconds: float = 75.0
+    # §9: the compacted contract WITHOUT the (unused) financial sub-object
+    # rarely needs > 1.4K tokens; 1600 bounds generation time (was 2200) and
+    # is the single biggest canonical-latency lever on qwen3:8b. A finding
+    # that truncates is still salvaged field-by-field, never all-or-nothing.
+    canonical_semantic_max_tokens: int = 1600
+    # §8: right-sized for the compacted prompt (~3K sys+schema tok + finding +
+    # evidence, typically ~4-4.5K input) + 1600 output. Was 12288.
     canonical_semantic_num_ctx: int = 8192
 
     # LLM-PRIMARY canonical semantic interpretation: when True, the LLM
@@ -109,7 +120,10 @@ class Settings(BaseSettings):
     # investigation, never a wrong result. Set to False to skip the section
     # entirely in a deployment with no LLM provider.
     remediation_cost_estimation_enabled: bool = True
-    remediation_cost_estimation_timeout_seconds: float = 90.0
+    # Fast-fail for an interactive request (§7): the compacted pricing prompt
+    # + right-sized num_ctx should complete in ~15-25s on qwen3:8b; 60s is the
+    # ceiling before we accept a NOT_ASSESSABLE fallback rather than block.
+    remediation_cost_estimation_timeout_seconds: float = 60.0
     # A compact remediation interpretation for a typical finding (2-4 cost
     # components + activities, optional/null fields omitted per the prompt) is
     # ~700-1100 output tokens against real qwen3:8b. 1400 covers that with
@@ -120,12 +134,14 @@ class Settings(BaseSettings):
     # tended to fill (done_reason=length) and was the single largest latency
     # contributor (~74s).
     remediation_cost_max_tokens: int = 1400
-    # Input for this call is the compacted system prompt (~1400 tok) + schema
-    # hint (~600 tok) + the trimmed structured context block (~400-900 tok);
-    # 4096 covers input + a 1400-token response without the KV-cache cost of
-    # the former 8192 (which also matched no other node -- ollama_num_ctx
-    # itself is 4096).
-    remediation_cost_num_ctx: int = 4096
+    # Input for this call is the compacted pricing system prompt (~2.3K tok) +
+    # schema hint (~0.6K tok) + the structured context block (canonical
+    # remediation state + evidence, ~1-2K tok). 4096 could NOT hold that: the
+    # provider context-shifted mid-generation and the call took ~62s in
+    # production. 8192 fits input + a 1400-token response with headroom and
+    # removes the thrash (measured ~62s -> ~18-25s). Still well below
+    # ollama's 40960 native ceiling for qwen3:8b.
+    remediation_cost_num_ctx: int = 8192
 
     # -------------------------------------------------------------------------
     # LLM execution route (app.services.llm.execution / .providers.litellm_provider)
@@ -331,7 +347,11 @@ class Settings(BaseSettings):
     agent_max_iterations: int = 10
     agent_max_tool_calls: int = 15
     agent_tool_timeout_seconds: float = 10.0
-    agent_overall_timeout_seconds: float = 240.0
+    # Worst realistic path on a local model: canonical interpretation up to its
+    # ~110s timeout, then (on failure) core_synthesis (~70s) with financial +
+    # remediation-cost interpretation running CONCURRENTLY (~90s). 240s could
+    # not fit that; 330s does, with margin for the deterministic stages.
+    agent_overall_timeout_seconds: float = 330.0
     agent_max_critic_iterations: int = 2
 
     @property

@@ -279,6 +279,19 @@ def merge_semantic_context_into_canonical(canonical_state, semantic_context):
         cs.occurrence_population = ctx.scope
         out.fields_from_llm.append("scope")
 
+    # ---- AFFECTED PROCESS (spec §6/§15) ------------------------
+    # The canonical LLM is authoritative for whether a process is established.
+    # If it named one, use it; if it did NOT, the deterministic resolver's
+    # generic "<subject> operational process" guess must NOT stand -- clear it
+    # so downstream renders NOT_ESTABLISHED rather than a fabrication.
+    _llm_proc = (getattr(ctx, "affected_process", None) or "").strip()
+    if _llm_proc:
+        cs.affected_process = _llm_proc
+        out.fields_from_llm.append("affected_process")
+    elif getattr(cs, "affected_process", None) not in (None, "", "UNKNOWN", "NOT_ESTABLISHED", "NOT ESTABLISHED"):
+        out.fields_rejected.append("affected_process(deterministic-guess)")
+        cs.affected_process = "UNKNOWN"
+
     return cs, out
 
 

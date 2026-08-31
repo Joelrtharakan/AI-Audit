@@ -469,13 +469,19 @@ def _from_canonical(
         disp = str(getattr(a, "disposition", "") or "")
         kind = _DISPOSITION_TO_KIND.get(disp, KIND_SYSTEMIC_STRENGTHENING)
         depends = bool(getattr(a, "depends_on_root_cause", False))
+        # A DIRECT correction (IMMEDIATE_CORRECTION / CONTAINMENT) of the
+        # established condition is NEVER conditionalised by root-cause
+        # uncertainty and "replace/restore the damaged X" is the correction --
+        # not an "unsupported concrete intervention" (spec §4/§6/§10). The
+        # unsupported-intervention guard applies ONLY to systemic activities.
+        _is_direct = disp in ("IMMEDIATE_CORRECTION", "CONTAINMENT")
         conditional = (
             disp == "CONDITIONAL_SYSTEMIC"
             or depends
-            or (contingent and kind == KIND_SYSTEMIC_STRENGTHENING)
-            or (contingent and is_unsupported_concrete_intervention(desc))
+            or (contingent and not _is_direct and kind == KIND_SYSTEMIC_STRENGTHENING)
+            or (contingent and not _is_direct and is_unsupported_concrete_intervention(desc))
         )
-        if conditional and kind == KIND_SYSTEMIC_STRENGTHENING and contingent \
+        if conditional and not _is_direct and kind == KIND_SYSTEMIC_STRENGTHENING and contingent \
                 and is_unsupported_concrete_intervention(desc):
             desc = conditional_systemic_sentence or desc
         out.append(CanonicalActivity(
@@ -512,15 +518,26 @@ def _from_llm_activities(
         desc = (getattr(a, "description", "") or "").strip()
         if not desc:
             continue
-        desc = hedge_causal_directive(desc, contingent)
-        hyp = bool(getattr(a, "is_hypothetical", False))
+        # The cost LLM's own semantic role for this activity (fallback path).
+        # A DIRECT correction of the established condition (IMMEDIATE_CORRECTION /
+        # CONTAINMENT) is NEVER conditionalised by root-cause uncertainty and is
+        # never treated as an "unsupported concrete intervention" -- restoring a
+        # damaged established item IS the correction (spec §2/§3/§5). The
+        # unsupported-intervention / systemic-injection path applies only to
+        # non-direct activities. Mirrors `_from_canonical` (pass 25).
+        _disp = str(getattr(a, "disposition", "") or "")
+        _is_direct = _disp in ("IMMEDIATE_CORRECTION", "CONTAINMENT")
+        desc = desc if _is_direct else hedge_causal_directive(desc, contingent)
+        hyp = bool(getattr(a, "is_hypothetical", False)) or bool(
+            getattr(a, "depends_on_root_cause", False)
+        )
         # An activity the LLM says it derived from an UNCONFIRMED root-cause
         # hypothesis is, by its own provenance, cause-dependent.
-        if contingent and str(getattr(a, "derived_from", "")) == "ROOT_CAUSE_HYPOTHESIS":
+        if contingent and not _is_direct and str(getattr(a, "derived_from", "")) == "ROOT_CAUSE_HYPOTHESIS":
             hyp = True
         aid = str(getattr(a, "activity_id", "") or f"A{len(out)}")
 
-        if contingent and is_unsupported_concrete_intervention(desc):
+        if contingent and not _is_direct and is_unsupported_concrete_intervention(desc):
             if not injected_systemic:
                 _add(CanonicalActivity(
                     id="CSYS",
@@ -536,11 +553,13 @@ def _from_llm_activities(
                 injected_systemic = True
             continue
 
-        kind = classify_activity_kind(desc)
+        kind = _DISPOSITION_TO_KIND.get(_disp) if _disp else None
+        if kind is None:
+            kind = classify_activity_kind(desc)
         conditional = (
             hyp
-            or bool(_ALREADY_HEDGED_RE.search(desc))
-            or (contingent and kind == KIND_SYSTEMIC_STRENGTHENING)
+            or (not _is_direct and bool(_ALREADY_HEDGED_RE.search(desc)))
+            or (contingent and not _is_direct and kind == KIND_SYSTEMIC_STRENGTHENING)
         )
         _add(CanonicalActivity(
             id=aid,

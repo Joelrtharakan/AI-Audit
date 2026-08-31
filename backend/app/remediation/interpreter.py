@@ -48,7 +48,8 @@ _SCHEMA_HINT = (
     '"hypothetical_basis":str,"alternative_strategies":[str],"interpretation_confidence":"HIGH|MEDIUM|LOW"},'
     '"activities":[{"activity_id":str(required),"description":str(required),'
     '"derived_from":"FINDING|EVIDENCE|ROOT_CAUSE_HYPOTHESIS|RECOMMENDED_CAPA|IMPACT|CONTEXT",'
-    '"source_reference_ids":[str],"is_hypothetical":bool}],'
+    '"disposition":"IMMEDIATE_CORRECTION|CONTAINMENT|CORRECTIVE_ACTION|CONDITIONAL_SYSTEMIC|EFFECTIVENESS_CHECK",'
+    '"depends_on_root_cause":bool,"source_reference_ids":[str],"is_hypothetical":bool}],'
     '"cost_components":[{"component_id":str(required),"description":str(required),"activity_ids":[str],'
     '"cost_category":str,"quantity":num,"quantity_unit":str,'
     '"quantity_basis":"EVIDENCED|ASSUMED|NOT_ESTABLISHED",'
@@ -59,12 +60,18 @@ _SCHEMA_HINT = (
     '"recurrence":"ONE_TIME|RECURRING","recurring_period":str,'
     '"source_reference_ids":[str],"assumptions":[str],"rationale":str}],'
     '"calculation_proposals":[{"calculation_id":str(required),"operation":"MULTIPLY|SUM|SUBTRACT",'
-    '"component_ids":[str],"produces":"LOW|MOST_LIKELY|HIGH|COMPONENT_AMOUNT","reason":str}],'
+    '"component_ids":[str],"produces":"LOW|MOST_LIKELY|HIGH|COMPONENT_AMOUNT (EXACTLY one -- never TOTAL/SUM)","reason":str}],'
     '"overall_status":"EVIDENCE_BACKED|ASSUMPTION_BASED|NOT_ASSESSABLE",'
     '"estimability":"ESTIMABLE|BOUNDED_ONLY|SINGLE_VERIFIED_COST|NOT_ASSESSABLE",'
     '"not_assessable_reason":"IMPLEMENTATION_SCOPE_UNKNOWN|QUANTITY_UNKNOWN|PRICING_BASIS_UNAVAILABLE|'
     'REMEDIATION_NOT_DEFINED|CONFLICTING_EVIDENCE|INSUFFICIENT_EVIDENCE",'
-    '"range_assumptions":[str],"uncertainty_reasons":[str],"evidence_improves_estimate":[str]}'
+    '"range_assumptions":[str],"uncertainty_reasons":[str],"evidence_improves_estimate":[str],'
+    '"auditor_inputs_required":[{"remediation_activity":str(one of the canonical activities '
+    'verbatim),"current_pricing_evidence":str,"missing_input":str(the specific evidence '
+    'needed -- NEVER a number/rate/amount),"why_required":str,"acceptable_evidence":str(e.g. '
+    '"supplier quotation" OR "approved internal rate + authorised effort estimate" OR '
+    '"fixed-price service quotation"),"enables_estimate_type":"EXACT_ESTIMATE|RANGE_ESTIMATE|'
+    'PARTIAL_ESTIMATE"}]}'
 )
 
 
@@ -161,13 +168,38 @@ def _context_block(
             lines.append("REMEDIATION REASONING (from the canonical interpretation "
                          "-- consume this, do not re-interpret the finding):\n" + "\n".join(_rr))
             lines.append("")
+    else:
+        # Fallback path: the upstream semantic interpretation is unavailable, so
+        # NO canonical remediation activities are supplied. In this path YOU are
+        # the only semantic reasoner -- identify the remediation activities
+        # directly from the finding + evidence, and PRICE every activity that
+        # has a grounded basis in the evidence. Do NOT read the absence of a
+        # canonical activity list as "price nothing", and do NOT divert an
+        # established price into auditor_inputs_required.
+        lines.append(
+            "REMEDIATION REASONING: no upstream remediation activities were supplied "
+            "(the semantic interpretation is unavailable). Identify the remediation "
+            "activities yourself from the finding + evidence below, emit an `activities` "
+            "entry for each, and emit `cost_components` (with cited E-ids) for every "
+            "activity whose pricing basis the evidence already establishes. Only use "
+            "`auditor_inputs_required` for an activity that genuinely lacks a pricing basis."
+        )
+        lines.append("")
 
+    import re as _re
+    _label_re = _re.compile(r"^\s*([A-Za-z]{1,4}\s?\d+)\s*[:.)\]\-]")
     ev_lines = []
     for idx, item in enumerate(evidence_ledger or []):
         status = getattr(getattr(item, "status", None), "value", None) or "UNVERIFIED"
         claim = getattr(item, "claim", None) or getattr(item, "text", "") or str(item)
-        ev_lines.append(f"E{idx} [{status}]: {_clip(claim)}")
-    lines.append("EVIDENCE:\n" + ("\n".join(ev_lines) if ev_lines else "(none)"))
+        _m = _label_re.match(str(claim))
+        _id = f"E{idx}" + (f" ({_m.group(1).replace(' ', '').upper()})" if _m else "")
+        ev_lines.append(f"{_id} [{status}]: {_clip(claim)}")
+    lines.append(
+        "EVIDENCE (inspect EVERY item for prices, rates, quantities, effort, units and "
+        "currency BEFORE deciding any pricing input is missing -- cite items by their "
+        "E-id):\n" + ("\n".join(ev_lines) if ev_lines else "(none)")
+    )
     lines.append("")
 
     if root_cause is not None:
@@ -265,6 +297,9 @@ async def interpret_remediation(
         logger.warning("Remediation cost interpretation: prompt build failed (%s).", exc)
         return "LLM_UNAVAILABLE", None
 
+    _prompt_chars = sum(len(m.get("content", "")) for m in messages)
+    import time as _time
+    _t0 = _time.monotonic()
     try:
         raw = await llm_client.chat_completion(
             messages,
@@ -276,8 +311,20 @@ async def interpret_remediation(
             timeout_seconds=effective_timeout,
         )
     except (LLMError, Exception) as exc:  # noqa: BLE001 - fail-closed by design
-        logger.info("Remediation cost interpretation unavailable (%s).", exc)
+        logger.info(
+            "REMEDIATION COST INTERPRETATION status=LLM_UNAVAILABLE latency_ms=%d "
+            "prompt_chars=%d num_ctx=%s max_tokens=%s timeout_s=%s (%s)",
+            int((_time.monotonic() - _t0) * 1000), _prompt_chars,
+            settings.remediation_cost_num_ctx, settings.remediation_cost_max_tokens,
+            effective_timeout, exc,
+        )
         return "LLM_UNAVAILABLE", None
+    logger.info(
+        "REMEDIATION COST INTERPRETATION status=OK latency_ms=%d prompt_chars=%d "
+        "response_chars=%d num_ctx=%s max_tokens=%s timeout_s=%s",
+        int((_time.monotonic() - _t0) * 1000), _prompt_chars, len(str(raw or "")),
+        settings.remediation_cost_num_ctx, settings.remediation_cost_max_tokens, effective_timeout,
+    )
 
     try:
         parsed = parse_llm_json(raw)

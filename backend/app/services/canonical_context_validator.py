@@ -373,19 +373,55 @@ def _validate_llm_reasoning_fields(
         ctx.leading_hypothesis_id = None
 
     # ---- CANDIDATE HYPOTHESES ------------------------------------------
-    # Role = HYPOTHESIS: a possible explanation. Not gated on finding
-    # vocabulary. Only constrained on epistemic status and de-duplicated;
-    # every finding-enumerated alternative is guaranteed present, POSSIBLE,
-    # and never ranked.
+    # Role = HYPOTHESIS: a possible explanation of WHY the condition occurred.
+    # PRIMARY gate (spec §3): the LLM's OWN `semantic_role` -- keep only
+    # CAUSAL_MECHANISM (a finding-enumerated alternative is always kept, §13).
+    # A statement the model itself labels OBSERVATION_RESTATEMENT / CONSEQUENCE
+    # / OTHER_NON_CAUSAL_STATEMENT names no mechanism -> dropped.
+    # SAFETY net, ONLY when the model left `semantic_role` unset: the structural
+    # set-difference below (a paraphrase introduces no vocabulary of its own).
+    _OBS_FUNCTION_WORDS = {
+        "was", "were", "not", "been", "has", "have", "had", "did", "does", "the",
+        "and", "but", "that", "this", "with", "for", "are", "its", "will", "then",
+        "which", "such", "any", "all", "due", "yet",
+    }
+    _obs_vocab = (
+        _sig_words(ctx.finding_subject) | _sig_words(ctx.observed_condition)
+        | _sig_words(getattr(ctx, "primary_deviation", None))
+    )
+    for _e in evidence_ledger:  # the raw evidence text is also "the observation"
+        _obs_vocab |= _sig_words(getattr(_e, "claim", ""))
+
+    def _restates_observation(statement: str) -> bool:
+        w = _sig_words(statement) - _OBS_FUNCTION_WORDS
+        if not w:
+            return True
+        _novel = w - _obs_vocab
+        # a genuine causal mechanism contributes >=2 concepts of its own
+        return len(_novel) < 2
+
     kept_hyps = []
     seen_ids: set[str] = set()
     seen_stmts: set[frozenset] = set()
+    _stated_alt_vocab = [
+        _sig_words(a) for a in (ctx.stated_causal_alternatives or []) if _sig_words(a)
+    ]
     for h in ctx.candidate_hypotheses:
         if h.hypothesis_id in seen_ids or not (h.statement or "").strip():
             continue
         _sk = frozenset(_sig_words(h.statement))
         if _sk and _sk in seen_stmts:
             continue
+        # keep finding-enumerated alternatives; drop non-causal statements.
+        _is_stated_alt = bool(h.from_finding_text) or any(
+            av and av <= _sig_words(h.statement) for av in _stated_alt_vocab
+        )
+        if not _is_stated_alt:
+            _role = getattr(h, "semantic_role", None)
+            if _role in ("OBSERVATION_RESTATEMENT", "CONSEQUENCE", "OTHER_NON_CAUSAL_STATEMENT"):
+                continue  # the model's own classification: not a causal mechanism
+            if _role is None and _restates_observation(h.statement):
+                continue  # safety net only when the model left the role unset
         seen_ids.add(h.hypothesis_id)
         if _sk:
             seen_stmts.add(_sk)
@@ -460,50 +496,63 @@ def _validate_llm_reasoning_fields(
     _cause_or_condition_established = (
         ctx.root_cause_status == "ESTABLISHED" or _has_verified_corrective_evidence
     )
+    # DIRECT REMEDIATION (spec §2/§3/§5): an activity the model classified as
+    # IMMEDIATE_CORRECTION / CONTAINMENT addresses the ESTABLISHED OBSERVED
+    # CONDITION -- it is valid independently of whether the CAUSE is confirmed.
+    # An unknown root cause must NOT strip this work. (Reads the model's own
+    # `disposition`, not the wording.)
+    _DIRECT_DISPOSITIONS = {"IMMEDIATE_CORRECTION", "CONTAINMENT"}
+    _has_direct_remediation = any(
+        (getattr(a, "disposition", "") or "") in _DIRECT_DISPOSITIONS
+        for a in ctx.remediation_activities
+    )
     # An UNRESOLVED COMPARISON whose competing mechanisms are not resolved and
-    # whose root cause is not established is a discrepancy to RECONCILE first --
-    # a corrective obligation is not yet supported regardless of what the model
-    # labelled it.
+    # whose root cause is not established -- and where the model did NOT
+    # establish any direct-correction work -- is a discrepancy to RECONCILE
+    # first, not a corrective obligation.
     _unresolved_discrepancy = bool(
         ctx.comparison is not None
         and ctx.causal_alternatives_unresolved
         and not _cause_or_condition_established
+        and not _has_direct_remediation
     )
 
     # NORMALISE the obligation against the model's OWN higher-level signals
-    # (spec INVARIANT 20 -- a downstream layer may downgrade / make explicit,
-    # never escalate). No verbs, no keywords.
+    # (spec §26 -- a downstream layer may downgrade / make explicit, never
+    # escalate). No verbs, no keywords.
     if _unresolved_discrepancy:
         ctx.remediation_obligation = "RECONCILIATION_REQUIRED"
     elif ctx.remediation_obligation == "NOT_DETERMINED":
-        # The model abstained. Resolve it from what it DID establish: a
-        # confirmed cause / verified corrective evidence -> a corrective
-        # obligation; otherwise the safe reading is that only investigation
-        # has been established so far.
-        ctx.remediation_obligation = (
-            "ESTABLISHED_CORRECTIVE_OBLIGATION" if _cause_or_condition_established
-            else "INVESTIGATION_REQUIRED"
-        )
+        if _cause_or_condition_established:
+            ctx.remediation_obligation = "ESTABLISHED_CORRECTIVE_OBLIGATION"
+        elif _has_direct_remediation:
+            # The model established DIRECT remediation of the observed condition
+            # even though the cause is unconfirmed (spec §3/§5/§18).
+            ctx.remediation_obligation = "IMMEDIATE_CORRECTION_ONLY"
+        else:
+            ctx.remediation_obligation = "INVESTIGATION_REQUIRED"
     elif (
         ctx.remediation_obligation == "ESTABLISHED_CORRECTIVE_OBLIGATION"
         and ctx.causal_alternatives_unresolved
         and not _cause_or_condition_established
     ):
         # A SYSTEMIC corrective obligation cannot be established while the
-        # competing mechanisms are unresolved.
+        # competing mechanisms are unresolved -- but any DIRECT correction the
+        # model established of the observed condition still stands.
         ctx.remediation_obligation = (
-            "RECONCILIATION_REQUIRED" if ctx.comparison is not None else "INVESTIGATION_REQUIRED"
+            "IMMEDIATE_CORRECTION_ONLY" if _has_direct_remediation
+            else "RECONCILIATION_REQUIRED" if ctx.comparison is not None
+            else "INVESTIGATION_REQUIRED"
         )
 
-    # INVARIANT 2 / 5 / 20: when the model's OWN obligation is
-    # investigation/reconciliation-only, NO remediation activity is established
-    # yet -- every activity it listed under remediation is premature and is
-    # preserved in `investigation_activities`, `remediation_activities` forced []
-    # (never dropped, never priced, never conditional). This enforces the
-    # model's own top-level decision against its own activity list; it is not a
-    # re-classification of the activities.
-    _remediation_not_established = ctx.remediation_obligation in (
-        "RECONCILIATION_REQUIRED", "INVESTIGATION_REQUIRED",
+    # No remediation is established ONLY when the obligation is
+    # investigation/reconciliation-only AND the model established no direct
+    # correction of the observed condition (spec §5: root-cause uncertainty is
+    # NOT a remediation gate). When it holds, activities the model put under
+    # remediation are preserved as investigation_activities, never dropped.
+    _remediation_not_established = (
+        ctx.remediation_obligation in ("RECONCILIATION_REQUIRED", "INVESTIGATION_REQUIRED")
+        and not _has_direct_remediation
     )
     _no_systemic_obligation = ctx.remediation_obligation in (
         "RECONCILIATION_REQUIRED", "INVESTIGATION_REQUIRED", "NO_SYSTEMIC_REMEDIATION_JUSTIFIED",
@@ -550,6 +599,22 @@ def _validate_llm_reasoning_fields(
             a.depends_on_root_cause = False
             _investigation.append(a)
             continue
+        # DIRECT REMEDIATION (spec §4/§6/§10/§23): the model classified this as
+        # a direct correction of the ESTABLISHED observed condition. Its
+        # necessity does NOT depend on the cause -- it is NOT conditionalised by
+        # root-cause uncertainty, and "replace/restore the damaged X" is the
+        # correction, not an "unsupported concrete intervention". The only
+        # epistemic guard that still applies: it must not assert an unverified
+        # cause as fact in its own wording.
+        if a.disposition in ("IMMEDIATE_CORRECTION", "CONTAINMENT"):
+            if contingent and _asserts_as_fact(act):
+                a.disposition = "CONDITIONAL_SYSTEMIC"
+                a.depends_on_root_cause = True
+            _remediation.append(a)
+            continue
+        # SYSTEMIC / CORRECTIVE (cause-dependent): CORRECTIVE_ACTION needs an
+        # established cause; a concrete new-resource prescription or a cause
+        # asserted as fact while the cause is unconfirmed -> CONDITIONAL.
         if contingent and a.disposition == "CORRECTIVE_ACTION":
             a.disposition = "CONDITIONAL_SYSTEMIC"
             a.depends_on_root_cause = True
@@ -558,8 +623,7 @@ def _validate_llm_reasoning_fields(
             or a.depends_on_root_cause
             or is_unsupported_concrete_intervention(act)
             or _asserts_as_fact(act)
-            or (_no_systemic_obligation and a.disposition not in (
-                "IMMEDIATE_CORRECTION", "CONTAINMENT", "EFFECTIVENESS_CHECK"))
+            or _no_systemic_obligation
         ):
             a.disposition = "CONDITIONAL_SYSTEMIC"
             a.depends_on_root_cause = True

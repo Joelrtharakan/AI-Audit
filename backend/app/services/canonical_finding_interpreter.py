@@ -44,79 +44,56 @@ CanonicalInterpretStatus = Literal[
     "UNEXPECTED_ERROR",
 ]
 
+# Field names + enums only. Semantics are in the system prompt -- do not
+# duplicate them here (every extra token is generation time). The `financial`
+# sub-object is intentionally NOT requested: the financial-exposure engine runs
+# its own separate interpretation; asking this call for it only slows it down.
 _SCHEMA_HINT = (
     '{"primary_deviation": str|null, "primary_deviation_claim_id": str|null, '
     '"primary_deviation_confidence": "HIGH"|"MEDIUM"|"LOW"|"NOT_ESTABLISHED", '
-    '"finding_subject": str|null (the substantive affected object/process/control/'
-    'activity -- NEVER a causal mechanism, hypothesis, evidence-source noun, '
-    'requirement text, or reported belief; null if none exists), '
-    '"subject_kind": "ENTITY"|"STATE"|"EVENT"|null, '
-    '"evidence_source": str|null (e.g. "maintenance records"), '
-    '"reported_observation": str|null (an action/state attributed to a source), '
-    '"observed_condition": str|null (what was observed about the subject), '
+    '"finding_subject": str|null, "subject_kind": "ENTITY"|"STATE"|"EVENT"|null, '
+    '"evidence_source": str|null, "reported_observation": str|null, '
+    '"observed_condition": str|null, '
     '"epistemic_status": "VERIFIED"|"REPORTED"|"BELIEF"|"INFERRED"|"UNKNOWN"|null, '
     '"comparison": {"left": str|null, "right": str|null, "reference": str|null, '
-    '"direction": "ABOVE"|"BELOW"|"MISMATCH"|"UNKNOWN", "magnitude": number|null, '
-    '"unit": str|null}|null, '
+    '"direction": "ABOVE"|"BELOW"|"MISMATCH"|"UNKNOWN", "magnitude": number|null, "unit": str|null}|null, '
     '"recurrence": {"count": int|null, "event": str|null, "period": str|null}|null, '
-    '"stated_causal_alternatives": [str] (mechanisms the FINDING TEXT explicitly '
-    'enumerates -- preserve every one, never rank, never erase), '
-    '"causal_alternatives_unresolved": bool, '
+    '"stated_causal_alternatives": [str], "causal_alternatives_unresolved": bool, '
     '"missing_record_status": "RECORD_EXISTS"|"RECORD_INCOMPLETE"|"RECORD_MISSING"|'
     '"RECORD_UNAVAILABLE"|"ACTIVITY_NOT_RECORDED"|"ACTIVITY_NOT_PERFORMED"|"UNKNOWN"|null, '
-    '"activity_performance_ambiguity": bool (true when it is open whether the '
-    'underlying activity occurred), '
-    '"affected_period": str|null, "scope": str|null, '
-    '"root_cause_status": "ESTABLISHED"|"NOT_ESTABLISHED"|"STATED_UNVERIFIED"|"CONTRADICTED" '
-    '(ESTABLISHED only when a VERIFIED causal claim fixes ONE mechanism), '
-    '"leading_hypothesis_id": str|null (null unless root_cause_status=ESTABLISHED), '
+    '"activity_performance_ambiguity": bool, '
+    '"affected_period": str|null, "affected_process": str|null, "scope": str|null, '
+    '"root_cause_status": "ESTABLISHED"|"NOT_ESTABLISHED"|"STATED_UNVERIFIED"|"CONTRADICTED", '
+    '"leading_hypothesis_id": str|null, '
     '"candidate_hypotheses": [{"hypothesis_id": str, "statement": str, '
+    '"semantic_role": "CAUSAL_MECHANISM"|"OBSERVATION_RESTATEMENT"|"CONSEQUENCE"|"OTHER_NON_CAUSAL_STATEMENT", '
     '"epistemic": "POSSIBLE"|"SUPPORTED"|"REFUTED"|"UNKNOWN", "from_finding_text": bool, '
     '"rationale": str|null, "discriminating_evidence": str|null, "source_evidence_ids": [str]}], '
     '"information_gaps": [str], '
     '"investigation_plan": [{"unknown": str, "why_it_matters": str|null, '
     '"evidence_that_would_resolve": str|null, "decision_enabled": str|null, '
     '"related_hypothesis_ids": [str], "priority": "HIGH"|"MEDIUM"|"LOW"}], '
-    '"remediation_obligation": "ESTABLISHED_CORRECTIVE_OBLIGATION"|'
-    '"RECONCILIATION_REQUIRED"|"INVESTIGATION_REQUIRED"|"IMMEDIATE_CORRECTION_ONLY"|'
-    '"NO_SYSTEMIC_REMEDIATION_JUSTIFIED"|"NOT_DETERMINED" '
-    '(has the EVIDENCE established an obligation to remediate? do NOT assume '
-    '"a finding exists therefore remediation exists"), '
+    '"remediation_obligation": "ESTABLISHED_CORRECTIVE_OBLIGATION"|"RECONCILIATION_REQUIRED"|'
+    '"INVESTIGATION_REQUIRED"|"IMMEDIATE_CORRECTION_ONLY"|"NO_SYSTEMIC_REMEDIATION_JUSTIFIED"|"NOT_DETERMINED", '
     '"remediation_obligation_rationale": str|null, '
-    '"investigation_activities": [{"action_id": str, "activity": str, '
-    '"disposition": "INVESTIGATION", "addresses_condition": str|null, '
-    '"justification": str|null}] '
-    '(reconcile/compare/verify/determine/establish work whose PURPOSE is to find '
-    'out what happened -- NOT remediation), '
+    '"investigation_activities": [{"action_id": str, "activity": str, "disposition": "INVESTIGATION", '
+    '"addresses_condition": str|null, "justification": str|null}], '
     '"remediation_activities": [{"action_id": str, "activity": str, '
-    '"disposition": "IMMEDIATE_CORRECTION"|"CONTAINMENT"|"CORRECTIVE_ACTION"|'
-    '"CONDITIONAL_SYSTEMIC"|"EFFECTIVENESS_CHECK" '
-    '(CORRECTIVE_ACTION only if root_cause_status=ESTABLISHED), '
-    '"addresses_condition": str|null (the established condition / confirmed cause '
-    'this corrects), "justification": str|null, "depends_on_root_cause": bool, '
-    '"pricing_evidence_needed": str|null, "scope_evidence_needed": str|null}] '
-    '(ONLY genuine correction -- MAY be [] when the task is still investigation), '
+    '"disposition": "IMMEDIATE_CORRECTION"|"CONTAINMENT"|"CORRECTIVE_ACTION"|"CONDITIONAL_SYSTEMIC"|"EFFECTIVENESS_CHECK", '
+    '"addresses_condition": str|null, "justification": str|null, "depends_on_root_cause": bool, '
+    '"pricing_evidence_needed": str|null, "scope_evidence_needed": str|null}], '
     '"immediate_actions": [str], "conditional_actions": [str], '
-    '"pricing_information": [{"action_id": str|null, "pricing_basis": str|null, '
-    '"rationale": str|null, "evidence_available": bool, '
-    '"observed_value_in_finding": str|null, "observed_value_is_remediation_cost": bool}], '
+    '"pricing_information": [{"action_id": str|null, "pricing_basis": str|null, "rationale": str|null, '
+    '"evidence_available": bool, "observed_value_in_finding": str|null, "observed_value_is_remediation_cost": bool}], '
     '"entities": [{"entity_id": str, "name": str, '
     '"kind": "ENTITY"|"STATE"|"EVENT"|"CONSEQUENCE"|"FINANCIAL_METRIC"|"HISTORICAL_CONTEXT"|'
     '"REMEDIATION"|"RECOVERY"|"CAUSE"|"HYPOTHESIS", "state": str|null, "source_evidence_ids": [str]}], '
-    '"causal_claims": [{"claim_id": str, "statement": str, "is_causal": bool, '
-    '"cause_ref": str|null, "effect_ref": str|null, "source_evidence_ids": [str], '
+    '"causal_claims": [{"claim_id": str, "statement": str, "is_causal": bool, "cause_ref": str|null, '
+    '"effect_ref": str|null, "source_evidence_ids": [str], '
     '"evidence_status": "VERIFIED"|"REPORTED"|"UNVERIFIED"|"CONTRADICTED"}], '
     '"explicit_previous_capa_reference": bool, "previous_capa_evidence_ids": [str], '
     '"evidence_boundaries": [{"description": str, "related_claim_ids": [str]}], '
-    '"unresolved_ambiguities": [str], '
-    '"financial": {"finding": {...}, "claims": [...], "relationships": [...], '
-    '"calculation_proposals": [...]} '
-    '(financial sub-object schema: same as the financial-only semantic interpreter -- '
-    'claims have claim_id/source_evidence_ids/fact_type/value/unit/currency/population/'
-    'temporal_scope/evidence_status/explicit; relationships have relationship_id/type/'
-    'source_claim/target_claim/confidence/evidence_basis; calculation_proposals have '
-    'calculation_id/operation/inputs/relationship_ids/proposed_result_value/'
-    'proposed_result_currency/reason)}'
+    '"unresolved_ambiguities": [str]}'
 )
 
 
@@ -188,14 +165,16 @@ async def interpret_finding_canonically_with_status(
         else settings.canonical_semantic_primary_timeout_seconds
     )
     _t0 = time.monotonic()
+    _prompt_chars = 0
 
     def _log(status: CanonicalInterpretStatus, *, resp_len: int = 0, detail: str = "") -> None:
         logger.info(
             "CANONICAL SEMANTIC INTERPRETATION status=%s latency_ms=%d timeout_s=%s "
-            "max_tokens=%s num_ctx=%s response_chars=%d%s",
+            "prompt_chars=%d max_tokens=%s num_ctx=%s response_chars=%d%s",
             status, int((time.monotonic() - _t0) * 1000), effective_timeout,
-            settings.canonical_semantic_max_tokens, settings.canonical_semantic_num_ctx,
-            resp_len, (f" detail={detail}" if detail else ""),
+            _prompt_chars, settings.canonical_semantic_max_tokens,
+            settings.canonical_semantic_num_ctx, resp_len,
+            (f" detail={detail}" if detail else ""),
         )
 
     try:
@@ -206,6 +185,7 @@ async def interpret_finding_canonically_with_status(
 
     try:
         messages = _build_messages(finding_text, evidence_ledger)
+        _prompt_chars = sum(len(m.get("content", "")) for m in messages)
     except Exception as exc:
         _log("PROMPT_BUILD_FAILED", detail=repr(exc))
         return "PROMPT_BUILD_FAILED", None

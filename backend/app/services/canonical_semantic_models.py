@@ -151,6 +151,15 @@ class SemHypothesis(BaseModel):
 
     hypothesis_id: str
     statement: str
+    # The LLM's OWN classification of what this statement IS (spec §3). Only a
+    # CAUSAL_MECHANISM (or a finding-enumerated alternative) is retained as a
+    # candidate hypothesis; a statement the model itself labels a restatement
+    # of the observation / a consequence / other non-causal content is dropped
+    # by the validator -- it explains no mechanism.
+    semantic_role: Literal[
+        "CAUSAL_MECHANISM", "OBSERVATION_RESTATEMENT", "CONSEQUENCE",
+        "OTHER_NON_CAUSAL_STATEMENT",
+    ] | None = None
     epistemic: HypothesisEpistemic = "POSSIBLE"
     from_finding_text: bool = False
     rationale: str | None = None
@@ -267,6 +276,11 @@ class CanonicalFindingContext(BaseModel):
     activity_performance_ambiguity: bool = False
 
     affected_period: str | None = None
+    # The specific process / operation the finding establishes as affected --
+    # ONLY when the evidence names or clearly implies one. NEVER a generic
+    # "<subject> operational process" fabrication; leave null if the evidence
+    # does not establish a process (spec §6/§15).
+    affected_process: str | None = None
     scope: str | None = None
 
     entities: list[CanonicalEntity] = Field(default_factory=list)

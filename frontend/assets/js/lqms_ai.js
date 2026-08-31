@@ -638,6 +638,25 @@
                 });
                 return h + "</ul>";
             };
+            // "Auditor Inputs Required for Estimate" -- activity-specific
+            // evidence the auditor must supply so the calculator can price an
+            // established but currently-unpriced remediation activity.
+            var rcAuditorInputs = function(rcx) {
+                var items = (rcx && rcx.auditor_inputs_required) || [];
+                if (!items.length) return "";
+                var h = "<div style='margin-top:10px;'><div style='font-size:11px; font-weight:800; color:#0369a1; text-transform:uppercase; letter-spacing:0.5px;'>Auditor Inputs Required for Estimate</div>";
+                items.forEach(function(it) {
+                    h += "<div style='margin:6px 0; padding:8px 10px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:6px; font-size:12px; color:#0f172a; line-height:1.5;'>";
+                    if (it.remediation_activity) h += "<div style='font-weight:700;'>" + safeEsc(it.remediation_activity) + "</div>";
+                    if (it.current_pricing_evidence) h += "<div style='color:#475569;'><strong>Available:</strong> " + safeEsc(it.current_pricing_evidence) + "</div>";
+                    if (it.missing_input) h += "<div style='color:#b45309;'><strong>Needed:</strong> " + safeEsc(it.missing_input) + "</div>";
+                    if (it.acceptable_evidence) h += "<div style='color:#475569;'><strong>Acceptable evidence:</strong> " + safeEsc(it.acceptable_evidence) + "</div>";
+                    if (it.why_required) h += "<div style='color:#64748b; font-style:italic;'>" + safeEsc(it.why_required) + "</div>";
+                    if (it.enables_estimate_type) h += "<div style='color:#64748b; font-size:11px;'>Once supplied &rarr; " + safeEsc(String(it.enables_estimate_type).replace(/_/g, " ")) + "</div>";
+                    h += "</div>";
+                });
+                return h + "</div>";
+            };
             var rcMoney = function(n, cur) {
                 if (!rcNum(n)) return null;
                 var c = cur || rc.currency || "";
@@ -692,12 +711,13 @@
                 }
                 html += "<div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>Cost</div>";
                 html += "<div style='font-size:12px; color:#475569; line-height:1.6; margin-bottom:6px;'><strong>Not assessable.</strong> " + safeEsc(rc.not_assessable_reason || "Remediation cost cannot be reliably estimated from the available evidence.") + "</div>";
-                if (rc.evidence_improves_estimate && rc.evidence_improves_estimate.length) {
+                if (rc.evidence_improves_estimate && rc.evidence_improves_estimate.length && (_remEmpty || !(rc.auditor_inputs_required && rc.auditor_inputs_required.length))) {
                     html += "<div style='margin-top:8px; font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>" + (_remEmpty ? "Evidence Needed to Establish Remediation Scope" : "Evidence Needed to Price Established Remediation") + "</div>";
                     html += "<ul style='margin:4px 0 0; padding-left:18px; font-size:12px; color:#475569; line-height:1.6;'>";
                     rc.evidence_improves_estimate.forEach(function(e) { html += "<li>" + safeEsc(e) + "</li>"; });
                     html += "</ul>";
                 }
+                html += rcAuditorInputs(rc);
             } else {
                 if (rc.remediation_strategy) {
                     html += "<div style='margin-bottom:10px;'><div style='font-size:11px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:0.5px;'>Remediation Approach</div>";
@@ -709,7 +729,13 @@
                 }
 
                 var rcLow = rcMoney(rc.low_estimate), rcMl = rcMoney(rc.most_likely_estimate), rcHigh = rcMoney(rc.high_estimate);
-                if (rcLow || rcMl || rcHigh) {
+                var rcExactTotal = (rc.pricing_status === "EXACT_ESTIMATE" && !rc.is_partial_estimate
+                    && rcNum(rc.low_estimate) && rcNum(rc.high_estimate) && rc.low_estimate === rc.high_estimate);
+                if (rcExactTotal && rcMl) {
+                    html += "<div style='background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:12px 16px; margin-bottom:10px;'>";
+                    html += "<div style='font-size:10px; font-weight:800; color:#15803d; text-transform:uppercase; letter-spacing:0.5px;'>Total Remediation Cost</div>";
+                    html += "<div style='font-size:20px; font-weight:800; color:#0f172a;'>" + rcMl + "</div></div>";
+                } else if (rcLow || rcMl || rcHigh) {
                     html += "<div style='display:flex; flex-wrap:wrap; gap:16px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 16px; margin-bottom:10px;'>";
                     if (rcLow) html += "<div><div style='font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase;'>Low</div><div style='font-size:14px; font-weight:800; color:#0f172a;'>" + rcLow + "</div></div>";
                     if (rcMl) html += "<div><div style='font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase;'>Most Likely</div><div style='font-size:16px; font-weight:800; color:#0f172a;'>" + rcMl + "</div></div>";
@@ -754,6 +780,8 @@
                         if (c.source_reference_ids && c.source_reference_ids.length) {
                             html += " &middot; <span style='color:#64748b;'>evidence: " + safeEsc(c.source_reference_ids.join(", ")) + "</span>";
                         }
+                        var cBasis = c.rationale || c.calculation_formula;
+                        if (cBasis) html += "<br><span style='color:#64748b; font-size:11px;'>" + safeEsc(cBasis) + "</span>";
                         html += "</div>";
                     });
                     html += "</div>";
@@ -777,8 +805,10 @@
                     rc.evidence_improves_estimate.forEach(function(e) { html += "<li>" + safeEsc(e) + "</li>"; });
                     html += "</ul>";
                 }
+                html += rcAuditorInputs(rc);
 
                 html += "<div style='display:flex; flex-wrap:wrap; gap:14px; font-size:11px; color:#475569; font-weight:600; margin-bottom:8px;'>";
+                if (rc.pricing_status) html += "<span>Pricing: <strong>" + safeEsc(String(rc.pricing_status).replace(/_/g, " ")) + "</strong></span>";
                 html += "<span>Confidence: <strong>" + safeEsc(String(rc.confidence || "NOT_ASSESSABLE").replace(/_/g, " ")) + "</strong></span>";
                 html += "<span>Classification: " + rcBadge(rc.estimate_classification) + "</span>";
                 if (rc.estimation_method) html += "<span>Method: " + safeEsc(rc.estimation_method) + "</span>";

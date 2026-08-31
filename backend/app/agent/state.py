@@ -67,8 +67,13 @@ class AgentState(TypedDict, total=False):
     # behavior in that case, never conflating it with an explicit semantic
     # NOT_ESTABLISHED.
     canonical_semantic_context: Any | None
-
-
+    # Observable semantic provenance (spec §K): the report must state plainly
+    # whether canonical LLM reasoning drove the semantics or the deterministic
+    # floor did. Written by understand_finding_node; consumed by
+    # generate_report_node. Without these keys in the schema LangGraph drops
+    # the node's return value and the report silently defaults to DETERMINISTIC.
+    semantic_mode: str
+    canonical_semantic_status: str
 
     # ------------------------------------------------------------------
     # Investigation planning

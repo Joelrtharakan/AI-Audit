@@ -1078,6 +1078,83 @@ def _reportedly_clause(obj: str, condition: str | None) -> str:
     return f"{obj} was reportedly {cond}."
 
 
+_NOT_ESTABLISHED = "NOT ESTABLISHED"
+
+
+def _impact_from_canonical(
+    semantic_context: Any, canonical: Any, clean_noun: str, topic: str,
+    actor: str | None, observed_deviation: str,
+) -> tuple[ImpactAssessment, str, str, str | None]:
+    """Build the ImpactAssessment purely from the validated canonical semantic
+    interpretation. No text templates, no `semantic_type` branches, no
+    keyword/grammar rules: a field the LLM did not establish is reported
+    `NOT ESTABLISHED`, never synthesised (spec §1/§8/§13). Arithmetic /
+    provenance / financial attachment happen in their own downstream nodes."""
+    def _clean(v: Any) -> str | None:
+        s = str(v).strip() if v is not None else ""
+        if not s or s.upper() in ("UNKNOWN", "NONE", "NULL", "NOT ESTABLISHED", "NOT_ESTABLISHED"):
+            return None
+        return s
+
+    _subject_ok = _is_established_subject_str(clean_noun)
+    affected_object = (
+        clean_noun[0].upper() + clean_noun[1:] if _subject_ok and clean_noun else _NOT_ESTABLISHED
+    )
+
+    # ONLY the LLM's own values -- never the deterministic
+    # `canonical_finding_state` guesses (resolve_deviation synthesises a
+    # "<subject> operational process" and lifts the finding's discovery phrase
+    # in as a period). `canonical_state_merge` already writes the LLM value
+    # onto `canonical` when the LLM provided one and "UNKNOWN" otherwise, so
+    # reading `semantic_context` directly is the clean source.
+    affected_process = _clean(getattr(semantic_context, "affected_process", None)) or _NOT_ESTABLISHED
+    affected_period = _clean(getattr(semantic_context, "affected_period", None)) or _NOT_ESTABLISHED
+    relevant_change = _NOT_ESTABLISHED
+    control_at_risk = _clean(getattr(canonical, "control_at_risk", None))
+    observed_condition = (
+        _clean(getattr(semantic_context, "observed_condition", None)) or observed_deviation or None
+    )
+    _scope = _clean(getattr(semantic_context, "scope", None))
+
+    impact = ImpactAssessment(
+        status=ImpactStatus.IMPACT_REQUIRES_ASSESSMENT,
+        affected_object=affected_object,
+        affected_period=affected_period,
+        process_at_risk=affected_process,
+        control_at_risk=control_at_risk,
+        relevant_change=relevant_change,
+        # The canonical schema carries no established downstream consequence
+        # for this finding -> do not invent one.
+        potential_effect=_NOT_ESTABLISHED,
+        evidence_needed=(
+            f"Objective records establishing the scope ({_scope}) and any downstream "
+            "consequence of the observed condition." if _scope else
+            "Objective records establishing the scope and any downstream consequence "
+            "of the observed condition."
+        ),
+        impact_observed=observed_condition,
+        impact_inferred=None,
+        impact_unknown="Full scope and downstream consequence require auditor assessment.",
+        narrative="Scope and downstream consequences require assessment against objective records.",
+        field_basis={
+            "affected_object": "EXPLICIT" if _subject_ok else "UNKNOWN",
+            "process_at_risk": "EXPLICIT" if affected_process != _NOT_ESTABLISHED else "UNKNOWN",
+            "affected_period": "EXPLICIT" if affected_period != _NOT_ESTABLISHED else "UNKNOWN",
+            "relevant_change": "EXPLICIT" if relevant_change != _NOT_ESTABLISHED else "UNKNOWN",
+            "potential_effect": "UNKNOWN",
+        },
+    )
+    return impact, clean_noun, topic, actor
+
+
+def _is_established_subject_str(s: str | None) -> bool:
+    from app.services.semantic_subject import is_established_subject
+    try:
+        return bool(s) and is_established_subject(s)
+    except Exception:
+        return bool(s) and not str(s).upper().startswith(("UNKNOWN", "UNRESOLVED", "NOT ESTABLISHED"))
+
+
 def _derive_deterministic_impact(request_finding_text: str, canonical, observed_deviation: str, semantic_context: Any = None) -> tuple[ImpactAssessment, str, str, str | None]:
     """Shared deterministic impact derivation used both when a compact
     recovery call succeeds (recovery's schema deliberately excludes impact)
@@ -1153,6 +1230,21 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
         clean_noun = "UNKNOWN — no affected object could be isolated from the finding text"
     topic = topic_word(clean_noun)
     topic_cap = topic[0].upper() + topic[1:]
+    actor = strip_leading_article((canonical.actor if canonical else None) or None)
+
+    # LLM-PRIMARY: the canonical semantic interpretation owns the impact
+    # fields. The deterministic per-`semantic_type` templates below (which
+    # synthesise a "<subject> operational process", pull the finding's
+    # discovery phrase in as an affected period, or run a RECURRENCE/
+    # MISSING_RECORD narrative the LLM never classified) must NOT run when the
+    # LLM is the authority -- an unestablished field is reported NOT
+    # ESTABLISHED, never invented (spec §1/§8/§13). Mirrors
+    # `_plan_from_canonical_structure` / `build_deterministic_five_why`.
+    if semantic_context is not None:
+        return _impact_from_canonical(
+            semantic_context, canonical, clean_noun, topic, actor, observed_deviation,
+        )
+
     temporal_clause = extract_temporal_clause(request_finding_text)
     expiry_then_use = _detect_expiry_then_use(request_finding_text)
     _use_date_text = _extract_use_date_text(request_finding_text) if expiry_then_use else None

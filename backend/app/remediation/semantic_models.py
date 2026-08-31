@@ -61,6 +61,14 @@ DerivedFrom = Literal[
     "FINDING", "EVIDENCE", "ROOT_CAUSE_HYPOTHESIS", "RECOMMENDED_CAPA", "IMPACT", "CONTEXT",
 ]
 
+# The semantic role the cost LLM assigns to an activity it identified itself
+# (fallback path, when no canonical `SemRemediationAction.disposition` exists).
+# Mirrors the canonical dispositions. Empty = unclassified (legacy behaviour).
+ActivityDisposition = Literal[
+    "", "IMMEDIATE_CORRECTION", "CONTAINMENT", "CORRECTIVE_ACTION",
+    "CONDITIONAL_SYSTEMIC", "EFFECTIVENESS_CHECK", "INVESTIGATION",
+]
+
 CalcOperation = Literal["MULTIPLY", "SUM", "SUBTRACT"]
 
 Produces = Literal["LOW", "MOST_LIKELY", "HIGH", "COMPONENT_AMOUNT"]
@@ -111,6 +119,8 @@ class ImplementationActivity(BaseModel):
     description: str
     rationale: str = ""
     derived_from: DerivedFrom = "FINDING"
+    disposition: ActivityDisposition = ""
+    depends_on_root_cause: bool = False
     source_reference_ids: list[str] = Field(default_factory=list)
     is_hypothetical: bool = False
 
@@ -172,6 +182,20 @@ class RemediationCalculationProposal(BaseModel):
         return _finite(v)
 
 
+class AuditorInputRequired(BaseModel):
+    """One concrete, activity-specific piece of evidence the auditor must
+    supply before an established remediation activity can be priced. The cost
+    LLM produces these -- deterministic code never invents them and never
+    invents the value they would carry."""
+
+    remediation_activity: str
+    current_pricing_evidence: str = ""      # what IS already available for this activity
+    missing_input: str = ""                 # the specific missing item
+    why_required: str = ""
+    acceptable_evidence: str = ""           # e.g. "supplier quotation OR internal rate + effort estimate"
+    enables_estimate_type: str = ""         # EXACT_ESTIMATE | RANGE_ESTIMATE | PARTIAL_ESTIMATE
+
+
 class RemediationInterpretation(BaseModel):
     """Top-level structured output of the LLM remediation-cost stage."""
 
@@ -185,6 +209,7 @@ class RemediationInterpretation(BaseModel):
     range_assumptions: list[str] = Field(default_factory=list)
     uncertainty_reasons: list[str] = Field(default_factory=list)
     evidence_improves_estimate: list[str] = Field(default_factory=list)
+    auditor_inputs_required: list[AuditorInputRequired] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod

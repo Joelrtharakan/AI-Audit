@@ -117,7 +117,11 @@ def _bound_amount(c: RemediationCostComponent, which: str) -> float | None:
 def _formula(c: RemediationCostComponent) -> str:
     if _multiplies(c):
         unit = f" {c.quantity_unit}" if c.quantity_unit else ""
-        return f"{c.quantity:g}{unit} x {c.unit_cost:g}"
+        cur = f"{c.currency} " if c.currency else ""
+        return (
+            f"{c.quantity:g}{unit} x {cur}{c.unit_cost:g} = "
+            f"{cur}{_round(c.quantity * c.unit_cost):g}"
+        )
     if c.unit_cost is not None and c.amount_type not in _PER_X_TYPES:
         return f"{c.unit_cost:g} (stated amount)"
     return "no calculable amount"

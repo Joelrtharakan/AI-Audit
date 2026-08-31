@@ -1721,7 +1721,18 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
             r"\b(if|potential(?:ly)?|require[sd]?|may|could|reportedly|does\s+not\s+establish|assessment)\b",
             re.IGNORECASE,
         )
-        if impact.potential_effect and not _HEDGE_MARKERS_RE.search(impact.potential_effect.strip()):
+        # LLM-PRIMARY: an explicit "NOT ESTABLISHED" from the canonical impact
+        # builder is the honest answer when the interpretation established no
+        # downstream consequence -- do NOT overwrite it with the generic
+        # template (spec §8: report NOT_ESTABLISHED, never invent).
+        _sc_engaged = state.get("canonical_semantic_context") is not None
+        _pe_unresolved = bool(impact.potential_effect) and re.match(
+            r"^\s*(not[ _]establish(?:ed)?|unknown|unresolved|not[ _]determined|n/?a)\b",
+            impact.potential_effect, re.IGNORECASE,
+        )
+        if _sc_engaged and _pe_unresolved:
+            pass
+        elif impact.potential_effect and not _HEDGE_MARKERS_RE.search(impact.potential_effect.strip()):
             impact.potential_effect = _safe_potential_effect
         elif impact.potential_effect:
             from app.agent.causal_guard import impact_asserts_unestablished_concept

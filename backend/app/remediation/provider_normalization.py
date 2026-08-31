@@ -130,9 +130,17 @@ def _normalize_activities(parsed: dict) -> None:
             continue
         _alias(a, "activity_id", "id", "activityId")
         _alias(a, "description", "activity", "name", "text")
+        _alias(a, "disposition", "role", "activity_role", "action_type", "correction_type")
+        _alias(a, "depends_on_root_cause", "depends_on_cause", "cause_dependent", "root_cause_dependent")
         _alias(a, "source_reference_ids", "source_refs", "references", "evidence_ids", "refs", "source_reference_id")
         if "source_reference_ids" in a:
             a["source_reference_ids"] = _as_string_list(a["source_reference_ids"])
+        if "disposition" in a:
+            _d = str(a["disposition"] or "").strip().upper().replace(" ", "_").replace("-", "_")
+            a["disposition"] = _d if _d in (
+                "IMMEDIATE_CORRECTION", "CONTAINMENT", "CORRECTIVE_ACTION",
+                "CONDITIONAL_SYSTEMIC", "EFFECTIVENESS_CHECK", "INVESTIGATION",
+            ) else ""
 
 
 def _normalize_components(parsed: dict) -> None:
@@ -188,6 +196,23 @@ def _normalize_calculations(parsed: dict) -> None:
         _alias(calc, "component_ids", "components", "inputs", "operands", "input", "component_id")
         if "component_ids" in calc:
             calc["component_ids"] = _as_string_list(calc["component_ids"])
+        # `produces` is a small closed enum (LOW / MOST_LIKELY / HIGH /
+        # COMPONENT_AMOUNT). Weak models emit near-synonyms ("TOTAL", "SUM",
+        # "GRAND_TOTAL", "SUBTOTAL") for the aggregate figure -- normalize the
+        # malformed enum spelling so compositional salvage does not drop an
+        # otherwise-valid SUM proposal. Pure spelling normalization, no
+        # semantic decision (the calculator still executes the proposal).
+        if "produces" in calc and isinstance(calc["produces"], str):
+            _p = calc["produces"].strip().upper().replace(" ", "_").replace("-", "_")
+            _PRODUCES_SYNONYM = {
+                "TOTAL": "MOST_LIKELY", "SUM": "MOST_LIKELY", "GRAND_TOTAL": "MOST_LIKELY",
+                "SUBTOTAL": "MOST_LIKELY", "TOTAL_COST": "MOST_LIKELY",
+                "MOST_LIKELY_ESTIMATE": "MOST_LIKELY", "POINT": "MOST_LIKELY",
+                "COMPONENT": "COMPONENT_AMOUNT", "AMOUNT": "COMPONENT_AMOUNT",
+                "LINE_ITEM": "COMPONENT_AMOUNT", "LOW_ESTIMATE": "LOW", "HIGH_ESTIMATE": "HIGH",
+            }
+            calc["produces"] = _PRODUCES_SYNONYM.get(_p, _p if _p in (
+                "LOW", "MOST_LIKELY", "HIGH", "COMPONENT_AMOUNT") else "MOST_LIKELY")
         _flatten_nested_amount(calc, "proposed_result_value", "proposed_result_currency", "proposed_result")
         if "proposed_result_value" in calc:
             calc["proposed_result_value"] = _coerce_number(calc["proposed_result_value"])
@@ -223,9 +248,33 @@ def normalize_to_canonical(parsed: Any) -> dict:
     _alias(normalized, "range_assumptions", "range_assumption")
     _alias(normalized, "uncertainty_reasons", "uncertainty", "uncertainties")
     _alias(normalized, "evidence_improves_estimate", "evidence_needed", "improves_estimate")
+    _alias(normalized, "auditor_inputs_required", "auditor_inputs", "inputs_required",
+           "auditor_evidence_required", "missing_pricing_inputs")
     for k in ("range_assumptions", "uncertainty_reasons", "evidence_improves_estimate"):
         if k in normalized:
             normalized[k] = _as_string_list(normalized[k])
+    _air = normalized.get("auditor_inputs_required")
+    if isinstance(_air, dict):
+        _air = [_air]
+    if isinstance(_air, list):
+        _kept = []
+        for it in _air:
+            if isinstance(it, str):
+                it = {"remediation_activity": "", "missing_input": it}
+            if isinstance(it, dict):
+                d = _walk(it)
+                _alias(d, "remediation_activity", "activity", "activity_description")
+                _alias(d, "missing_input", "missing", "required_input", "input")
+                _alias(d, "current_pricing_evidence", "available", "current_evidence",
+                       "available_evidence")
+                _alias(d, "why_required", "reason", "rationale")
+                _alias(d, "acceptable_evidence", "acceptable", "evidence_to_provide",
+                       "acceptable_document")
+                _alias(d, "enables_estimate_type", "enables", "estimate_type", "would_enable")
+                _kept.append(d)
+        normalized["auditor_inputs_required"] = _kept
+    elif "auditor_inputs_required" in normalized:
+        normalized["auditor_inputs_required"] = []
     for k in ("overall_status", "estimability", "not_assessable_reason"):
         if isinstance(normalized.get(k), str):
             normalized[k] = normalized[k].strip().upper().replace(" ", "_").replace("-", "_")

@@ -25,6 +25,7 @@ from app.remediation.activities import (
 )
 from app.remediation.calculator import assemble_estimate
 from app.remediation.models import (
+    RemediationAuditorInput,
     CostBasis,
     RemediationConfidence,
     RemediationCostResult,
@@ -167,11 +168,27 @@ def _enforce_result_consistency(result: RemediationCostResult) -> RemediationCos
         result.low_estimate = None
         result.most_likely_estimate = None
         result.high_estimate = None
+        result.pricing_status = "NOT_ASSESSABLE"
         if _reason == "REMEDIATION_NOT_DEFINED":
             result.implementation_activities = []
             result.conditional_activities = []
             result.cost_components = []
             result.unresolved_pricing_drivers = []
+            result.auditor_inputs_required = []
+
+    # 3b. An EXACT estimate (a full number, nothing left partial/unpriced) needs
+    #     no auditor input -- §24. If the pipeline still carries auditor-input
+    #     entries here they contradict the completeness of the estimate; drop
+    #     them so the report cannot say "pricing complete" and "auditor must
+    #     supply X" at once (§10/§21).
+    if (
+        result.status != RemediationEstimateStatus.NOT_ASSESSABLE
+        and not result.is_partial_estimate
+        and not result.unpriced_activities
+        and not result.unresolved_pricing_drivers
+        and result.auditor_inputs_required
+    ):
+        result.auditor_inputs_required = []
 
     # 4. A calculated estimate cannot coexist with zero implementation activities.
     if (
@@ -180,6 +197,7 @@ def _enforce_result_consistency(result: RemediationCostResult) -> RemediationCos
     ):
         result.status = RemediationEstimateStatus.NOT_ASSESSABLE
         result.confidence = RemediationConfidence.NOT_ASSESSABLE
+        result.pricing_status = "NOT_ASSESSABLE"
         result.not_assessable_reason = _PROFESSIONAL_REASON["REMEDIATION_NOT_DEFINED"]
         result.one_time_cost = result.recurring_cost = None
         result.low_estimate = result.most_likely_estimate = result.high_estimate = None
@@ -388,6 +406,45 @@ async def estimate_remediation_cost(
 
     try:
         valid_evidence_ids = {f"E{i}" for i in range(len(evidence_ledger))}
+        # EVIDENCE-REFERENCE RESOLUTION (spec §2/§6/§22): the context block
+        # feeds evidence as E0/E1/..., but a finding whose own text labels its
+        # claims ("C1: ...", "C2: ...") leads the model to cite "C1"/"C2".
+        # Resolve every alternative citation form to the canonical E-id BEFORE
+        # validation, so a genuine verified price is never dropped as
+        # "unsupported" merely because it was cited by the finding's own label.
+        # Pure structural id bookkeeping -- no semantic interpretation.
+        _ref_alias: dict[str, str] = {}
+        _label_re = re.compile(r"^\s*([A-Za-z]{1,4}\s?\d+)\s*[:.)\]\-]")
+        # Labels the FINDING TEXT itself assigns to its claims, in order
+        # ("C1: ... C2: ... C3: ..."). The k-th distinct label lines up with the
+        # k-th evidence item the pipeline derived from those claims.
+        _text_labels: list[str] = []
+        for _lab in re.findall(r"\b([A-Za-z]{1,3}\s?\d{1,3})\s*[:.)\]\-]", str(finding_text or "")):
+            _u = _lab.replace(" ", "").upper()
+            if _u not in _text_labels:
+                _text_labels.append(_u)
+        for _i, _item in enumerate(evidence_ledger):
+            _eid = f"E{_i}"
+            _claim = getattr(_item, "claim", None) or getattr(_item, "text", "") or ""
+            _m = _label_re.match(str(_claim))
+            if _m:
+                _lab = _m.group(1).replace(" ", "").upper()
+                _ref_alias.setdefault(_lab, _eid)
+            if _i < len(_text_labels):
+                _ref_alias.setdefault(_text_labels[_i], _eid)
+            # also accept a bare index / 1-based index, and the common
+            # claim-label forms C<n>/E<n> keyed 1-based to this position.
+            _ref_alias.setdefault(str(_i), _eid)
+            _ref_alias.setdefault(str(_i + 1), _eid)
+            _ref_alias.setdefault(f"C{_i + 1}", _eid)
+        if _ref_alias:
+            def _canon_ref(r: str) -> str:
+                rr = str(r or "").strip()
+                return _ref_alias.get(rr.replace(" ", "").upper(), rr)
+            for _c in interp.cost_components:
+                _c.source_reference_ids = [_canon_ref(r) for r in (_c.source_reference_ids or [])]
+            for _a in interp.activities:
+                _a.source_reference_ids = [_canon_ref(r) for r in (getattr(_a, "source_reference_ids", []) or [])]
         components, proposals, outcome = validate_and_plan(
             interp,
             valid_evidence_ids=valid_evidence_ids,
@@ -438,7 +495,17 @@ async def estimate_remediation_cost(
     # the legitimate MIXED case (canonical DID establish >=1 remediation
     # activity); trust the LLM interpretation + canonical, never the
     # deterministic scope.
-    _use_scope = bool((_llm_weak or not activities) and _scope.activities) and not _sc_engaged
+    # When the second interpretation produced usable priced cost components, its
+    # reading of the remediation work is grounded in the evidence -- the
+    # deterministic scope (which can only emit an abstract "strengthen <process>"
+    # sentence) must not stand in for it even if the model omitted a parallel
+    # `activities` array. Component-driven activities then carry the work.
+    _has_priced_components = any(
+        (getattr(c, "unit_cost", None) is not None) for c in components
+    )
+    _use_scope = bool(
+        (_llm_weak or (not activities and not _has_priced_components)) and _scope.activities
+    ) and not _sc_engaged
     # SINGLE SOURCE OF TRUTH (spec §8/§22): when the canonical interpretation
     # established the remediation activities, THEY define the work -- the second
     # interpretation contributes only cost components (pricing). The canonical
@@ -467,6 +534,15 @@ async def estimate_remediation_cost(
 
     _priced_acts = [a for a in canon if a.is_priced]
     _unpriced_acts = [a for a in canon if not a.is_priced]
+    # A CONDITIONAL / hypothetical activity (systemic action pending root-cause
+    # confirmation) is not yet-established remediation work -- its absence of a
+    # price does not make the ESTABLISHED direct correction a partial estimate
+    # (§10/§25). Only unpriced CONFIRMED work counts toward "partial".
+    _unpriced_established_acts = [
+        a for a in _unpriced_acts
+        if getattr(a, "conditionality", None) != "CONDITIONAL"
+        and not getattr(a, "is_hypothetical", False)
+    ]
 
     if not bounded:
         overall = RemediationEstimateStatus.NOT_ASSESSABLE
@@ -480,7 +556,7 @@ async def estimate_remediation_cost(
     # does not depend on how a driver was reconciled.
     _unpriced_component_ids = set(est.unpriced_component_ids)
     is_partial = bounded and bool(_priced_ids) and (
-        bool(_unpriced_acts) or bool(_unpriced_component_ids)
+        bool(_unpriced_established_acts) or bool(_unpriced_component_ids)
     )
 
     # --- Confidence.
@@ -497,7 +573,24 @@ async def estimate_remediation_cost(
         [a for c in interp.cost_components for a in c.assumptions]
         + list(interp.range_assumptions)
     )
-    if contingent:
+    # The estimate is contingent on the cause ONLY when priced work actually
+    # depends on it. A direct correction of the established condition
+    # (IMMEDIATE_CORRECTION / CONTAINMENT) does not -- pricing it is not
+    # "subject to confirming the underlying cause" (spec §7/§13/§15).
+    _priced_conditional = any(
+        getattr(a, "conditionality", None) == "CONDITIONAL" for a in _priced_acts
+    )
+    # Only the canonical semantic layer can affirmatively establish that the
+    # priced work is a direct correction; without it, stay conservative.
+    _canonical_direct = bool(_sc_remediation) and not _priced_conditional and all(
+        str(getattr(a, "disposition", "")) in ("IMMEDIATE_CORRECTION", "CONTAINMENT")
+        and not getattr(a, "depends_on_root_cause", False)
+        for a in _sc_remediation
+    )
+    _estimate_is_contingent = contingent and not _canonical_direct and (
+        _priced_conditional or bool(_unpriced_established_acts) or not _sc_remediation
+    )
+    if _estimate_is_contingent:
         assumptions.append(
             "Root cause is not fully established; the remediation scope and therefore this "
             "estimate are contingent on confirming the cause."
@@ -506,7 +599,7 @@ async def estimate_remediation_cost(
             confidence = RemediationConfidence.MEDIUM
 
     uncertainty = _dedup(interp.uncertainty_reasons + est.uncertainty_reasons)
-    _unpriced_count = len(_unpriced_acts) + len(_unpriced_component_ids)
+    _unpriced_count = len(_unpriced_established_acts) + len(_unpriced_component_ids)
     if is_partial and _unpriced_count:
         uncertainty.append(
             f"{_unpriced_count} remediation item{'' if _unpriced_count == 1 else 's'} "
@@ -531,7 +624,8 @@ async def estimate_remediation_cost(
     _canon_approach = (getattr(_sc, "remediation_obligation_rationale", None) or "").strip()
     if _sc_remediation:
         _framed_strategy = _canon_approach or _frame_strategy(
-            "; ".join(a.description for a in canon) if canon else _summary, contingent
+            "; ".join(a.description for a in canon) if canon else _summary,
+            _estimate_is_contingent,
         )
     elif _use_scope:
         _framed_strategy = _scope.approach or _frame_strategy(_summary, contingent)
@@ -617,6 +711,72 @@ async def estimate_remediation_cost(
     }.get(_oblig)
     if _oblig_line and _oblig_line not in result.uncertainty_reasons:
         result.uncertainty_reasons = [_oblig_line, *result.uncertainty_reasons]
+
+    # --- AUDITOR INPUTS REQUIRED (spec new requirement). The cost LLM lists
+    # the exact activity-specific evidence the auditor must supply so the
+    # calculator can price a currently-unpriced established remediation
+    # activity. LLM-authored; deterministic code only forwards it (and drops
+    # entries that carry a fabricated number). Never generated here.
+    _canon_act_texts = {a.description.strip().lower() for a in canon}
+    # An auditor-input entry declares that an activity CANNOT yet be priced.
+    # An entry whose own text says nothing is missing / pricing is already
+    # established is self-nullifying -- the model should have emitted a priced
+    # cost_component instead. Forwarding it produces the contradiction
+    # "pricing is fully established" sitting under a NOT_ASSESSABLE result
+    # (spec §25). Structural text hygiene, not semantic finding classification.
+    _SELF_NULLIFYING = (
+        "no missing input", "nothing is missing", "nothing missing", "none missing",
+        "no input required", "no additional input", "none required", "not required",
+        "not applicable", "n/a", "fully established", "already established",
+        "pricing is established", "pricing established", "sufficient to price",
+        "sufficient for an exact", "no further evidence", "no gap",
+    )
+    _valid_air = []
+    for _air in (getattr(interp, "auditor_inputs_required", []) or []):
+        _act = (getattr(_air, "remediation_activity", "") or "").strip()
+        if not _act:
+            continue
+        _mi = " ".join(str(getattr(_air, f, "") or "") for f in
+                       ("missing_input", "why_required")).strip().lower()
+        if not _mi or any(p in _mi for p in _SELF_NULLIFYING):
+            logger.info(
+                "Remediation cost: dropped a self-nullifying auditor-input entry "
+                "(its own text states pricing is established) for activity %r.", _act[:80],
+            )
+            continue
+        # NO MANUFACTURED PRECISION: a "missing input" is a description of the
+        # evidence needed, never a value. Drop an entry that smuggles a
+        # concrete figure (currency symbol, or a 3+ digit run) into the
+        # evidence text.
+        _blob = " ".join(str(getattr(_air, f, "") or "") for f in
+                         ("missing_input", "current_pricing_evidence", "why_required",
+                          "acceptable_evidence"))
+        if any(sym in _blob for sym in ("₹", "$", "€", "£", "¥")) or re.search(r"\d[\d,]{2,}", _blob):
+            continue
+        _valid_air.append(RemediationAuditorInput(
+            remediation_activity=_act,
+            current_pricing_evidence=str(getattr(_air, "current_pricing_evidence", "") or ""),
+            missing_input=str(getattr(_air, "missing_input", "") or ""),
+            why_required=str(getattr(_air, "why_required", "") or ""),
+            acceptable_evidence=str(getattr(_air, "acceptable_evidence", "") or ""),
+            enables_estimate_type=str(getattr(_air, "enables_estimate_type", "") or ""),
+        ))
+    result.auditor_inputs_required = _valid_air
+
+    # --- PRICING STATE (spec §11).
+    _has_number = any(v is not None for v in (
+        result.one_time_cost, result.recurring_cost, result.most_likely_estimate,
+        result.low_estimate, result.high_estimate,
+    ))
+    if result.status == RemediationEstimateStatus.NOT_ASSESSABLE or not _has_number:
+        result.pricing_status = "NOT_ASSESSABLE"
+    elif result.is_partial_estimate:
+        result.pricing_status = "PARTIAL_ESTIMATE"
+    elif (result.low_estimate is not None and result.high_estimate is not None
+          and result.low_estimate != result.high_estimate):
+        result.pricing_status = "RANGE_ESTIMATE"
+    else:
+        result.pricing_status = "EXACT_ESTIMATE"
 
     # Surface the canonical investigation activities alongside the (mixed-case)
     # remediation -- separate collection, never priced.

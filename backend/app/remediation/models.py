@@ -66,6 +66,20 @@ class RemediationUnresolvedDriver(BaseModel):
     description: str
 
 
+class RemediationAuditorInput(BaseModel):
+    """One concrete, activity-specific piece of evidence the auditor must
+    supply so the calculator can price an established remediation activity
+    (spec "AUDITOR INPUTS REQUIRED"). Auditor-facing, never an internal
+    diagnostic; the value it would carry is NEVER invented."""
+
+    remediation_activity: str
+    current_pricing_evidence: str = ""
+    missing_input: str = ""
+    why_required: str = ""
+    acceptable_evidence: str = ""
+    enables_estimate_type: str = ""   # EXACT_ESTIMATE | RANGE_ESTIMATE | PARTIAL_ESTIMATE
+
+
 class RemediationCostComponentResult(BaseModel):
     """One cost driver, after deterministic validation + arithmetic."""
 
@@ -161,6 +175,21 @@ class RemediationCostResult(BaseModel):
     estimation_method: str = ""
     evidence_improves_estimate: list[str] = Field(default_factory=list)
     review_required: bool = True
+
+    # Pricing state (spec §11) -- what KIND of estimate the evidence supports.
+    #   EXACT_ESTIMATE   a single defensible figure
+    #   RANGE_ESTIMATE   genuine mutually-exclusive scenarios define a band
+    #   PARTIAL_ESTIMATE some activities priced, some not
+    #   NOT_ASSESSABLE   nothing defensibly priceable yet
+    pricing_status: Literal[
+        "EXACT_ESTIMATE", "RANGE_ESTIMATE", "PARTIAL_ESTIMATE", "NOT_ASSESSABLE",
+    ] = "NOT_ASSESSABLE"
+
+    # The concrete, activity-specific evidence the auditor must supply before a
+    # currently-unpriced established remediation activity can be estimated
+    # (spec "AUDITOR INPUTS REQUIRED"). LLM-authored; never invented, and never
+    # carrying an invented value.
+    auditor_inputs_required: list["RemediationAuditorInput"] = Field(default_factory=list)
 
     # Professional, user-facing explanation used when status == NOT_ASSESSABLE.
     # NEVER an internal diagnostic (spec sections 6, 14, 15).
