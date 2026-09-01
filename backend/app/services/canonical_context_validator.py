@@ -266,6 +266,38 @@ def _validate_llm_primary_fields(ctx: CanonicalFindingContext, finding_text: str
     ):
         ctx.comparison = None
 
+    # (c) STRUCTURAL COHERENCE of an active comparison (spec Pass 53 §11/§21).
+    # An ACTIVE comparison drives a *reconciliation obligation* -- there must be
+    # something concrete to reconcile. A comparison the model marked
+    # ACTUAL_CONFLICT / UNRESOLVED_COMPARISON but which carries NO concrete
+    # deviation -- no `direction` (UNKNOWN), no `magnitude`, and no real
+    # `reference` baseline (a `reference` that is only evidence-id tokens like
+    # "E1,E2" does not name a standard/target/prior value) -- is not a coherent
+    # discrepancy. Downgrade it to NOT_ESTABLISHED (non-activating). This reads
+    # ONLY the model's own comparison fields for internal coherence; it does
+    # NOT inspect the finding text, count prices, look at units, activity types,
+    # value_kind, or calculation structure.
+    _c = ctx.comparison
+    if _c is not None and getattr(_c, "status", "NOT_ESTABLISHED") in (
+        "ACTUAL_CONFLICT", "UNRESOLVED_COMPARISON",
+    ):
+        _ref = (getattr(_c, "reference", None) or "").strip()
+        _ref_is_baseline = bool(_ref) and not re.fullmatch(
+            r"(?:[EeCc]\d+[\s,;/&]*)+", _ref
+        )
+        _lr_numeric = bool(re.search(r"\d", getattr(_c, "left", "") or "")) and bool(
+            re.search(r"\d", getattr(_c, "right", "") or "")
+        )
+        _has_deviation = (
+            getattr(_c, "direction", "UNKNOWN") in ("ABOVE", "BELOW", "MISMATCH")
+            or getattr(_c, "magnitude", None) is not None
+            or _ref_is_baseline
+            or _lr_numeric
+        )
+        if not _has_deviation:
+            _c.status = "NOT_ESTABLISHED"
+            ctx.comparison = None
+
     # COMPARISON DIRECTION: a stated ABOVE/BELOW needs a directional word in
     # the finding; otherwise it is a bare "differed" -> MISMATCH.
     if ctx.comparison is not None and ctx.comparison.direction in ("ABOVE", "BELOW"):
@@ -292,6 +324,19 @@ def _validate_llm_primary_fields(ctx: CanonicalFindingContext, finding_text: str
         )
         if not _c_ok:
             ctx.recurrence.count = None
+
+    # RECURRENCE COHERENCE (spec Pass 54 §8/§20): a `recurrence` object is a
+    # REPEATED OCCURRENCE OVER TIME -- it needs to name WHAT recurs. An object
+    # that carries only a bare `count` with no `event` and no `period` is not a
+    # coherent recurrence; it is far more often a mis-read duration ("two-day
+    # audit") or population ("three machines") than a real repetition. Clear
+    # it. Reads only the model's own recurrence fields -- no finding-text
+    # keyword rule, no "if N-day -> not recurrence".
+    if ctx.recurrence is not None:
+        _rev = (getattr(ctx.recurrence, "event", None) or "").strip()
+        _rpd = (getattr(ctx.recurrence, "period", None) or "").strip()
+        if not _rev and not _rpd:
+            ctx.recurrence = None
 
 
 # --- LLM-owned investigative / remediation reasoning safety (spec §6-§10) ---
@@ -473,6 +518,75 @@ def _validate_llm_reasoning_fields(
     # If the finding enumerates alternatives, none of them leads.
     if ctx.causal_alternatives_unresolved:
         ctx.leading_hypothesis_id = None
+
+    # ---- PRICING/ARITHMETIC vs SEMANTIC GAP FIREWALL (spec Pass 55 §13/§20/§21/§25)
+    # The canonical LLM sometimes lists a REMEDIATION PRICING INPUT (or an
+    # arithmetic aggregate of priced components) as an `information_gap` /
+    # `investigation_plan` step / `investigation_activities` entry -- e.g.
+    # "quotation for refrigerator", "installation cost", "total remediation
+    # cost". Semantic ownership (spec §20): the canonical layer owns SEMANTIC
+    # gaps (cause / requirement / scope-of-condition / comparability); the
+    # remediation layer owns PRICING inputs. A gap the model ITSELF also
+    # declared a `pricing_basis` / `pricing_evidence_needed` / `scope_evidence_
+    # needed` is, by the model's own classification, a pricing input -- it is
+    # NOT a root-cause investigation gap. This is a cross-field consistency
+    # check on the model's OWN structured output -- it reads no finding text
+    # and builds no finding-text keyword classifier. `_AGG_META` is the small
+    # generic aggregation/economics vocabulary (the same footing as
+    # `activities._COST_HEAD_NOUNS`) used ONLY as a co-condition: an
+    # information_gap is dropped only when EVERY one of its non-meta words is a
+    # word the model itself used as a pricing/scope basis.
+    _AGG_META = {
+        "total", "overall", "aggregate", "combined", "sum", "grand", "final",
+        "cost", "costs", "price", "pricing", "priced", "amount", "amounts",
+        "rate", "rates", "remediation", "estimate", "estimated", "figure",
+        "breakdown", "reconciliation", "reconcile", "component", "components",
+        "value", "values", "expenditure", "budget", "budgeted",
+    }
+    _pricing_basis_sets: list[frozenset] = []
+    _pricing_vocab: set[str] = set()
+    for _p in (getattr(ctx, "pricing_information", []) or []):
+        _w = _sig_words(getattr(_p, "pricing_basis", None))
+        if _w:
+            _pricing_basis_sets.append(frozenset(_w))
+            _pricing_vocab |= _w
+    for _a in (list(getattr(ctx, "remediation_activities", []) or [])
+               + list(getattr(ctx, "investigation_activities", []) or [])):
+        for _fld in ("pricing_evidence_needed", "scope_evidence_needed"):
+            _w = _sig_words(getattr(_a, _fld, None))
+            if _w:
+                _pricing_basis_sets.append(frozenset(_w))
+                _pricing_vocab |= _w
+
+    _GAP_STOP = {
+        "the", "and", "for", "was", "are", "were", "has", "have", "had", "its",
+        "that", "this", "with", "from", "into", "per", "any", "all", "each",
+        "what", "which", "whether", "establish", "establishes", "establishing",
+        "confirm", "verify", "underlying", "applicable", "objective", "evidence",
+    }
+
+    def _is_pricing_gap(text: str | None) -> bool:
+        w = _sig_words(text) - _GAP_STOP
+        if not w:
+            return False
+        # (a) the model itself declared this exact concept a pricing/scope basis
+        if any(w <= b or b <= w for b in _pricing_basis_sets):
+            return True
+        # (b) an arithmetic aggregate: every non-generic word is one the model
+        #     used as a pricing basis (e.g. "total remediation cost")
+        return bool(_pricing_vocab) and (w - _AGG_META) <= _pricing_vocab and bool(w & _AGG_META)
+
+    _dropped_pricing_gaps = [g for g in (ctx.information_gaps or []) if _is_pricing_gap(g)]
+    if _dropped_pricing_gaps:
+        ctx.information_gaps = [g for g in ctx.information_gaps if not _is_pricing_gap(g)]
+    ctx.investigation_plan = [
+        s for s in ctx.investigation_plan if not _is_pricing_gap(getattr(s, "unknown", None))
+    ]
+    ctx.investigation_activities = [
+        a for a in ctx.investigation_activities
+        if not (_is_pricing_gap(getattr(a, "activity", None))
+                or _is_pricing_gap(getattr(a, "pricing_evidence_needed", None)))
+    ]
 
     # ---- INVESTIGATION PLAN ------------------------------------------
     # Role = INVESTIGATION REQUEST: a proposal for obtaining evidence. The

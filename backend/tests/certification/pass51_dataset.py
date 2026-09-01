@@ -295,6 +295,143 @@ SCENARIOS += [
 ]
 
 
+# ---- Pass 54 §22/§23 semantic-separation cases ----
+SCENARIOS += [
+    dict(
+        id="P54_packaging_audit",
+        section="54.22",
+        material=True,
+        finding=(
+            "Following recurring packaging defects, the supplier will undergo a two-day "
+            "quality audit. The auditor's internal cost rate is Rs 2,000 per hour, with "
+            "8 hours per audit day. Travel and accommodation are quoted at Rs 18,000. "
+            "Three hours of follow-up review are required after the audit."
+        ),
+        expected_text=(
+            "condition recurrence established (packaging defects recur); remediation = ONE_TIME "
+            "two-day audit; recurrence.count MUST NOT be 2 (two-day = duration) or 3 (3 hours "
+            "follow-up); comparison = NONE (audit labour + travel + follow-up is COMPOSITION); "
+            "RCA NOT_ESTABLISHED. Cost: 2x8x2000 + 18000 + 3x2000 = 32000 + 18000 + 6000 = 56000 "
+            "ONE_TIME."
+        ),
+        expect=dict(
+            comparison_active=False,
+            recurrence_count_max=1,
+            cost_recurrence="ONE_TIME",
+            has_one_time_cost=True,
+            has_recurring_cost=False,
+            has_horizon_total=False,
+            one_time_cost_approx=(56000, 1),
+            min_priced_components=3,
+            no_auditor_pricing_input=True,
+            root_cause_not_verified=True,
+        ),
+    ),
+    dict(
+        id="P54_A_recurring_condition_onetime_remediation",
+        section="54.23.A",
+        material=False,
+        finding=(
+            "Repeated packaging defects were observed over the last three deliveries. "
+            "A one-time supplier audit will be conducted."
+        ),
+        expected_text="condition recurrence TRUE; remediation recurrence ONE_TIME; comparison NONE.",
+        expect=dict(comparison_active=False, cost_recurrence="ONE_TIME"),
+    ),
+    dict(
+        id="P54_E_true_actual_vs_budget",
+        section="54.23.E",
+        material=True,
+        finding=(
+            "Actual inspection cost was Rs 20,000 against an approved budget of Rs 15,000."
+        ),
+        expected_text="actual vs approved budget, overrun -> comparison ACTIVE.",
+        expect=dict(comparison_active=True),
+    ),
+    dict(
+        id="P54_F_composition_not_comparison",
+        section="54.23.F",
+        material=True,
+        finding="Inspection costs Rs 20,000 and travel costs Rs 5,000.",
+        expected_text="two independent cost components -> comparison NONE.",
+        expect=dict(comparison_active=False),
+    ),
+]
+
+
+# ---- Pass 55 §28-§31 pricing-gap-firewall cases ----
+SCENARIOS += [
+    dict(
+        id="P55_fridge_composition",
+        section="55.28",
+        material=True,
+        finding=(
+            "A pharmacy refrigerator requires replacement. The approved quotation for the "
+            "refrigerator is Rs 1,45,000. Delivery is Rs 8,000 and installation is Rs 12,000. "
+            "Validation of the refrigerator after installation requires 4 hours of "
+            "biomedical-engineering work at Rs 1,500 per hour."
+        ),
+        expected_text=(
+            "composition: 145000 + 8000 + 12000 + 4x1500 = 171000 ONE_TIME EXACT; "
+            "comparison NONE; NO cost-reconciliation investigation question; RCA "
+            "NOT_ESTABLISHED; no auditor pricing input; no annualization."
+        ),
+        expect=dict(
+            comparison_active=False,
+            recurrence_count_max=1,
+            cost_recurrence="ONE_TIME",
+            has_one_time_cost=True,
+            has_recurring_cost=False,
+            one_time_cost_approx=(171000, 1),
+            min_priced_components=4,
+            no_auditor_pricing_input=True,
+            root_cause_not_verified=True,
+        ),
+    ),
+    dict(
+        id="P55_motor_composition",
+        section="55.18.1",
+        material=True,
+        finding="Replace the motor at Rs 80,000, installation Rs 5,000, testing Rs 3,000.",
+        expected_text="80000 + 5000 + 3000 = 88000 ONE_TIME; comparison NONE; no cost investigation.",
+        expect=dict(
+            comparison_active=False, cost_recurrence="ONE_TIME", has_one_time_cost=True,
+            one_time_cost_approx=(88000, 1), no_auditor_pricing_input=True,
+        ),
+    ),
+    dict(
+        id="P55_fridge_actual_vs_budget",
+        section="55.29",
+        material=True,
+        finding=(
+            "Actual refrigerator replacement cost was Rs 1,71,000 against an approved budget "
+            "of Rs 1,50,000."
+        ),
+        expected_text="actual vs approved budget overrun -> comparison ACTIVE.",
+        expect=dict(comparison_active=True),
+    ),
+    dict(
+        id="P55_fridge_missing_installation_price",
+        section="55.30",
+        material=True,
+        finding=(
+            "The pharmacy refrigerator must be replaced. The approved quotation is "
+            "Rs 1,45,000. Installation is required but the installation price is not "
+            "established."
+        ),
+        expected_text=(
+            "refrigerator priced (145000); installation unpriced -> PARTIAL_ESTIMATE + "
+            "auditor input for the installation price; NO cost-reconciliation investigation; "
+            "comparison NONE."
+        ),
+        expect=dict(
+            comparison_active=False,
+            pricing_status_in=["PARTIAL_ESTIMATE", "NOT_ASSESSABLE"],
+        ),
+    ),
+]
+
+
 def material_ids() -> list[str]:
     return [s["id"] for s in SCENARIOS if s.get("material")]
 

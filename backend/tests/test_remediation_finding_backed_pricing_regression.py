@@ -317,6 +317,26 @@ def test_g_unknown_amount_type_per_area_is_normalized_not_dropped():
     assert est.one_time_cost == pytest.approx(19600), (est, [c.model_dump() for c in comps_out])
 
 
+def test_g_packaging_audit_composition_56000():
+    """Pass 54 golden: duration x rate + fixed travel + follow-up duration x rate.
+    2d x 8h x 2000 + 18000 + 3h x 2000 = 32000 + 18000 + 6000 = 56000 ONE_TIME.
+    A shared Rs 2,000/hour rate across two components is not a comparison."""
+    comps = [
+        _comp("C0", "quality audit labour", 16, "hour", 2000, "PER_HOUR", "FINDING",
+              qbasis="DERIVED", deriv="2 days x 8 h/day = 16 h"),
+        {"component_id": "C1", "description": "travel and accommodation", "activity_ids": ["A0"],
+         "cost_category": "travel", "value_kind": "QUOTED_PRICE", "quantity": 1,
+         "quantity_unit": "trip", "quantity_basis": "EVIDENCED", "unit_cost": 18000,
+         "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "COMPONENT",
+         "source_reference_ids": ["FINDING"]},
+        _comp("C2", "post-audit follow-up review", 3, "hour", 2000, "PER_HOUR", "FINDING"),
+    ]
+    comps_out, est, outcome = _run(_wrap(comps), {"FINDING"})
+    assert len(comps_out) == 3, outcome.rejected
+    assert est.one_time_cost == pytest.approx(56000), (est, [c.model_dump() for c in comps_out])
+    assert not est.recurring_cost and not est.recurring_horizon_total
+
+
 def test_g_observed_loss_never_priced_even_with_valid_evidence():
     comps = [{"component_id": "C0", "description": "incident cost", "activity_ids": ["A0"],
               "cost_category": "loss", "value_kind": "OBSERVED_FINANCIAL_LOSS", "quantity": 1,

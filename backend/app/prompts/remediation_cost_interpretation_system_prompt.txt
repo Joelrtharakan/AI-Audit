@@ -102,7 +102,15 @@ RULES
    supply the plan (operands + operation + frequency), it supplies the number.
 9. NEVER price an investigation activity. If the block lists ONLY investigation activities,
    estimability=NOT_ASSESSABLE, not_assessable_reason=REMEDIATION_NOT_DEFINED; do not invent
-   activities or drivers.
+   activities or drivers. Do NOT create an investigation activity, an immediate action, or a
+   "reconcile / verify / confirm the total cost / cost components / calculation" step from
+   fully-established pricing components -- adding independent components (equipment +
+   delivery + installation + labour) is arithmetic the calculator does, not a discrepancy.
+   If a pricing input is genuinely missing, express it ONLY as an `auditor_inputs_required`
+   entry / an unpriced component, never as a root-cause or reconciliation activity. A
+   RECONCILIATION action is warranted ONLY when the evidence itself contains a contradiction
+   (two authoritative records give different amounts) or an explicit actual-vs-budget /
+   actual-vs-approved comparison.
 10. An unresolved discrepancy between two values/records/quotations with no established
     reason calls for RECONCILIATION, not a systemic action -- "no systemic remediation yet
     justified; reconcile first" with estimability=NOT_ASSESSABLE is a correct answer.
@@ -131,9 +139,14 @@ RULES
 15. source_reference_ids may cite only ids in the context: FINDING (the finding text),
     E0/E1.. (evidence items), hypothesis ids, CAPA ids. Anything else (an activity id, a
     component id, an invented label) is discarded.
-16. RECURRING COSTS STAY RECURRING. If the evidence says an activity happens per
-    hour/day/week/month/quarter/year/shift/cycle/event, that component is
-    recurrence=RECURRING and recurring_period MUST be set. Its `quantity` is the amount
+16. RECURRING COSTS STAY RECURRING -- BUT A RECURRING CONDITION IS NOT A RECURRING COST.
+    A component is recurrence=RECURRING ONLY when the evidence says the CORRECTIVE ACTIVITY
+    itself repeats per hour/day/week/month/quarter/year/shift/cycle ("audit every quarter",
+    "monthly verification"). The observed PROBLEM recurring ("following recurring packaging
+    defects", "repeated failures") does NOT make the remediation recurring -- a one-time
+    two-day audit in response to a recurring defect is recurrence=ONE_TIME. A DURATION
+    ("two-day audit", "3 hours of follow-up") is quantity, never recurrence. If the
+    activity repeats, recurring_period MUST be set. Its `quantity` is the amount
     consumed in ONE occurrence of that period -- e.g. "2 hours per month" -> quantity=2,
     unit="hour", recurring_period="month". `quantity` is NEVER "the number of future
     periods": "2 hours per month" is quantity 2, NOT 12 and NOT 24. The number of periods is

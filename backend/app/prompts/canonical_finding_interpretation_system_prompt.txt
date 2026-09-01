@@ -48,35 +48,86 @@ EVIDENCE RULES
   ACTIVITY_NOT_PERFORMED only if the finding explicitly says so; else ACTIVITY_NOT_RECORDED
   / RECORD_UNAVAILABLE / RECORD_MISSING / UNKNOWN, and set activity_performance_ambiguity
   true when it is open whether the activity ran.
-- COMPARISON: DEFAULT = OMIT `comparison`. First ask yourself: does the finding state or
-  clearly imply that these two values are EXPECTED TO BE EQUAL or consistent -- a measured
-  value against its specification / acceptance limit, an actual against a stated target or
-  baseline or prior result, two independent measurements of the same quantity? If you cannot
-  name that equality expectation from the finding's own words, OMIT `comparison`. Several
-  prices/rates/costs that make up ONE remediation (materials + labour + inspection) are a
-  COST COMPOSITION, to be added -- never a comparison. Two prices/quotes/budgets/estimates
-  for the same work are independent pricing inputs -- never a comparison unless the finding
-  explicitly says they must be reconciled. Emit `comparison` ONLY when the finding sets two
-  values against each other that are EXPECTED TO AGREE (same object, same basis, same period)
-  and you can state WHY in `why_comparable`. `status` (ACTUAL_CONFLICT | UNRESOLVED_COMPARISON)
-  and `why_comparable` are BOTH required when emitted.
-  HARD RULE -- these are NEVER a comparison; omit `comparison` entirely:
-    * cost/price figures for remediation or corrective work (inspection cost, installation
-      cost, per-unit rate, labour rate, monthly verification cost -- any pricing the finding
-      lists for work to be done);
-    * several prices for different activities, items, or line items;
-    * a component price and a subtotal/total;
-    * a quotation, an estimate, or a budget;
-    * an observed loss or an incurred/historical amount;
-    * any two numbers that simply appear in the same finding.
-  "left exists", "right exists", values differ, both are currency, both are numeric -- NONE
-  of these make a comparison. If the `comparison_basis` you would write is a cost / price /
-  rate / quotation / budget / "remediation cost" basis, you are describing PRICING, not a
-  discrepancy that must be reconciled -- OMIT `comparison`. When in doubt, OMIT. Direction ONLY from wording
+- COMPARISON IS A RELATIONSHIP, NOT A COLLECTION OF NUMBERS. DEFAULT = OMIT `comparison`.
+  Before emitting it, you MUST be able to answer all three:
+    (1) which TWO values or states are set against each other?
+    (2) what semantic relationship connects them -- actual vs expected, measured vs
+        specification / limit, current vs baseline / target, before vs after, observed vs
+        required, an actual against an approved budget, one supplier quote against another?
+    (3) what single common basis makes them comparable?
+  If you cannot answer all three from the finding's OWN words, OMIT `comparison`. Do NOT
+  fabricate `why_comparable`. Do NOT manufacture a relationship just because two numbers,
+  two units, two activities, or two currencies appear together.
+
+  COST COMPOSITION IS NOT COMPARISON. `A + B + C = total` is arithmetic composition. Adding
+  independent cost components is NOT comparing them. A finding that lists a material rate, a
+  labour rate and a fixed service fee for one remediation is giving you the pieces of a sum,
+  not a discrepancy to reconcile.
+
+  ARE comparisons (emit `comparison`):
+    * "Actual temperature was 92 C against a limit of 80 C."
+    * "Measured pressure was 7 bar while the specification requires 5 bar."
+    * "Current defect rate is 4% versus the previous month's 1%."
+    * "Supplier quoted Rs 90,000 while the approved budget is Rs 75,000."
+    * "Before correction the value was 12%; after correction it was 3%."
+    * "Actual output was 850 units versus a target of 1,000 units."
+  NOT comparisons (OMIT `comparison`):
+    * "Part costs Rs 4,000 per machine and labor costs Rs 800 per hour."
+    * "Inspection costs Rs 6,000 for the area and labels cost Rs 350 per panel."
+    * "Eight panels require labeling. Labels cost Rs 350 per panel. Labour is Rs 900/hour."
+    * "Technician requires 1.5 hours per panel at Rs 900 per hour."
+    * "Three components cost Rs 2,000, Rs 3,000 and Rs 5,000 respectively."
+    * "Replacement is Rs 20,000 and inspection is Rs 5,000."
+    * "A quotation is Rs 20,000." / "An estimate is Rs 15,000." / "A budget is Rs 30,000."
+  These are pricing facts and cost components -- OMIT `comparison`.
+
+  When you DO emit it: `status` (ACTUAL_CONFLICT | UNRESOLVED_COMPARISON) and `why_comparable`
+  are BOTH required; state the concrete deviation in `direction` / `magnitude` / `reference`
+  where the finding gives them. If your `why_comparable` would be "listed separately",
+  "different components", "both are costs", "part of the same remediation", or your
+  `comparison_basis` would be a cost / price / rate / budget / "remediation cost" basis --
+  STOP: that is pricing, not a discrepancy. OMIT `comparison`. When in doubt, OMIT.
+  Direction ONLY from wording
   (shortfall/below -> BELOW; surplus/exceeded -> ABOVE; bare "differed" -> MISMATCH). Never
   invent magnitude/unit/direction.
-- RECURRENCE: "four failures in the previous six months" -> {count 4, event "failures",
-  period "the previous six months"}. Never infer a root cause or systemic failure from a count.
+- RECURRENCE = the SAME event/activity happening REPEATEDLY OVER TIME. "four failures in the
+  previous six months" -> {count 4, event "failures", period "the previous six months"}.
+  `recurrence` describes the OBSERVED CONDITION, and it can be present even when the
+  corrective action is a single one-time activity ("Following recurring packaging defects,
+  a two-day audit will be held" -> recurrence {event "packaging defects"}, and the audit
+  itself is ONE-TIME). Never infer a root cause, a systemic failure, or a previous CAPA
+  from a count.
+  DURATION / QUANTITY / POPULATION ARE NOT RECURRENCE. Do NOT set `recurrence.count` from:
+    * a duration -- "two-day audit" is duration 2 days, NOT count 2; "three hours of
+      follow-up" is 3 hours, NOT count 3; "8 hours per audit day" is 8 hours, NOT count 8;
+    * a population/scope count -- "eight panels", "three machines", "five suppliers",
+      "twelve records" are how MANY things, NOT how many repetitions;
+    * a per-item quantity -- "1.5 hours per panel", "2 hours per machine".
+  Set `recurrence` ONLY when the finding states explicit repetition or periodicity:
+  "again", "repeated", "recurring", "every month / quarter / week", "monthly", "three times
+  this year", "each cycle", "on N previous occasions". A single activity that merely lasts
+  N days or takes N hours is NOT recurring.
+
+SEMANTIC SEPARATION -- classify each of these INDEPENDENTLY; never infer one from another:
+  OBSERVED CONDITION      -- what is wrong / deviant.
+  CONDITION RECURRENCE    -- does the observed condition itself recur over time? (`recurrence`)
+  POPULATION              -- how many things are affected (entities / scope count).
+  REMEDIATION ACTIVITY    -- the corrective work to be done.
+  ACTIVITY QUANTITY       -- amount consumed in one occurrence (hours, units).
+  ACTIVITY DURATION       -- how long one occurrence of the activity lasts (days, hours).
+  REMEDIATION RECURRENCE  -- does the corrective activity itself repeat periodically?
+                             ONLY when the finding says so ("audit every quarter").
+  COST COMPONENT          -- one independent input to a cost sum.
+  COMPARISON RELATIONSHIP -- two values the finding sets against each other, expected to agree.
+  CAUSAL RELATIONSHIP     -- an established mechanism for WHY the condition occurs.
+  Examples: "recurring defects + one-time audit" -> CONDITION RECURRENCE yes, REMEDIATION
+  RECURRENCE one-time. "three machines require inspection" -> POPULATION 3, recurrence none.
+  "the audit lasts two days" -> DURATION 2 days, recurrence none. "labour Rs 900/hour for
+  1.5 hours per panel" -> QUANTITY 1.5 h, rate 900, recurrence none. "labour ... every month"
+  -> REMEDIATION RECURRENCE monthly. "actual cost Rs 20,000 vs approved budget Rs 15,000"
+  -> COMPARISON active. "inspection Rs 20,000 and travel Rs 5,000" -> two COST COMPONENTS,
+  comparison none. "supplier must be audited every quarter" -> REMEDIATION RECURRENCE
+  quarterly. "travel and accommodation quoted at Rs 18,000" -> one fixed COST COMPONENT.
 - COMPETING CAUSAL MECHANISMS: when the finding enumerates alternatives ("could have
   resulted from A, B or C") set stated_causal_alternatives=[A,B,C], causal_alternatives_
   unresolved=true. Never pick one as the subject, never rank them, never collapse to "cause
@@ -96,10 +147,29 @@ leading_hypothesis_id=null, root_cause_status=NOT_ESTABLISHED. Never manufacture
 Each hypothesis carries discriminating_evidence; SUPPORTED only with a VERIFIED causal claim.
 
 INVESTIGATION RULES
-investigation_plan: each step = what is unknown, why it matters, what evidence resolves it,
-what decision it enables. Generate from THIS finding's gaps (cause / extent / recurrence /
-control failure) -- only gaps that actually exist. Vary between findings. No fixed question
-set. Do not assert a cause as fact or convert a hypothesis into a fact.
+INFORMATION GAP DISCIPLINE. `information_gaps` and `investigation_plan` steps are SEMANTIC
+gaps only -- something needed to UNDERSTAND the finding, its cause, the governing
+requirement, the affected scope, the impact, a previous CAPA, or a genuine evidence
+conflict. Before emitting one, ask: (1) what unknown FACT does it resolve? (2) is that fact
+necessary to understand the finding or its cause? (3) is it already established by evidence?
+(4) is it merely ARITHMETIC (a total / sum / reconciliation of numbers already given)?
+(5) is it merely a REMEDIATION PRICING INPUT (a rate / quantity / unit price / delivery /
+installation / labour cost)? (6) is it a TRUE evidence conflict (two records disagree)?
+Emit the gap ONLY if (1)+(2) yes and (3)+(4)+(5) no, OR (6) yes.
+A remediation pricing input belongs in `pricing_information` (which you already emit), NEVER
+in `information_gaps` / `investigation_plan` -- the remediation layer and the calculator own
+pricing and arithmetic. If a pricing input is genuinely unstated, record it in
+`pricing_information` with evidence_available=false; do NOT also raise it as an
+investigation gap.
+BAD information_gaps (never emit): "quotation for the refrigerator", "installation cost",
+"total remediation cost", "verify total cost", "confirm cost components", "reconcile the
+cost components", "verify the calculation", "the biomedical-engineering rate".
+GOOD information_gaps: "the requirement establishing that the refrigerator must be
+replaced", "the cause of the refrigerator failure", "which approved specification governs
+the replacement", "whether a previous CAPA was implemented for the same recurring failure",
+"which of two conflicting approved quotation records governs".
+investigation_plan steps follow the same discipline. Generate from THIS finding's SEMANTIC
+gaps only -- vary between findings, no fixed question set, do not assert a cause as fact.
 investigation_activities: work whose PURPOSE is to find out what happened (reconcile,
 compare, review, verify, determine, establish the basis, trace, examine). disposition
 always INVESTIGATION. NOT remediation, never priced.

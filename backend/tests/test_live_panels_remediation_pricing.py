@@ -74,8 +74,11 @@ async def test_panels_full_pricing_19600_live():
     ai = " ".join(rc.auditor_inputs_required or []).lower()
     for tok in ("350", "900", "6000", "6,000", "label cost", "inspection cost", "labor cost"):
         assert tok not in ai, f"auditor input requests known pricing: {rc.auditor_inputs_required}"
-    # comparison must not be active (a cost composition is not a discrepancy).
-    # NOTE: qwen3:8b sometimes still fabricates one here -- documented Pass 52
-    # model-capability limitation; xfail rather than fake a pass.
-    if comparison_is_active(getattr(ctx, "comparison", None)):
-        pytest.xfail("qwen3:8b fabricated a comparison over the cost components (model limitation)")
+    # comparison must not be active -- a cost composition is not a discrepancy.
+    # Pass 53: even if qwen3:8b emits an UNRESOLVED_COMPARISON over the cost
+    # components, the canonical validator's structural-coherence guard (no
+    # direction, no magnitude, no baseline reference) downgrades it, so the
+    # validated context must have no active comparison.
+    assert not comparison_is_active(getattr(ctx, "comparison", None)), (
+        getattr(ctx, "comparison", None)
+    )
