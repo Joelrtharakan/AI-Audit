@@ -168,8 +168,12 @@
             html += "<span style='width:8px; height:8px; border-radius:50%; background:#d97706; display:inline-block; box-shadow:0 0 8px #d97706;'></span> DETERMINISTIC SAFETY ANALYSIS (LLM SEMANTIC LAYER UNAVAILABLE)";
             html += "</span>";
         } else {
+            // Final hardening Phase 16: the label must not imply the AI
+            // established a root cause / verified conclusion. It describes what
+            // the pipeline did -- AI-interpreted semantics + structural
+            // validation -- and that a human auditor must review it.
             html += "<span style='background:#ecfdf5; color:#059669; border:1px solid #a7f3d0; font-size:11px; font-weight:700; padding:7px 16px; border-radius:30px; text-transform:uppercase; letter-spacing:0.8px; display:flex; align-items:center; gap:8px;'>";
-            html += "<span style='width:8px; height:8px; border-radius:50%; background:#10b981; display:inline-block; box-shadow:0 0 8px #10b981;'></span> DEEP LLM SYNTHESIS ACTIVE";
+            html += "<span style='width:8px; height:8px; border-radius:50%; background:#10b981; display:inline-block; box-shadow:0 0 8px #10b981;'></span> AI-ASSISTED ANALYSIS &bull; HUMAN REVIEW REQUIRED";
             html += "</span>";
         }
         if (report.provider_used) {
@@ -448,7 +452,10 @@
 
         if (invEvidence.length > invQuestions.length) {
             html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px; font-size:12px; color:#475569;'>";
-            html += "<strong style='color:#0f172a;'>Additional Evidence Artifacts to Collect:</strong> " + escapeHtml(invEvidence.slice(invQuestions.length).join("; "));
+            // Phase 9.3 Issue 2: this list mixes evidence requirements with
+            // unresolved facts/questions -- do not assert that every item is an
+            // "artifact". Neutral label.
+            html += "<strong style='color:#0f172a;'>Additional evidence and open points to resolve during the investigation:</strong> " + escapeHtml(invEvidence.slice(invQuestions.length).join("; "));
             html += "</div>";
         }
         html += "</div>";
@@ -733,8 +740,27 @@
                     && rcNum(rc.low_estimate) && rcNum(rc.high_estimate) && rc.low_estimate === rc.high_estimate);
                 if (rcExactTotal && rcMl) {
                     html += "<div style='background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:12px 16px; margin-bottom:10px;'>";
-                    html += "<div style='font-size:10px; font-weight:800; color:#15803d; text-transform:uppercase; letter-spacing:0.5px;'>Total Remediation Cost</div>";
-                    html += "<div style='font-size:20px; font-weight:800; color:#0f172a;'>" + rcMl + "</div></div>";
+                    html += "<div style='font-size:10px; font-weight:800; color:#15803d; text-transform:uppercase; letter-spacing:0.5px;'>Expected Remediation Cost</div>";
+                    html += "<div style='font-size:20px; font-weight:800; color:#0f172a;'>" + rcMl + "</div>";
+                    // Final hardening Phase 15: "EXACT" = the arithmetic is exact
+                    // given the evidence-stated quantities/rates -- NOT a
+                    // guaranteed real-world incurred amount.
+                    html += "<div style='font-size:11px; color:#15803d; margin-top:4px;'>Exact arithmetic over the quantities and rates stated in the evidence &mdash; not a guaranteed incurred cost; excludes taxes, contingency and price movement unless stated.</div>";
+                    html += "</div>";
+                } else if (rc.is_partial_estimate) {
+                    // Final hardening ISSUE 3/4/6/8: a PARTIAL_ESTIMATE is the
+                    // KNOWN PRICED PORTION, never a total. No Low/Most Likely/
+                    // High grid unless a GENUINE spread survived (low != high).
+                    var rcKnown = rcMoney(rc.one_time_cost) || rcMoney(rc.recurring_cost) || rcMl;
+                    html += "<div style='background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:12px 16px; margin-bottom:10px;'>";
+                    html += "<div style='font-size:10px; font-weight:800; color:#b45309; text-transform:uppercase; letter-spacing:0.5px;'>Partial Estimate &mdash; Known Priced Remediation Cost</div>";
+                    if (rcKnown) html += "<div style='font-size:20px; font-weight:800; color:#0f172a;'>" + rcKnown + (rcMoney(rc.recurring_cost) && rc.recurring_period ? " <span style='font-size:12px; font-weight:600; color:#64748b;'>/ " + safeEsc(rc.recurring_period) + "</span>" : "") + "</div>";
+                    html += "<div style='font-size:12px; color:#0f172a; margin-top:6px; font-weight:700;'>Total remediation cost: NOT ASSESSABLE</div>";
+                    html += "<div style='font-size:11px; color:#92400e; margin-top:2px;'>This amount covers only remediation components with established pricing. Additional required remediation (listed below) remains unpriced, so a complete total cannot be given.</div>";
+                    if (rcLow && rcHigh && rc.low_estimate !== rc.high_estimate) {
+                        html += "<div style='font-size:11px; color:#64748b; margin-top:6px;'>Priced-portion range: " + rcLow + " &ndash; " + rcHigh + "</div>";
+                    }
+                    html += "</div>";
                 } else if (rcLow || rcMl || rcHigh) {
                     html += "<div style='display:flex; flex-wrap:wrap; gap:16px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 16px; margin-bottom:10px;'>";
                     if (rcLow) html += "<div><div style='font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase;'>Low</div><div style='font-size:14px; font-weight:800; color:#0f172a;'>" + rcLow + "</div></div>";
@@ -744,13 +770,28 @@
                 }
 
                 var rcOt = rcMoney(rc.one_time_cost), rcRec = rcMoney(rc.recurring_cost);
-                if (rcOt || rcRec) {
-                    html += "<div style='font-size:12px; color:#475569; margin-bottom:10px;'>";
-                    if (rcOt) html += "<strong>" + (rc.is_partial_estimate ? "Known one-time cost:" : "One-time:") + "</strong> " + rcOt + "&nbsp;&nbsp;";
-                    if (rcRec) html += "<strong>Recurring:</strong> " + rcRec + (rc.recurring_period ? " / " + safeEsc(rc.recurring_period) : "");
-                    html += "</div>";
-                }
                 var rcHorizon = rcMoney(rc.recurring_horizon_total);
+                if ((rcOt || rcRec) && !rc.is_partial_estimate) {
+                    html += "<div style='font-size:12px; color:#475569; margin-bottom:10px;'>";
+                    if (rcOt) html += "<strong>One-time cost:</strong> " + rcOt + "&nbsp;&nbsp;";
+                    if (rcRec) html += "<strong>Recurring cost:</strong> " + rcRec + (rc.recurring_period ? " per " + safeEsc(rc.recurring_period) : "");
+                    html += "</div>";
+                    // Spec §14/§15/§17: a recurring cost with no established number of
+                    // occurrences / horizon has NO finite total -- say so explicitly so
+                    // the periodic figure is never read as the remediation total.
+                    if (rcRec && !rcHorizon) {
+                        // Phase 9.2 Issue 3: name the actual recurrence unit from the
+                        // canonical field -- never hard-code "per occurrence" when the
+                        // basis is a calendar period (per month / per week / ...).
+                        var rcPer = rc.recurring_period ? (" per " + safeEsc(rc.recurring_period)) : "";
+                        var rcUnitPhrase = rc.recurring_period
+                            ? ("the per-" + safeEsc(rc.recurring_period) + " amount")
+                            : "a per-occurrence amount";
+                        html += "<div style='background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:8px 12px; margin-bottom:10px; font-size:12px; color:#92400e;'>";
+                        html += "<strong>Total remediation cost: NOT ASSESSABLE.</strong> This cost repeats" + rcPer + ", and the duration or number of periods over which to total it is not established. The figure above is " + rcUnitPhrase + " only.";
+                        html += "</div>";
+                    }
+                }
                 if (rcHorizon && rcNum(rc.recurring_horizon) && rc.recurring_period) {
                     html += "<div style='font-size:12px; color:#475569; margin-bottom:10px;'>";
                     html += "<strong>Recurring cost over " + safeEsc(String(rc.recurring_horizon)) + " " + safeEsc(rc.recurring_period);
@@ -783,7 +824,7 @@
                         } else {
                             html += "<span style='color:#94a3b8;'>no priced amount</span>";
                         }
-                        html += " &middot; " + rcBadge(c.unit_cost_basis) + " &middot; " + safeEsc(c.recurrence === "RECURRING" ? "recurring" : "one-time");
+                        html += " &middot; " + rcBadge(c.unit_cost_basis) + " &middot; " + safeEsc(c.recurrence === "RECURRING" ? "recurring" : (c.recurrence === "UNKNOWN" ? "recurrence not established" : "one-time"));
                         if (c.source_reference_ids && c.source_reference_ids.length) {
                             html += " &middot; <span style='color:#64748b;'>evidence: " + safeEsc(c.source_reference_ids.join(", ")) + "</span>";
                         }

@@ -32,7 +32,7 @@ from app.remediation.semantic_models import (
     RemediationSemanticStatus,
     RemediationStrategy,
 )
-from app.services.llm_client import LLMError, get_llm_client
+from app.services.llm_client import LLMError, LLMTimeoutError, get_llm_client
 from app.services.llm_json import parse_llm_json
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ _SCHEMA_HINT = (
     '"unit_cost_basis":"VERIFIED|REPORTED|ESTIMATED|ASSUMED|NOT_ESTABLISHED","currency":str,'
     '"amount_type":"PER_QUANTITY|PER_HOUR|PER_UNIT|PER_EVENT|PER_IMPLEMENTATION|COMPONENT|SUBTOTAL|TOTAL|ALTERNATIVE",'
     '"alternative_group":str(only for ALTERNATIVE),"is_primary_option":bool(only for ALTERNATIVE),'
-    '"recurrence":"ONE_TIME|RECURRING (a per-month/week/quarter/year cost is RECURRING)",'
+    '"recurrence":"ONE_TIME|RECURRING|UNKNOWN -- UNKNOWN when one-time vs recurring cannot be established; NEVER default to ONE_TIME",'
     '"recurring_period":str(REQUIRED when recurrence=RECURRING),'
     '"source_reference_ids":[str],"assumptions":[str],"rationale":str}],'
     '"calculation_proposals":[{"calculation_id":str(required),'
@@ -378,14 +378,19 @@ async def interpret_remediation(
             timeout_seconds=effective_timeout,
         )
     except (LLMError, Exception) as exc:  # noqa: BLE001 - fail-closed by design
+        # A provider TIMEOUT is a distinct state from a general provider
+        # failure (spec §19) -- surfaced so the auditor sees "the model was
+        # slow", not "the model is down" or "the evidence is thin".
+        _is_timeout = isinstance(exc, LLMTimeoutError) or "timeout" in str(exc).lower() or "timed out" in str(exc).lower()
+        _status = "LLM_TIMEOUT" if _is_timeout else "LLM_UNAVAILABLE"
         logger.info(
-            "REMEDIATION COST INTERPRETATION status=LLM_UNAVAILABLE latency_ms=%d "
+            "REMEDIATION COST INTERPRETATION status=%s latency_ms=%d "
             "prompt_chars=%d num_ctx=%s max_tokens=%s timeout_s=%s (%s)",
-            int((_time.monotonic() - _t0) * 1000), _prompt_chars,
+            _status, int((_time.monotonic() - _t0) * 1000), _prompt_chars,
             settings.remediation_cost_num_ctx, settings.remediation_cost_max_tokens,
             effective_timeout, exc,
         )
-        return "LLM_UNAVAILABLE", None
+        return _status, None
     _meta: dict = {}
     try:
         from app.services.llm.call_metadata import get_last_call_metadata
@@ -393,10 +398,12 @@ async def interpret_remediation(
     except Exception:
         _meta = {}
     logger.info(
-        "REMEDIATION COST INTERPRETATION status=OK latency_ms=%d prompt_chars=%d "
+        "REMEDIATION COST INTERPRETATION status=OK prompt_version=%s model=%s latency_ms=%d prompt_chars=%d "
         "prompt_tokens=%s output_tokens=%s finish_reason=%s "
         "load_ms=%s prompt_eval_ms=%s gen_ms=%s total_ms=%s tok_per_s=%s "
         "response_chars=%d num_ctx=%s max_tokens=%s timeout_s=%s",
+        settings.remediation_cost_prompt_version,
+        (settings.remediation_cost_model or settings.ollama_model),
         int((_time.monotonic() - _t0) * 1000), _prompt_chars,
         _meta.get("prompt_eval_count", "?"), _meta.get("eval_count", "?"),
         _meta.get("done_reason", "?"),

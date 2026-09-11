@@ -173,10 +173,13 @@ def _normalize_components(parsed: dict) -> None:
         _rc = c.get("recurrence")
         if isinstance(_rc, str):
             _rcu = _rc.strip().upper().replace(" ", "_").replace("-", "_")
-            if _rcu in ("ONE_TIME", "RECURRING", ""):
+            if _rcu in ("ONE_TIME", "RECURRING", "UNKNOWN", ""):
                 c["recurrence"] = _rcu or "ONE_TIME"
             elif _rcu in ("ONETIME", "ONE_OFF", "SINGLE", "UPFRONT"):
                 c["recurrence"] = "ONE_TIME"
+            elif _rcu in ("UNRESOLVED", "UNCLEAR", "UNCERTAIN", "NOT_ESTABLISHED",
+                          "NOT_DETERMINED", "AMBIGUOUS", "TBD"):
+                c["recurrence"] = "UNKNOWN"
             else:
                 _p = _rcu.removeprefix("PER_").removesuffix("LY").lower()
                 _res = next((v for k, v in {
@@ -187,7 +190,10 @@ def _normalize_components(parsed: dict) -> None:
                     c["recurrence"] = "RECURRING"
                     c.setdefault("recurring_period", _res)
                 else:
-                    c["recurrence"] = "ONE_TIME"
+                    # An unrecognised recurrence value is NOT silently coerced to
+                    # ONE_TIME (spec §7/§29) -- it means the model did not
+                    # establish recurrence -> UNKNOWN (fails closed downstream).
+                    c["recurrence"] = "UNKNOWN"
         _flatten_nested_amount(c, "unit_cost", "currency", "unit_cost_obj")
         nested_range = c.get("unit_cost_range")
         if isinstance(nested_range, dict):

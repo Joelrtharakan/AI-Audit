@@ -100,23 +100,32 @@ def test_llm_cause_subject_rejected_and_floor_also_unsafe_fails_closed(llm_prima
     assert "cause" not in subj or subj.startswith(("unknown", "unresolved", "finding subject not"))
 
 
-def test_llm_omission_does_not_erase_deterministic_comparison(llm_primary):
+def test_llm_omission_of_comparison_is_not_established_not_floor_guessed(llm_primary):
+    # CONTRACT (Pass 37/38, final-hardening Phase 1): the canonical LLM is the
+    # sole semantic authority on canonical success. When it OMITS a comparison,
+    # that means NOT_ESTABLISHED -- the deterministic raw-text floor's guess is
+    # NOT resurrected. (Superseded the pre-Pass-37 "floor conserves omission"
+    # behaviour, which was a raw-text semantic re-derivation past LLM success.)
     f = "The reconciliation of inventory location IL-4 showed a shortfall of 120 units against the system record."
     llm_primary(_p(finding_subject="inventory location IL-4"))   # LLM drops the comparison
     s = asyncio.run(_understand(f))
+    ctx = s["canonical_semantic_context"]
+    from app.services.canonical_semantic_models import comparison_is_active
+    assert not comparison_is_active(getattr(ctx, "comparison", None))
     cf = s["canonical_finding_state"]
-    assert cf.semantic_type == "COMPARISON"
-    assert cf.comparison_type in ("BELOW", "MISMATCH")
-    assert cf.measurement is not None and cf.measurement.value == 120.0
+    assert cf.semantic_type != "COMPARISON"
 
 
-def test_llm_omission_does_not_erase_deterministic_recurrence(llm_primary):
+def test_llm_omission_of_recurrence_is_not_established_not_floor_guessed(llm_primary):
+    # Same contract: LLM omission of recurrence -> NOT established on the
+    # canonical-success path (no raw-text detect_recurrence re-derivation).
     f = "Equipment M-204 experienced three failures over a six-month period."
     llm_primary(_p(finding_subject="Equipment M-204"))
     s = asyncio.run(_understand(f))
     cf = s["canonical_finding_state"]
-    assert cf.recurrence_count == 3
-    assert cf.recurrence_event and cf.recurrence_period
+    assert not cf.recurrence_count
+    ctx = s["canonical_semantic_context"]
+    assert getattr(ctx, "recurrence", None) is None
 
 
 def test_llm_manufactured_number_blocked_end_to_end(llm_primary):

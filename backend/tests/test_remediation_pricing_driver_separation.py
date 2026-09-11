@@ -62,7 +62,7 @@ def _llm(activities, components, *, summary="Address the finding",
         ],
         "cost_components": [
             dict({"component_id": c.get("id", f"C{i}"), "description": c["d"],
-                  "cost_category": c.get("cat", "labor"),
+                  "cost_category": c.get("cat", "labor"), "value_kind": "REMEDIATION_COST",
                   "amount_type": "COMPONENT", "recurrence": "ONE_TIME"}, **c.get("extra", {}))
             for i, c in enumerate(components)
         ],
@@ -254,7 +254,9 @@ def test_priced_activity_plus_unpriced_component_is_partial_and_consistent():
         estimability="ESTIMABLE",
     ))
     assert res.is_partial_estimate is True
-    assert res.most_likely_estimate == 8000.0
+    # partial estimate -> priced portion via one_time_cost, no point estimate
+    assert res.one_time_cost == 8000.0
+    assert res.most_likely_estimate is None
     impl = set(res.implementation_activities)
     assert not any("labour for" in a.lower() for a in impl)
     assert set(res.unpriced_activities) <= impl

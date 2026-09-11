@@ -31,6 +31,9 @@ async def _check_groq_reachable() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    from app.startup_checks import validate_configuration
+
+    validate_configuration(get_settings())
     await _check_groq_reachable()
     yield
 
@@ -51,14 +54,17 @@ def create_app() -> FastAPI:
     )
 
     origins = settings.allowed_origins_list
-    app.add_middleware(
-        CORSMiddleware,
+    # The permissive localhost regex is a local-dev convenience only. In
+    # production, credentialed CORS is restricted to the explicit allow-list.
+    cors_kwargs: dict = dict(
         allow_origins=origins if origins else ["http://localhost:5500", "http://localhost:5510"],
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    if not settings.is_production:
+        cors_kwargs["allow_origin_regex"] = r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$"
+    app.add_middleware(CORSMiddleware, **cors_kwargs)
 
     app.include_router(auth.router)
     app.include_router(health.router)

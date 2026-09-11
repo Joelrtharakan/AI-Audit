@@ -41,6 +41,59 @@ _FINDING_REF_ID = "FINDING"
 _PER_X_TYPES = frozenset({"PER_QUANTITY", "PER_HOUR", "PER_UNIT", "PER_EVENT", "PER_IMPLEMENTATION"})
 _TOTAL_TYPES = frozenset({"TOTAL", "SUBTOTAL"})
 
+# Calendar RECURRENCE periods -- units of the calendar over which a cost
+# repeats. This is a units-of-time dimension check (like the currency-
+# compatibility check), NOT finding-text keyword matching: it is applied ONLY
+# to the LLM's own structured `quantity_unit` / `recurring_period` fields, to
+# detect when the model's quantity dimension contradicts its own recurrence
+# classification. "hour" / "minute" / "day" / "shift" are deliberately EXCLUDED
+# -- they are the duration of a single occurrence of work ("10 hours to do the
+# one-time job", "a two-day audit"), never a recurrence period. The firewall
+# only ever DOWNGRADES an internally inconsistent result to review-required; it
+# never infers a recurrence value or converts ONE_TIME -> RECURRING.
+_CALENDAR_PERIODS = frozenset({
+    "week", "fortnight", "month", "bimonth", "quarter", "semester",
+    "year", "annum", "biannual",
+})
+
+
+def _is_calendar_period(unit: str | None) -> bool:
+    return _norm_period(unit) in _CALENDAR_PERIODS
+
+
+# Generic "one thing that happens" nouns -- when a RECURRING component with an
+# established recurring_period carries a `quantity > 1` measured in one of these,
+# the quantity is ambiguous between (a) a per-occurrence count and (b) a count of
+# how many periods/occurrences the cost was totalled over (a folded horizon).
+# The demonstrated qwen3:8b failure: "run monthly for six months, each round
+# Rs 2,000" -> quantity 6 "round", recurring, amount 12,000. This is the same
+# footing as _CALENDAR_PERIODS: a small, domain-neutral structural set applied
+# ONLY to the model's own `quantity_unit`, never to finding text. Resource units
+# (hour / person / unit / kg / sample / document ...) are deliberately excluded
+# -- those are unambiguously a per-occurrence quantity.
+_OCCURRENCE_NOUNS = frozenset({
+    "round", "occurrence", "run", "cycle", "visit", "session", "iteration",
+    "pass", "instance", "time", "occasion", "repetition", "reoccurrence",
+})
+
+
+def _is_occurrence_noun(unit: str | None) -> bool:
+    u = (unit or "").strip().lower().rstrip("s")
+    return u in _OCCURRENCE_NOUNS
+
+
+# Sub-hour durations -> hours by a FIXED universal ratio (no domain / working-
+# day assumption). Only unambiguous spellings (bare "m"/"s" excluded: "m" is
+# minute vs month vs metre). Used only to reconcile a PER_HOUR rate's implicit
+# time base against the LLM's own `quantity_unit` -- never on finding text.
+_SUBHOUR_TO_HOURS = {
+    "second": 1 / 3600, "seconds": 1 / 3600, "sec": 1 / 3600, "secs": 1 / 3600,
+    "minute": 1 / 60, "minutes": 1 / 60, "min": 1 / 60, "mins": 1 / 60,
+    "hour": 1.0, "hours": 1.0, "hr": 1.0, "hrs": 1.0,
+}
+# Time units that CANNOT be converted to hours/days without an undefined basis.
+_UNCONVERTIBLE_TIME = {"day", "days", "shift", "shifts", "week", "weeks", "fortnight"}
+
 
 def _finite_pos(v: float | None) -> bool:
     return v is not None and v > 0
@@ -55,6 +108,7 @@ def _validate_component(
     valid_reference_ids: set[str],
     valid_evidence_ids: set[str],
     outcome: RemediationValidationOutcome,
+    verified_evidence_ids: set[str] | None = None,
 ) -> RemediationCostComponent | None:
     """Return a possibly-adjusted copy of the component, or None if it must be
     dropped entirely. Adjustments (basis downgrade, pricing strip) are recorded
@@ -126,6 +180,23 @@ def _validate_component(
         outcome.llm_disagreements.append(
             f"{c.component_id}: unit cost marked {c.unit_cost_basis} but no cited evidence "
             f"supports it -- downgraded to {data['unit_cost_basis']}."
+        )
+
+    # --- Epistemic-status integrity (Phase 9.2 Issue 2): "VERIFIED" means the
+    # price is backed by an INDEPENDENTLY-VERIFIED record. If the component cites
+    # evidence but none of the cited items are VERIFIED-status (they are
+    # REPORTED / BELIEF / an estimate / the finding narrative), the price is at
+    # best REPORTED -- successful arithmetic never upgrades it. Structural check
+    # over the evidence ledger's own status, not the finding text.
+    if (
+        data.get("unit_cost_basis") == "VERIFIED"
+        and verified_evidence_ids is not None
+        and not any(r in verified_evidence_ids for r in kept_refs)
+    ):
+        data["unit_cost_basis"] = "REPORTED"
+        outcome.llm_disagreements.append(
+            f"{c.component_id}: unit cost marked VERIFIED but the cited evidence is not an "
+            "independently-verified record -- capped at REPORTED."
         )
 
     if c.quantity_basis == "EVIDENCED" and not has_evidence_ref:
@@ -247,8 +318,23 @@ def _validate_component(
     _period = (data.get("recurring_period") or "").strip()
     _recurrence = data.get("recurrence")
     _has_amount = data.get("unit_cost") is not None
+    _qunit = (data.get("quantity_unit") or "").strip()
+    _qty = data.get("quantity")
     _freq_conflict_detail = ""
-    if _has_amount and _recurrence == "ONE_TIME" and _period:
+    _freq_conflict_code = "INVALID_NUMBER"
+    if _has_amount and _recurrence == "UNKNOWN":
+        # The model could not establish whether this cost is one-time or
+        # recurring (spec §7/§15/§29). It is NOT assumed one-time -- the number
+        # is stripped, the driver kept, and the auditor asked to confirm.
+        _freq_conflict_detail = (
+            "The model could not establish whether this cost is one-time or recurring, "
+            "so no dependable figure was produced. Confirm whether the cost is one-time "
+            "or recurring and, if recurring, the period and the horizon it applies over."
+        )
+        _freq_conflict_code = "RECURRENCE_NOT_ESTABLISHED"
+        if data.get("recurring_period"):
+            data["recurring_period"] = None
+    elif _has_amount and _recurrence == "ONE_TIME" and _period:
         _freq_conflict_detail = (
             f"This cost is marked one-time but states a recurring period ('{_period}'); "
             "the frequency is contradictory, so no amount was produced. Confirm whether "
@@ -259,16 +345,126 @@ def _validate_component(
             "This cost is marked recurring but no recurrence period is stated, so the "
             "recurring amount cannot be expressed. Confirm the recurrence period."
         )
+    # RECURRENCE-CLASSIFICATION FIREWALL (Strategy A -- structured-field
+    # consistency only, no finding-text inspection, no recurrence inference).
+    # R1: a PER_* rate whose OWN `quantity_unit` is a calendar period, tagged
+    #     ONE_TIME -> the model quantified a repeating cost by a calendar
+    #     period yet classified it one-time (the demonstrated qwen3:8b
+    #     failure: "monthly for six months" -> quantity 6 month, ONE_TIME).
+    # R2: a RECURRING per-<period> cost whose `quantity_unit` is that SAME
+    #     period with quantity > 1 -> the per-occurrence quantity is actually a
+    #     horizon count; the "recurring" amount is inflated by the horizon.
+    # Neither is reinterpreted -- the number is stripped, the single-period
+    # rate is preserved in the rationale, and the auditor is asked to confirm
+    # the recurrence + horizon.
+    elif _has_amount and c.amount_type in _PER_X_TYPES and _is_calendar_period(_qunit) and (
+        _recurrence == "ONE_TIME" and not _period
+    ):
+        _freq_conflict_detail = (
+            f"This cost is quantified per '{_qunit}' (a recurrence period) but is classified "
+            "as one-time, so no dependable figure could be produced. Confirm whether the "
+            "cost is one-time or recurring and, if recurring, the period and the horizon it "
+            "should be totalled over."
+        )
+        _freq_conflict_code = "RECURRENCE_INCONSISTENT"
+    elif (
+        _has_amount and _recurrence == "RECURRING" and _period
+        and _is_calendar_period(_qunit) and _norm_period(_qunit) == _norm_period(_period)
+        and _qty is not None and _qty > 1
+    ):
+        _freq_conflict_detail = (
+            f"This recurring cost is stated per '{_period}' but its quantity ({_qty:g} "
+            f"'{_qunit}') is measured in that same period -- the quantity is a horizon "
+            "count, not a per-occurrence amount, so the recurring figure would be "
+            "over-stated. Confirm the per-occurrence amount and the horizon separately."
+        )
+        _freq_conflict_code = "RECURRENCE_INCONSISTENT"
+    # R3: a RECURRING per-<period> cost whose quantity (>1) is measured in a
+    #     generic OCCURRENCE noun ("6 rounds", "4 runs") -- ambiguous between a
+    #     per-occurrence count and a folded horizon. The recurring figure would
+    #     be the periodic amount multiplied by that count. Structure alone
+    #     cannot disambiguate, so fail closed: strip the multiplied figure, keep
+    #     the single-period rate in the rationale, ask the auditor to confirm
+    #     the per-occurrence amount and the horizon separately.
+    elif (
+        _has_amount and _recurrence == "RECURRING" and _period
+        and _is_occurrence_noun(_qunit) and _qty is not None and _qty > 1
+    ):
+        _freq_conflict_detail = (
+            f"This recurring cost is stated per '{_period}' but its quantity ({_qty:g} "
+            f"'{_qunit}') is a count of occurrences, not a resource amount consumed in one "
+            "period -- the recurring figure may already include a finite horizon. Confirm "
+            "the per-occurrence amount and the horizon it should be totalled over separately."
+        )
+        _freq_conflict_code = "RECURRENCE_INCONSISTENT"
     if _freq_conflict_detail:
         data["unit_cost"] = data["unit_cost_low"] = data["unit_cost_high"] = None
         data["unit_cost_basis"] = "NOT_ESTABLISHED"
         outcome.llm_disagreements.append(f"{c.component_id}: {_freq_conflict_detail}")
         outcome.rejected.append(
             RemediationRejectedItem(
-                item_id=c.component_id, kind="COMPONENT", reason_code="INVALID_NUMBER",
+                item_id=c.component_id, kind="COMPONENT",
+                reason_code=_freq_conflict_code,
                 detail=_freq_conflict_detail,
             )  # type: ignore[arg-type]
         )
+
+    # --- DIMENSIONAL / TIME-UNIT NORMALISATION (spec §7/§8/§32). A PER_HOUR /
+    # PER_DAY rate has an IMPLICIT time base (hour / day). When the LLM's own
+    # `quantity` is expressed in a DIFFERENT time unit, the deterministic layer
+    # -- not the model's final arithmetic -- reconciles the dimension:
+    #   * a sub-hour duration (second / minute) against a PER_HOUR rate is
+    #     converted to hours by a FIXED, universal ratio (no working-day
+    #     assumption, no domain knowledge) before quantity x rate;
+    #   * a time unit that CANNOT be converted without an undefined basis
+    #     (day <-> hour, week, shift) fails closed -- the number is stripped and
+    #     the auditor is asked to confirm the rate basis. Never guessed.
+    # A non-time `quantity_unit` (item / person / procedure / None) is left
+    # untouched -- that is the model's per-unit meaning, not a dimension error.
+    # Calendar-period quantity_units (month / year / ...) are already handled by
+    # the recurrence firewall above.
+    # PER_HOUR is the only time-based rate the schema carries (a "per day" rate
+    # arrives as PER_HOUR or as a flat COMPONENT). Its implicit base unit is
+    # the hour.
+    _qn = (data.get("quantity_unit") or "").strip().lower()
+    _q = data.get("quantity")
+    if not _freq_conflict_detail and data.get("unit_cost") is not None and _q is not None and c.amount_type == "PER_HOUR":
+        _conv: float | None = None
+        _unresolved = False
+        if _qn in _SUBHOUR_TO_HOURS:
+            _conv = _SUBHOUR_TO_HOURS[_qn]
+        elif _qn in _UNCONVERTIBLE_TIME:
+            _unresolved = True
+        _rate_base = "hour"
+        if _unresolved:
+            _detail = (
+                f"This cost is a per-hour rate but its quantity is stated in '{_qn}', "
+                "which cannot be converted to hours without an established basis (e.g. "
+                "hours per working day). No amount was produced; confirm the quantity and "
+                "the rate on the same time basis."
+            )
+            data["unit_cost"] = data["unit_cost_low"] = data["unit_cost_high"] = None
+            data["unit_cost_basis"] = "NOT_ESTABLISHED"
+            outcome.llm_disagreements.append(f"{c.component_id}: {_detail}")
+            outcome.rejected.append(
+                RemediationRejectedItem(
+                    item_id=c.component_id, kind="COMPONENT",
+                    reason_code="UNIT_OR_RATE_BASIS_UNRESOLVED", detail=_detail,
+                )  # type: ignore[arg-type]
+            )
+        elif _conv is not None and _conv != 1.0:
+            _new_q = round(_q * _conv, 6)
+            data["quantity"] = _new_q
+            _orig_unit = data.get("quantity_unit")
+            data["quantity_unit"] = _rate_base
+            _deriv = f"{_q:g} {_orig_unit} = {_new_q:g} {_rate_base} (fixed time conversion)"
+            data["quantity_derivation"] = (
+                f"{data.get('quantity_derivation', '').strip()}; {_deriv}".lstrip("; ")
+                if data.get("quantity_derivation") else _deriv
+            )
+            outcome.llm_disagreements.append(
+                f"{c.component_id}: quantity converted for a per-{_rate_base} rate -- {_deriv}."
+            )
 
     # --- Double-count structural guard (spec section 11): a TOTAL/SUBTOTAL never
     # carries a live quantity multiplier.
@@ -409,6 +605,7 @@ def validate_and_plan(
     valid_evidence_ids: set[str],
     valid_hypothesis_ids: set[str] | None = None,
     valid_capa_refs: set[str] | None = None,
+    verified_evidence_ids: set[str] | None = None,
 ) -> tuple[list[RemediationCostComponent], list[RemediationCalculationProposal], RemediationValidationOutcome]:
     """Validate structure + provenance. Returns
     (surviving_components, accepted_proposals, outcome). No arithmetic."""
@@ -420,7 +617,9 @@ def validate_and_plan(
 
     components: list[RemediationCostComponent] = []
     for c in interpretation.cost_components:
-        adjusted = _validate_component(c, valid_reference_ids, valid_evidence_ids, outcome)
+        adjusted = _validate_component(
+            c, valid_reference_ids, valid_evidence_ids, outcome, verified_evidence_ids
+        )
         if adjusted is None:
             outcome.dropped_component_ids.append(c.component_id)
             if not any(r.item_id == c.component_id and r.kind == "COMPONENT" for r in outcome.rejected):

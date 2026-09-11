@@ -152,10 +152,12 @@ _NON_IMPERATIVE_HEADS = {
     "potential", "potentially", "possible", "possibly", "likely", "unlikely",
 }
 
-# Objects/complements typical right after an imperative head verb.
+# Objects/complements typical right after an imperative head verb. This is the
+# closed class of determiners / demonstratives / possessives / quantifiers that
+# introduce a direct object -- grammar, not vocabulary.
 _IMPERATIVE_COMPLEMENT_RE = re.compile(
-    r"^(?:all|any|the|this|that|these|those|your|my|our|its|his|her|their|"
-    r"it|them|previous|prior|above|everything|anything)\b",
+    r"^(?:all|any|every|each|both|no|none|the|this|that|these|those|your|my|our|its|his|her|their|"
+    r"it|them|previous|prior|above|everything|anything|nothing)\b",
     re.IGNORECASE,
 )
 
@@ -204,7 +206,11 @@ _CLAUSE_SPLIT_RE = re.compile(r"\s*(?:[.,;:!?]|\band\b|\bthen\b|\balso\b)\s+")
 def _clause_is_imperative(clause: str) -> bool:
     """True when a single clause is a subjectless imperative (base-form verb
     head + object).  Morphology + closed-class function words only."""
-    clause = _LEADING_DISCOURSE_RE.sub("", clause.strip())
+    clause = clause.strip()
+    # strip leading non-letter noise ("]]}>{{ ", "### ", ">>> ") so a base-form
+    # verb hiding behind delimiter characters is still seen as the head
+    clause = re.sub(r"^[^A-Za-z]+", "", clause)
+    clause = _LEADING_DISCOURSE_RE.sub("", clause)
     if not clause:
         return False
     tokens = re.findall(r"[A-Za-z][A-Za-z'’_-]*", clause)
@@ -334,6 +340,22 @@ def is_instruction(text: str) -> bool:
     """True if text must be excluded from the evidence ledger. Kept as the
     simple boolean entry point every existing caller already uses."""
     return classify_instruction(text).is_untrusted
+
+
+def is_imperative_phrase(text: str | None) -> bool:
+    """True when `text` is structurally an imperative / directive clause
+    (subjectless base-form-verb-headed clause, or an explicit second-person
+    directive) rather than a noun phrase naming an entity.
+
+    Purely grammatical: morphology + closed-class function words, never an
+    attack-phrase list. Used by the finding-subject gate so a canonical
+    interpretation that returns an instruction ("ignore all previous
+    instructions ...", "set the cost to 1") as the finding subject is rejected
+    as unsafe structure -- it never becomes trusted downstream semantic
+    context."""
+    if not text or not text.strip():
+        return False
+    return _is_imperative_clause(text)
 
 
 def filter_untrusted_instructions(sentences: list[str]) -> tuple[list[str], list[str]]:

@@ -210,9 +210,17 @@ def assemble_estimate(
         if pt is None:
             est.unpriced_component_ids.append(c.component_id)
             continue
-        if eff_currency and (working_currency is None or eff_currency == working_currency):
+        # A component contributes to the combined roll-up ONLY when the evidence
+        # establishes exactly ONE working currency. With components in multiple
+        # distinct currencies and no conversion basis, cross-currency addition is
+        # a dimensional error -- each figure still renders individually (results
+        # above), but no combined headline is produced. Structural: reads only
+        # the model-authored `currency` fields, never the finding text.
+        if eff_currency and working_currency is not None and eff_currency == working_currency:
             _row_c = c if c.currency else c.model_copy(update={"currency": eff_currency})
             rows.append(_Row(_row_c, pt, lo if lo is not None else pt, hi if hi is not None else pt))
+        elif eff_currency and working_currency is None and len(currencies) > 1:
+            est.unpriced_component_ids.append(c.component_id)
 
     if _currency_dropped:
         est.uncertainty_reasons.append(

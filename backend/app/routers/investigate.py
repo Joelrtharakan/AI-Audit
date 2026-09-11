@@ -318,14 +318,11 @@ async def investigate_finding(
         ),
     )
 
-    # Store in cache -- but never a DEGRADED result. Caching a transient
-    # provider failure would otherwise permanently poison every subsequent
-    # request for the same finding, even once Ollama recovers (this is
-    # exactly the "Cache HIT for finding investigation" trap: a prior
-    # DEGRADED response getting replayed forever instead of being retried).
-    report = resp.report
-    if report is not None and getattr(report, "analysis_mode", "LLM") == "DEGRADED":
-        logger.info("Not caching DEGRADED analysis for finding: %s", cache_key[:12])
-    else:
-        set_cached_analysis(cache_key, resp.model_dump())
+    # Store in cache. The cache boundary itself (set_cached_analysis) refuses
+    # DEGRADED / deterministic-fallback / transient-LLM-failure results, so a
+    # transient provider failure can never permanently poison every subsequent
+    # request for the same finding once the provider recovers.
+    stored = set_cached_analysis(cache_key, resp.model_dump())
+    if not stored:
+        logger.info("Analysis not cached (non-cacheable state) for finding: %s", cache_key[:12])
     return resp

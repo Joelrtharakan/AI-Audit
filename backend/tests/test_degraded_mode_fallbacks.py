@@ -44,7 +44,10 @@ def test_five_why_fallback_never_asks_about_reporting_behavior():
     assert len(fw.steps) == 3
     assert fw.steps[-1].status == "UNKNOWN"
     assert "EVIDENCE BOUNDARY" in fw.status_note or "DEGRADED MODE" in fw.status_note
-    assert "NOT ESTABLISHED FROM AVAILABLE EVIDENCE" in fw.steps[-1].answer
+    # Phase 7 §6/§14: the final step is an honest evidence-boundary abstention,
+    # expressed as an auditor-readable sentence (not a shouty machine label).
+    _last = fw.steps[-1].answer.lower()
+    assert "not establish" in _last and ("verification" in _last or "investigation" in _last)
 
 
 def test_five_why_fallback_never_manufactures_recurrence_step():
@@ -77,7 +80,10 @@ def test_critical_case_missed_activity_confirmed_by_person():
     assert fw.steps[0].status == "VERIFIED"
     assert fw.steps[1].status == "REPORTED"
     assert fw.steps[2].status == "UNKNOWN"
-    assert "NOT ESTABLISHED FROM AVAILABLE EVIDENCE" in fw.steps[2].answer
+    # Phase 7 §6/§14: honest evidence-boundary abstention as an auditor-readable
+    # sentence, not an all-caps machine label.
+    _last = fw.steps[2].answer.lower()
+    assert "not establish" in _last and ("verification" in _last or "investigation" in _last)
 
     hyps, _ = build_deterministic_investigation_plan(finding_text, ledger)
     hyp_names = {h.name for h in hyps}

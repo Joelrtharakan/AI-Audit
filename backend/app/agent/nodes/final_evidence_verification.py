@@ -531,7 +531,13 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
     # the pipeline. Recurrence hypotheses are exempt: recurrence is detected
     # independently of this finding's own specificity.
     specificity = "HIGH"
-    if rc is not None:
+    # SEMANTIC AUTHORITY (final-hardening Phase 1): on canonical SUCCESS the
+    # canonical validator already constrained `candidate_hypotheses` (only
+    # CAUSAL_MECHANISM / finding-enumerated alternatives survive) and owns
+    # `stated_causal_alternatives`. Re-classifying the raw finding text to
+    # second-guess that list is a raw-text semantic re-derivation -- the
+    # deterministic LOW-specificity drop runs ONLY on the fallback path.
+    if rc is not None and not _canonical_llm:
         from app.agent.recurrence_guard import is_previous_capa_mechanism_hypothesis as _is_recurrence_hyp
         from app.services.semantic_subject import classify_finding_specificity
         _reported_for_specificity = [e.claim for e in evidence_ledger if e.status == EvidenceStatus.REPORTED]
@@ -722,11 +728,17 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # mechanism ("could have resulted from A, B, or C") is licensed by the
         # finding -- the destructive prose-pattern checks below (which assume
         # an LLM invented the statement) must not remove it (spec 9/28).
-        from app.agent.causal_guard import extract_stated_causal_alternatives as _esca_ff
+        # Semantic authority (final-hardening Phase 1): on canonical SUCCESS
+        # the canonical LLM owns `stated_causal_alternatives`; the raw-text
+        # regex runs ONLY on the deterministic-fallback path.
         from app.services.text_grounding import significant_words as _ff_sig
-        _ff_alt_keys = [
-            frozenset(_ff_sig(a) or []) for a in (_esca_ff(finding_text) or [])
-        ]
+        _sc_ff = state.get("canonical_semantic_context")
+        if _sc_ff is not None:
+            _ff_alts_src = list(getattr(_sc_ff, "stated_causal_alternatives", []) or [])
+        else:
+            from app.agent.causal_guard import extract_stated_causal_alternatives as _esca_ff
+            _ff_alts_src = _esca_ff(finding_text) or []
+        _ff_alt_keys = [frozenset(_ff_sig(a) or []) for a in _ff_alts_src]
 
         def _ff_is_stated_alt(_h) -> bool:
             if not _ff_alt_keys:
@@ -1034,7 +1046,13 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # reuses the one canonical generator). LOW-specificity findings are
         # correctly exempt: there genuinely isn't enough to hypothesize
         # about (handled by the LOW-specificity gate above).
-        if not rc.candidate_hypotheses and specificity != "LOW" and not _had_authoritatively_refuted_hyp:
+        # SEMANTIC AUTHORITY (final-hardening Phase 1/13): on canonical SUCCESS
+        # an empty `candidate_hypotheses` is the canonical LLM's authoritative
+        # terminal decision ("no causal mechanism established") -- the
+        # deterministic backfill generator must NOT manufacture hypotheses over
+        # it. Backfill is a fallback-path-only recovery for a failed synthesis
+        # attempt.
+        if not rc.candidate_hypotheses and not _canonical_llm and specificity != "LOW" and not _had_authoritatively_refuted_hyp:
             from app.agent.nodes.plan_investigation_fallback import (
                 build_conditional_capa_actions,
                 build_deterministic_investigation_plan,
@@ -1204,11 +1222,16 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # is licensed by the finding's own statement -- it is NOT mere topical
         # overlap and must not be demoted to an "investigation area" (spec
         # 6/9). It stays POSSIBLE with root cause NOT_ESTABLISHED.
-        from app.agent.causal_guard import extract_stated_causal_alternatives as _esca
-        _stated_alt_keys = [
-            frozenset(_sig_words(a) or [])
-            for a in (_esca(finding_text) or [])
-        ]
+        # Semantic authority (final-hardening Phase 1): canonical LLM owns
+        # `stated_causal_alternatives` on success; raw-text regex is
+        # fallback-only.
+        _sc_sa = state.get("canonical_semantic_context")
+        if _sc_sa is not None:
+            _sa_src = list(getattr(_sc_sa, "stated_causal_alternatives", []) or [])
+        else:
+            from app.agent.causal_guard import extract_stated_causal_alternatives as _esca
+            _sa_src = _esca(finding_text) or []
+        _stated_alt_keys = [frozenset(_sig_words(a) or []) for a in _sa_src]
 
         def _is_stated_alternative(_h) -> bool:
             if not _stated_alt_keys:
@@ -1397,15 +1420,16 @@ async def final_evidence_verification_node(state: AgentState) -> AgentState:
         # Spec Pass 47 §5/§16: recurrence is LLM-owned on the canonical-success
         # path -- source it from the validated canonical context, not
         # `detect_recurrence(finding_text)` (raw-text regex).
-        from app.agent.recurrence_guard import build_recurrence_rationale, detect_recurrence
+        from app.agent.recurrence_guard import assess_recurrence_risk, detect_recurrence
         from app.services.canonical_state_merge import recurrence_info_from_canonical
         _sc_fev = state.get("canonical_semantic_context")
         _rec = recurrence_info_from_canonical(_sc_fev)
         if _rec is None:
             _rec = detect_recurrence(getattr(state.get("request"), "finding_text", ""))
         if _rec.is_recurring:
-            rc.risk_of_recurrence = "HIGH"
-            rc.risk_of_recurrence_rationale = build_recurrence_rationale(_rec)
+            _rc_est = getattr(rc, "status", None) in (
+                RootCauseStatus.ESTABLISHED, RootCauseStatus.SUPPORTED, "ESTABLISHED", "SUPPORTED")
+            rc.risk_of_recurrence, rc.risk_of_recurrence_rationale = assess_recurrence_risk(_rec, _rc_est)
 
         # Causal-verb firewall on the "Why" text (narrative/root_cause_basis):
         # the same "because"/"due to"/"caused by" over-claim that a

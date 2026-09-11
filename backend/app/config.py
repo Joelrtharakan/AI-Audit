@@ -5,6 +5,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
+# Well-known development placeholders for the internal API key. A value in this
+# set means "no real secret configured" -- permitted (with an auth bypass) in
+# development/test, a hard configuration error in production.
+_DEV_API_KEY_SENTINELS = frozenset({"", "dev", "devkey123", "development", "changeme", "your_internal_api_key_here"})
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -71,13 +76,16 @@ class Settings(BaseSettings):
     # remediation LLM calls) still completes after a canonical timeout.
     # §7 fast-fail: after the prompt/schema compaction + dropping the unused
     # `financial` sub-object, the canonical call is MEASURED at ~58-60s warm
-    # (isolated) on qwen3:8b -- was ~110s / timing out. 100s covers warm +
-    # cold-start + a large finding with real margin and is still below the
-    # old 110s (NOT raised to improve success rate). Pass 29 removes the
-    # redundant core_synthesis call (~20-150s), which is the real latency
-    # win; on a genuine canonical timeout the request proceeds on
-    # DETERMINISTIC_FALLBACK.
-    canonical_semantic_primary_timeout_seconds: float = 100.0
+    # (isolated) on qwen3:8b -- was ~110s / timing out. Pass 56: MEASURED on
+    # the full compiled graph, a large multi-component finding with an evidence
+    # ledger (pharmacy refrigerator: 4 components + provenance) canonical
+    # generation runs >100s and TIMED OUT to DETERMINISTIC_FALLBACK, losing the
+    # LLM's (correct) comparison=None and re-deriving semantics from raw text.
+    # This is a model/hardware generation-throughput limit, not a prompt
+    # defect. Give it real headroom (parallels remediation 150s / Pass 52).
+    # A stronger/faster configured model finishes well inside this. On a
+    # genuine timeout the request still proceeds safely on DETERMINISTIC_FALLBACK.
+    canonical_semantic_primary_timeout_seconds: float = 150.0
     # §9 / Pass 36 M5: generation time is the dominant canonical latency cost on
     # qwen3:8b, so this is the primary lever. The Pass-36 compact-output
     # contract (per-field word caps, omit optional fields, reference evidence by
@@ -347,6 +355,13 @@ class Settings(BaseSettings):
     # flood of simultaneous requests against one provider.
     llm_router_max_concurrency_per_provider: int = 6
 
+    # Deployment environment. "production" makes security-critical configuration
+    # fail closed (see app/auth/require_internal_api_key and app/startup_checks):
+    # a missing or development-sentinel internal API key is a hard error rather
+    # than an implicit "auth disabled". "development" and "test" permit the
+    # local-convenience bypass when no real key is configured.
+    environment: str = "development"
+
     # Internal auth
     internal_api_key: str = ""
 
@@ -358,6 +373,11 @@ class Settings(BaseSettings):
 
     # Prompt version, stamped onto every AI response for traceability
     analysis_prompt_version: str = "1.0"
+    # Per-stage semantic-contract versions (spec §26) -- bump when the
+    # canonical / remediation prompt or its output schema changes so an
+    # AI-assisted decision is reproducible. Stamped into the stage log lines.
+    canonical_semantic_prompt_version: str = "2026-09-01"
+    remediation_cost_prompt_version: str = "2026-09-01b"
 
     # -------------------------------------------------------------------------
     # ASP.NET LQMS integration
@@ -381,9 +401,29 @@ class Settings(BaseSettings):
     agent_overall_timeout_seconds: float = 330.0
     agent_max_critic_iterations: int = 2
 
+    # -------------------------------------------------------------------------
+    # Analysis result cache (app/agent/cache.py). Bounded in-process cache of
+    # completed investigations, keyed on finding text + provider/model +
+    # prompt version. DEGRADED / transient-LLM-failure results are never
+    # stored (enforced at the cache boundary, not just by callers). This is a
+    # per-process cache -- it is NOT shared across uvicorn workers.
+    # -------------------------------------------------------------------------
+    analysis_cache_max_entries: int = 512
+    analysis_cache_ttl_seconds: float = 3600.0
+
     @property
     def allowed_origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() in ("production", "prod")
+
+    @property
+    def internal_api_key_is_sentinel(self) -> bool:
+        """True when the configured internal API key is absent or a well-known
+        development placeholder -- i.e. not a real secret."""
+        return self.internal_api_key.strip().lower() in _DEV_API_KEY_SENTINELS
 
     @property
     def prompts_dir(self) -> Path:

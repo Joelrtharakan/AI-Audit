@@ -741,12 +741,17 @@ def _reconcile_components(
             if cid and t is not None and cid not in t.component_ids:
                 t.component_ids.append(cid)
 
-    # An activity's pricing_status: PRICED iff it has >=1 linked component and
-    # EVERY linked component was priced. No component, or any unpriced
-    # component -> UNPRICED (still visible). Conditionality is untouched --
-    # the two axes are independent.
+    # An activity's pricing_status: PRICED iff it has >=1 linked component that
+    # WAS priced. An activity with a priced portion contributes a real amount to
+    # the total, so it must not ALSO be listed as a wholesale unpriced activity
+    # (Phase 9 Part I -- "configuration priced" + "configuration cost not
+    # established" is contradictory). A partially-priced activity's genuinely
+    # unpriced sub-components remain visible via cost_components
+    # (calculated_amount=None) and the result-level PARTIAL_ESTIMATE +
+    # uncertainty_reasons. No linked component, or none priced -> UNPRICED.
+    # Conditionality is untouched -- the two axes are independent.
     for a in canon:
-        if a.component_ids and all(c in priced_component_ids for c in a.component_ids):
+        if a.component_ids and any(c in priced_component_ids for c in a.component_ids):
             a.pricing_status = PRICED
         else:
             a.pricing_status = UNPRICED

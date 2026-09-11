@@ -60,12 +60,13 @@ async def test_evidenced_multiply_uses_executor_not_llm_number():
             "activity_ids": ["A0"], "cost_category": "training",
             "quantity": 40, "quantity_unit": "person", "quantity_basis": "EVIDENCED",
             "unit_cost": 1200, "unit_cost_basis": "REPORTED", "currency": "INR",
-            "amount_type": "PER_UNIT", "recurrence": "ONE_TIME",
+            "amount_type": "PER_UNIT", "recurrence": "ONE_TIME", "value_kind": "REMEDIATION_COST",
             "source_reference_ids": ["E0", "E1"], "interpretation_confidence": "MEDIUM",
         }],
         "calculation_proposals": [{
             "calculation_id": "K0", "operation": "MULTIPLY", "component_ids": ["C0"],
             "produces": "MOST_LIKELY", "proposed_result_value": 999999, "reason": "qty x rate",
+            "frequency": "ONE_TIME",
         }],
         "overall_status": "EVIDENCE_BACKED", "estimability": "ESTIMABLE",
     }
@@ -158,7 +159,7 @@ async def test_single_verified_cost_preserved():
             "component_id": "C0", "description": "Replacement part (already procured)",
             "cost_category": "replacement", "unit_cost": 85000, "unit_cost_basis": "VERIFIED",
             "currency": "USD", "amount_type": "TOTAL", "recurrence": "ONE_TIME",
-            "source_reference_ids": ["E0"],
+            "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"],
         }],
         "overall_status": "EVIDENCE_BACKED", "estimability": "SINGLE_VERIFIED_COST",
     }
@@ -180,7 +181,13 @@ async def test_provider_unavailable_fails_closed():
     )
     assert res.status == RemediationEstimateStatus.NOT_ASSESSABLE
     assert res.remediation_semantic_status == "LLM_UNAVAILABLE"
-    assert "cannot be reliably estimated" in res.not_assessable_reason
+    # Pass 59 / spec §19: a PROVIDER failure is named as a system-availability
+    # issue and MUST NOT be framed as an evidence gap. (Was: "...cannot be
+    # reliably estimated from the available evidence...".)
+    _r = res.not_assessable_reason.lower()
+    assert "ai semantic model was unavailable" in _r
+    assert "not an evidence gap" in _r
+    assert res.review_required is True
 
 
 @pytest.mark.asyncio
@@ -215,7 +222,8 @@ async def test_partial_estimate_prices_what_it_can():
         "cost_components": [
             {"component_id": "C0", "description": "Replacement unit + install", "activity_ids": ["A0"],
              "cost_category": "replacement", "unit_cost": 240000, "unit_cost_basis": "REPORTED",
-             "currency": "INR", "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "source_reference_ids": ["E0"]},
+             "currency": "INR", "amount_type": "COMPONENT", "recurrence": "ONE_TIME",
+             "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"]},
             {"component_id": "C1", "description": "Process revalidation effort", "activity_ids": ["A1"],
              "cost_category": "validation", "unit_cost_basis": "NOT_ESTABLISHED",
              "amount_type": "COMPONENT", "recurrence": "ONE_TIME"},
@@ -224,7 +232,11 @@ async def test_partial_estimate_prices_what_it_can():
     }
     res = await _run(interp, [_ev("Supplier quotation for the replacement unit including installation is INR 240,000", EvidenceStatus.REPORTED)])
     assert res.status == RemediationEstimateStatus.EVIDENCE_BACKED
-    assert res.most_likely_estimate == 240000.0
+    # Current contract: a PARTIAL_ESTIMATE reports the priced portion as
+    # one_time_cost and leaves most_likely_estimate None (a partial estimate is
+    # not presented as a point estimate).
+    assert res.one_time_cost == 240000.0
+    assert res.most_likely_estimate is None
     assert res.is_partial_estimate is True
     # the revalidation WORK is a visible activity and is unpriced ...
     assert any("revalidat" in a.lower() for a in res.implementation_activities)
@@ -248,16 +260,18 @@ async def test_additive_components_are_summed_not_ranged_end_to_end():
         "cost_components": [
             {"component_id": "C0", "description": "monitoring hardware", "cost_category": "equipment",
              "unit_cost": 300000, "unit_cost_basis": "REPORTED", "currency": "INR",
-             "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "source_reference_ids": ["E0"]},
+             "amount_type": "COMPONENT", "recurrence": "ONE_TIME",
+             "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"]},
             {"component_id": "C1", "description": "installation and commissioning", "cost_category": "installation",
              "unit_cost": 75000, "unit_cost_basis": "REPORTED", "currency": "INR",
-             "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "source_reference_ids": ["E0"]},
+             "amount_type": "COMPONENT", "recurrence": "ONE_TIME",
+             "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"]},
         ],
         # even an adversarial produces=LOW/HIGH set must not create a range
         "calculation_proposals": [
-            {"calculation_id": "K0", "operation": "SUM", "component_ids": ["C1"], "produces": "LOW"},
-            {"calculation_id": "K1", "operation": "SUM", "component_ids": ["C0"], "produces": "MOST_LIKELY"},
-            {"calculation_id": "K2", "operation": "SUM", "component_ids": ["C0", "C1"], "produces": "HIGH"},
+            {"calculation_id": "K0", "operation": "SUM", "component_ids": ["C1"], "produces": "LOW", "frequency": "ONE_TIME"},
+            {"calculation_id": "K1", "operation": "SUM", "component_ids": ["C0"], "produces": "MOST_LIKELY", "frequency": "ONE_TIME"},
+            {"calculation_id": "K2", "operation": "SUM", "component_ids": ["C0", "C1"], "produces": "HIGH", "frequency": "ONE_TIME"},
         ],
         "overall_status": "EVIDENCE_BACKED",
     }
@@ -288,7 +302,7 @@ async def test_report_generator_populates_remediation_cost(monkeypatch):
             "component_id": "C0", "description": "external calibration service",
             "cost_category": "external services", "unit_cost": 15000, "unit_cost_basis": "REPORTED",
             "currency": "INR", "amount_type": "TOTAL", "recurrence": "ONE_TIME",
-            "source_reference_ids": ["E0"],
+            "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"],
         }],
         "overall_status": "EVIDENCE_BACKED",
     }

@@ -39,7 +39,7 @@ def test_verified_claim_with_real_evidence_ref_survives():
     interp = _interp([{
         "component_id": "C0", "description": "part", "cost_category": "replacement",
         "unit_cost": 5000, "unit_cost_basis": "VERIFIED", "currency": "INR",
-        "amount_type": "TOTAL", "source_reference_ids": ["E1"],
+        "amount_type": "TOTAL", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E1"],
     }])
     comps, _, _ = validate_and_plan(interp, EV)
     assert comps[0].unit_cost_basis == "VERIFIED"

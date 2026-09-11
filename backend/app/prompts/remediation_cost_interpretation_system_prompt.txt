@@ -17,6 +17,32 @@ cause-dependent preventive action; EFFECTIVENESS_CHECK for verification). A like
 replacement of a damaged established item is IMMEDIATE_CORRECTION with
 depends_on_root_cause=false -- never a systemic intervention.
 
+SEMANTIC DISTINCTIONS -- reason about MEANING, never match a word. These are the
+distinctions most often confused; keep them separate for EVERY finding, in every domain:
+ * COMPOSITION vs COMPARISON. Several prices/rates for DIFFERENT parts of one remediation
+   (materials + labour + inspection; equipment + delivery + install) are a COST COMPOSITION
+   -- you add them. They are NOT a comparison. A comparison exists only when the finding
+   sets one value AGAINST a standard it is expected to meet (actual vs approved / measured
+   vs specification / current vs previous / cost vs budget). Do not treat "two amounts
+   appear together" as a comparison. Comparison is a canonical-layer concept -- here you
+   simply never invent one.
+ * PER-OCCURRENCE amount vs TOTAL over a horizon. "Rs 2,000 per month for six months":
+   the per-occurrence amount is Rs 2,000, recurring_period is month, the 6 is the HORIZON
+   (RULE 17), NOT the quantity and NOT part of the rate. Never emit "Rs 12,000 per month".
+ * CALENDAR recurrence vs EVENT recurrence vs ONE_TIME vs UNKNOWN. "Re-run whenever the
+   feed/config/recipe changes" is RECURRING with recurring_period = the triggering event
+   ("each feed change"); it is NOT one-time just because there is no month/year. If the
+   number of future occurrences is not established, price the per-occurrence amount and set
+   NO horizon -- the total is not assessable, which is the correct answer.
+ * UNPRICED activity vs ABSENT activity. If the finding establishes an activity (a
+   follow-up certification, a re-inspection, a validation) but not its price, KEEP the
+   activity as a cost component with unit_cost = null and unit_cost_basis = NOT_ESTABLISHED
+   -- it does not disappear. One priced + one unpriced activity => the result is PARTIAL,
+   never EXACT.
+ * CURRENCY IDENTITY vs the numeric amount. "EUR 4,000" is four thousand EUROS -- carry
+   currency = "EUR" on that component. Never relabel it to another currency and never
+   convert it. Components in different currencies are reported separately, never summed.
+
 TASK
 1. Mirror the canonical remediation activities 1:1 by id + description + disposition +
    dependency into `activities`. Do not add, drop, merge, split, or reword them. Never move
@@ -139,12 +165,34 @@ RULES
 15. source_reference_ids may cite only ids in the context: FINDING (the finding text),
     E0/E1.. (evidence items), hypothesis ids, CAPA ids. Anything else (an activity id, a
     component id, an invented label) is discarded.
-16. RECURRING COSTS STAY RECURRING -- BUT A RECURRING CONDITION IS NOT A RECURRING COST.
-    A component is recurrence=RECURRING ONLY when the evidence says the CORRECTIVE ACTIVITY
-    itself repeats per hour/day/week/month/quarter/year/shift/cycle ("audit every quarter",
-    "monthly verification"). The observed PROBLEM recurring ("following recurring packaging
-    defects", "repeated failures") does NOT make the remediation recurring -- a one-time
-    two-day audit in response to a recurring defect is recurrence=ONE_TIME. A DURATION
+16. RECURRENCE IS ESTABLISHED FROM MEANING, NOT FROM ONE WORD, AND HAS THREE VALUES:
+      recurrence=RECURRING   -- you have POSITIVE semantic basis that the CORRECTIVE
+                                ACTIVITY itself repeats on a schedule / period / cycle:
+                                any wording that means "done again and again over time"
+                                (e.g. "every quarter", "each month", "monthly", "on an
+                                ongoing basis", "a recurring service", "scheduled
+                                inspections", "repeated periodically", "per shift"). Set
+                                recurring_period.
+      recurrence=ONE_TIME    -- you have POSITIVE semantic basis that the activity is done
+                                ONCE (an initial correction / replacement / one-off audit /
+                                single implementation), even if the observed PROBLEM
+                                recurs.
+      recurrence=UNKNOWN     -- you CANNOT establish from the finding/evidence whether the
+                                activity is one-time or recurring. Use this rather than
+                                guessing. NEVER default to ONE_TIME because you could not
+                                work it out -- an unpriced component + UNKNOWN + review is
+                                the correct answer when recurrence is genuinely unclear.
+    RECURRING covers BOTH a fixed calendar period AND an EVENT TRIGGER. If the activity
+    must be repeated every time some event happens ("re-run validation whenever the feed
+    changes", "re-test after every release", "re-inspect each time the batch changes"),
+    that is recurrence=RECURRING with recurring_period set to the TRIGGERING EVENT
+    ("each feed change", "per release", "per batch change") -- it is NOT ONE_TIME just
+    because there is no month/year. If the number of future occurrences (calendar periods
+    or events) is not established, report only the PER-OCCURRENCE amount and set NO horizon
+    -- the total is not assessable, which is correct.
+    A recurring observed PROBLEM ("following recurring packaging defects", "repeated
+    failures") does NOT by itself make the remediation recurring -- a one-time two-day
+    audit in response to a recurring defect is recurrence=ONE_TIME. A DURATION
     ("two-day audit", "3 hours of follow-up") is quantity, never recurrence. If the
     activity repeats, recurring_period MUST be set. Its `quantity` is the amount
     consumed in ONE occurrence of that period -- e.g. "2 hours per month" -> quantity=2,

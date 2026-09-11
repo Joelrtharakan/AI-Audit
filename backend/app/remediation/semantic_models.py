@@ -62,7 +62,13 @@ AmountType = Literal[
     "TOTAL", "SUBTOTAL", "COMPONENT", "ALTERNATIVE",
 ]
 
-Recurrence = Literal["ONE_TIME", "RECURRING"]
+# ONE_TIME must mean the model has POSITIVE semantic basis for one-time
+# remediation; RECURRING that it established a repeating activity; UNKNOWN that
+# recurrence could NOT be established from the finding/evidence. The model must
+# NOT fall back to ONE_TIME merely because it failed to work recurrence out --
+# UNKNOWN on a priced component fails closed (validator) to NOT_ASSESSABLE +
+# review_required (spec §7/§8/§15/§29).
+Recurrence = Literal["ONE_TIME", "RECURRING", "UNKNOWN"]
 
 DerivedFrom = Literal[
     "FINDING", "EVIDENCE", "ROOT_CAUSE_HYPOTHESIS", "RECOMMENDED_CAPA", "IMPACT", "CONTEXT",
@@ -323,6 +329,7 @@ class RemediationRejectedItem(BaseModel):
         "MISSING_UNIT_COST", "INVALID_NUMBER", "AMBIGUOUS_OPERANDS",
         "CONFLICTING_COMPONENTS", "DOUBLE_COUNT", "UNKNOWN_COMPONENT",
         "UNSUPPORTED_OPERATION", "OBSERVED_VALUE_NOT_REMEDIATION",
+        "RECURRENCE_INCONSISTENT", "RECURRENCE_NOT_ESTABLISHED", "UNIT_OR_RATE_BASIS_UNRESOLVED",
     ]
     detail: str = ""
 

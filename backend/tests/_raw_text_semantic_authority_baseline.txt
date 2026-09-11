@@ -1,0 +1,31 @@
+# Phase 10 baseline -- pre-existing raw-finding-text keyword/regex sites.
+# Almost all are in the fail-closed DETERMINISTIC FALLBACK paths (locked by
+# ~400 tests, out of scope per the fail-closed-floor principle). The guard
+# fails only when this set GROWS. Prune entries as the code is cleaned up.
+app/agent/nodes/core_synthesis.py :: "Revision of the inspection checklist" if ("revised" in request_finding_text.lower() and "checklist" in request_finding_
+app/agent/nodes/core_synthesis.py :: else ("Revision of the procedure" if ("revised" in request_finding_text.lower() or "revision" in request_finding_text.lo
+app/agent/nodes/final_evidence_verification.py :: _finding_words = {w.lower() for w in re.findall(r"[A-Za-z]+", finding_text)}
+app/agent/nodes/final_evidence_verification.py :: allowed_terms = set(re.findall(r"\bSOP-[\w-]+\b", finding_text, re.IGNORECASE))
+app/agent/nodes/final_evidence_verification.py :: else ("Revised inspection checklist completion" if "checklist" in finding_text.lower() else "Required procedure complian
+app/agent/nodes/final_evidence_verification.py :: if "competenc" not in finding_text.lower() and "qualification" not in finding_text.lower() and "qualifi" not in finding_
+app/agent/nodes/final_evidence_verification.py :: if "customer" not in finding_text.lower() and "client" not in finding_text.lower():
+app/agent/nodes/final_evidence_verification.py :: if "other operators" not in finding_text.lower() and "all staff" not in finding_text.lower() and "multiple operators" no
+app/agent/nodes/final_evidence_verification.py :: if "patient" not in finding_text.lower():
+app/agent/nodes/final_evidence_verification.py :: if "product" not in finding_text.lower() and "batch" not in finding_text.lower() and "sample" not in finding_text.lower(
+app/agent/nodes/final_evidence_verification.py :: if "quarantine" not in finding_text.lower():
+app/agent/nodes/final_evidence_verification.py :: if "recall" not in finding_text.lower():
+app/agent/nodes/final_evidence_verification.py :: if "restrict" not in finding_text.lower() and "stop" not in finding_text.lower() and "halt" not in finding_text.lower():
+app/agent/nodes/final_evidence_verification.py :: if "revision" not in finding_text.lower() and "revised" not in finding_text.lower() and "updated" not in finding_text.lo
+app/agent/nodes/final_evidence_verification.py :: if "train" not in finding_text.lower() and "retrain" not in finding_text.lower():
+app/agent/nodes/final_evidence_verification.py :: if re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment)\b", finding_text, re.IGNORECASE):
+app/agent/nodes/final_evidence_verification.py :: impact.process_at_risk = "Inspection checklist completion and record control" if "checklist" in finding_text.lower() els
+app/agent/nodes/five_why_fallback.py :: _dup_match = re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment)\b", finding_text, re.IGNORECASE)
+app/agent/nodes/five_why_fallback.py :: _overpay_match = re.search(r"\boverpayment\b", finding_text, re.IGNORECASE)
+app/agent/nodes/five_why_fallback.py :: has_unavail_ref_doc = bool(re.search(r"\b(?:referenced|attached|cited)\b.*?\b(?:not\s+available|unavailable|missing|coul
+app/agent/nodes/plan_investigation_fallback.py :: _workflow_term = "notification" if re.search(r"\bnotification\b", finding_text, re.IGNORECASE) else "distribution"
+app/agent/nodes/plan_investigation_fallback.py :: elif re.search(r"\b(?:duplicate\s+payment|paid\s+twice|double\s+payment|overpayment)\b", finding_text, re.IGNORECASE):
+app/agent/nodes/plan_investigation_fallback.py :: has_normative_source = bool(re.search(r"\b(?:SOP-[A-Z0-9-]+|Revision\s+\d+|Rev\s+\d+|ISO\s+\d+|contract|agreement)\b", f
+app/agent/nodes/plan_investigation_fallback.py :: text_low = finding_text.lower()
+app/agent/nodes/understanding.py :: elif len(words) < 8 and not initial_resolved.matched and not any(w in finding_text.lower() for w in ("missing", "overdue
+app/agent/recurrence_guard.py :: m_capa = re.search(r"\b(CAPA-\d{4}-\d+|CAPA-[A-Z0-9-]+)\b", finding_text, re.IGNORECASE)
+app/services/grounding_validator.py :: if quote.lower() not in finding_text.lower():

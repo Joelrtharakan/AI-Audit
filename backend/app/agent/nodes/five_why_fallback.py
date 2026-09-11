@@ -114,22 +114,37 @@ def build_deterministic_five_why(
             from app.services.canonical_context_validator import get_affected_object_candidate
             _pd = getattr(semantic_context, "primary_deviation", None)
             _cond = getattr(semantic_context, "observed_condition", None)
+            _fsubj = getattr(semantic_context, "finding_subject", None)
             _subj = _pd or get_affected_object_candidate(semantic_context) or "the affected process"
             _obs = (fact_claims[0] if fact_claims else (_pd or _cond or "the reported condition"))
             _hyps = [h.statement.strip().rstrip(".") for h in
                      (getattr(semantic_context, "candidate_hypotheses", []) or []) if getattr(h, "statement", None)]
             _gaps = [str(g).strip().rstrip(".") for g in
                      (getattr(semantic_context, "information_gaps", []) or []) if str(g).strip()]
+            # Phase 9.3 Issue 1: no enum/status token in auditor-facing prose;
+            # normalize a canonical "<subject> — <condition>" observation string
+            # into a grammatical clause.
+            from app.services.semantic_subject import deviation_as_clause
+            _obs_clause = deviation_as_clause(str(_obs).strip().rstrip("."))
             _ans = (
-                f"The available evidence establishes that {str(_obs).strip().rstrip('.')}, but does "
-                "not establish why it occurred. Root cause is NOT_ESTABLISHED."
+                f"The available evidence establishes that {_obs_clause}, but does "
+                "not establish why it occurred. The root cause has not been established."
             )
             if _hyps:
                 _ans += " Possible explanations that remain unverified: " + "; ".join(_hyps) + "."
             if _gaps:
                 _ans += " The following must first be established: " + "; ".join(_gaps) + "."
             _ans += " Investigation is required before a causal conclusion can be drawn."
-            _q1 = f"Why did the observed condition affecting {_subj} occur?"
+            # The canonical `finding_subject`/`observed_condition` pair (when
+            # the LLM interpreter established a genuine noun-phrase subject)
+            # is realized through the SAME grammatical machinery every other
+            # 5-Why site uses -- the generic "observed condition affecting X"
+            # wrapper is a real, disclosed fallback for when no canonical
+            # subject exists, never the first choice when one does.
+            _q1 = (
+                format_deviation_why_question(_fsubj, _cond) if _fsubj
+                else f"Why did the observed condition affecting {_subj} occur?"
+            )
             return FiveWhyAnalysis(
                 steps=[FiveWhyStep(question=_q1, answer=_ans, status="UNKNOWN")],
                 is_complete=False,
@@ -349,7 +364,8 @@ def build_deterministic_five_why(
     if resolved.semantic_type == "EVENT_SEQUENCE_CONTROL" and resolved.transition_type:
         _transition_label = resolved.transition_type.replace("_", " ").lower()
         if noun_sub and noun_sub.lower() != _transition_label:
-            why_q = f"Why was the {noun_sub} {_transition_label} performed without the required justification/evidence?"
+            from app.services.semantic_subject import was_were
+            why_q = f"Why {was_were(noun_sub)} the {noun_sub} {_transition_label} performed without the required justification/evidence?"
             why_answer = (
                 f"The available evidence confirms that the {noun_sub} {_transition_label} occurred and that the required "
                 "justification is not documented, but does not establish whether the control was bypassed, "
@@ -393,7 +409,8 @@ def build_deterministic_five_why(
     if resolved.semantic_type == "MISSING_RECORD" and resolved.missing_record_activity:
         activity = resolved.missing_record_activity
         _condition_word = resolved.condition or "not documented"
-        why_q = f"Why was the {activity} {_condition_word}?"
+        from app.services.semantic_subject import was_were
+        why_q = f"Why {was_were(activity)} the {activity} {_condition_word}?"
         downstream_clause = (
             " A subsequent action is also reported in the finding, but the missing record does not by "
             "itself establish whether that action was appropriately supported."
@@ -511,9 +528,11 @@ def build_deterministic_five_why(
     # 1. Multiple Competing Reported Explanations Case (e.g. training vs workload vs discipline)
     reported_claims_list = [c for c in claims if getattr(c, "status", None) == EvidenceStatus.REPORTED]
     if not conflicts and len(reported_claims_list) >= 2:
-        from app.services.semantic_subject import _strip_framing, strip_leading_article
+        from app.services.semantic_subject import (
+            _strip_framing, deviation_as_clause, object_phrase, strip_leading_article,
+        )
         deviation_fact = fact_claims[0] if fact_claims else deviation_desc
-        deviation_clause = _strip_framing(deviation_fact).strip().rstrip(".")
+        deviation_clause = deviation_as_clause(_strip_framing(deviation_fact).strip().rstrip("."))
         if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
             deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
 
@@ -554,13 +573,16 @@ def build_deterministic_five_why(
         else:
             why2_ans = "Multiple explanations were reported; none is independently verified by available evidence."
 
-        target_obj_name = noun_sub.lower()
-        if "completion" in target_obj_name:
-            why2_q = f"Why did the {stripped_actor} not complete the {target_obj_name.replace(' completion', '')}?"
+        # object slot -- drop any leading article (it follows "the"/"in") and
+        # preserve internal casing (acronyms like SOP).
+        _obj = object_phrase(strip_leading_article(noun_sub))
+        if "completion" in _obj.lower():
+            why2_q = f"Why did the {stripped_actor} not complete the {_obj.replace(' completion', '')}?"
         elif is_actor_noun(actor_name):
-            why2_q = f"Why did the {stripped_actor} not complete the {target_obj_name}?"
+            why2_q = f"Why did the {stripped_actor} not complete the {_obj}?"
         else:
-            why2_q = f"Why did this nonconformity occur in {target_obj_name}?"
+            why2_q = f"Why did this nonconformity occur in the {_obj}?"
+        target_obj_name = _obj
 
         steps.append(FiveWhyStep(
             question=why2_q,
@@ -569,7 +591,7 @@ def build_deterministic_five_why(
         ))
 
         # Step 3: Which mechanism caused it? -> Evidence boundary
-        why3_q = f"Which of these mechanisms caused the deviation in {target_obj_name}?"
+        why3_q = f"Which of these mechanisms caused the deviation involving the {target_obj_name}?"
         why3_ans = "The operative causal mechanism is not established from available evidence — objective records are required to distinguish the competing explanations."
         steps.append(FiveWhyStep(
             question=why3_q,
@@ -648,9 +670,11 @@ def build_deterministic_five_why(
         )
 
         if has_separate_verified_deviation:
-            from app.services.semantic_subject import _strip_framing, declarative_to_why_question
+            from app.services.semantic_subject import (
+                _strip_framing, declarative_to_why_question, deviation_as_clause,
+            )
             deviation_fact = _strip_framing(first_claim.text).strip()
-            deviation_clause = deviation_fact.rstrip(".")
+            deviation_clause = deviation_as_clause(deviation_fact.rstrip("."))
             if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
                 deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
             why1_answer = (
@@ -673,15 +697,20 @@ def build_deterministic_five_why(
         # the 2-step chain below correctly frames the uncertainty as being
         # about the proposition itself.
         subject_phrase = noun_sub if topic in noun_sub.lower() else f"{topic} compliance for {noun_sub}"
+        from app.services.semantic_subject import was_were
         steps.append(FiveWhyStep(
-            question=f"Why was {subject_phrase} unconfirmed?",
+            question=f"Why {was_were(subject_phrase)} {subject_phrase} unconfirmed?",
             answer=conflict_summary,
             status="MIXED",
         ))
         # Step 2: why could completion not be established — evidence boundary.
+        _sp = subject_phrase.strip()
         steps.append(FiveWhyStep(
-            question=f"Why could {topic} completion not be established?",
-            answer=f"No objective {topic}-completion record has been verified from the available evidence.",
+            question=f"Why could completion of {_sp} not be established?",
+            answer=(
+                f"No objective record confirming completion of {_sp} has been "
+                "verified from the available evidence."
+            ),
             status="UNKNOWN",
         ))
         return FiveWhyAnalysis(
@@ -692,9 +721,9 @@ def build_deterministic_five_why(
 
     # 2. Single Reported Mechanism (e.g. Case 1, Case 2, Case 3, Case 4)
     if mechanism.status == "REPORTED" and mechanism.statement:
-        from app.services.semantic_subject import _strip_framing
+        from app.services.semantic_subject import _strip_framing, deviation_as_clause
         deviation_fact = fact_claims[0] if fact_claims else deviation_desc
-        deviation_clause = _strip_framing(deviation_fact).strip().rstrip(".")
+        deviation_clause = deviation_as_clause(_strip_framing(deviation_fact).strip().rstrip("."))
         if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
             deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
         why1_question = format_deviation_why_question(
@@ -717,8 +746,11 @@ def build_deterministic_five_why(
                 status="REPORTED",
             ))
         steps.append(FiveWhyStep(
-            question=f"Why did this breakdown occur in the process for {noun_sub}?",
-            answer="NOT ESTABLISHED FROM AVAILABLE EVIDENCE — objective verification required to confirm underlying cause.",
+            question=f"Why did the deviation involving {noun_sub} occur?",
+            answer=(
+                "The available evidence does not establish the underlying cause; "
+                "objective verification is required."
+            ),
             status="UNKNOWN",
         ))
         return FiveWhyAnalysis(
@@ -729,6 +761,45 @@ def build_deterministic_five_why(
 
     # 3. Verified Mechanism
     if mechanism.status == "VERIFIED" and mechanism.statement:
+        # Phase 9 Part E / charter §E: a "mechanism" statement that is itself an
+        # unsupported causal ASSERTION ("this was caused by ...", "... due to
+        # ...") lifted from the finding is not an established causal fact just
+        # because the finding stated it. Never emit it as a VERIFIED 5-Why
+        # answer -- stop at the evidence boundary instead. Structural
+        # causal-connector check over the model/canonical statement only, not
+        # the raw finding text.
+        from app.agent.causal_guard import (
+            hypothesis_statement_asserts_unsupported_causation, significant_words,
+        )
+        # A mechanism statement that is ITSELF an unsupported causal assertion is
+        # not "grounded" merely because that same sentence was also ingested as a
+        # claim -- exclude near-duplicates of the mechanism from the grounding set.
+        _mech_words = significant_words(mechanism.statement)
+        _verified_facts = [
+            c.text for c in claims
+            if getattr(c, "status", None) == EvidenceStatus.VERIFIED
+            and not (
+                _mech_words and significant_words(c.text)
+                and len(_mech_words & significant_words(c.text)) / max(1, min(len(_mech_words), len(significant_words(c.text)))) >= 0.6
+            )
+        ]
+        if hypothesis_statement_asserts_unsupported_causation(mechanism.statement, _verified_facts):
+            steps.append(FiveWhyStep(
+                question=format_deviation_why_question(
+                    effective_subject, resolved.condition, extract_temporal_clause(finding_text)
+                ),
+                answer=(
+                    "The finding states a causal explanation, but the available evidence does "
+                    "not independently establish that causal relationship; objective "
+                    "verification is required."
+                ),
+                status="UNKNOWN",
+            ))
+            return FiveWhyAnalysis(
+                steps=steps,
+                is_complete=False,
+                status_note="EVIDENCE BOUNDARY — a stated causal explanation is not independently established.",
+            )
         steps.append(FiveWhyStep(
             question=format_deviation_why_question(
                 effective_subject, resolved.condition, extract_temporal_clause(finding_text)
@@ -737,8 +808,11 @@ def build_deterministic_five_why(
             status="VERIFIED",
         ))
         steps.append(FiveWhyStep(
-            question=f"Why did this breakdown occur in the process for {noun_sub}?",
-            answer="NOT ESTABLISHED FROM AVAILABLE EVIDENCE — objective verification required to confirm underlying root cause.",
+            question=f"Why did the deviation involving {noun_sub} occur?",
+            answer=(
+                "The available evidence does not establish the underlying root cause; "
+                "objective verification is required."
+            ),
             status="UNKNOWN",
         ))
         return FiveWhyAnalysis(
@@ -747,9 +821,12 @@ def build_deterministic_five_why(
             status_note="EVIDENCE BOUNDARY — Root cause not established from initial evidence.",
         )
 
-    from app.services.semantic_subject import _strip_framing
+    from app.services.semantic_subject import _strip_framing, deviation_as_clause
     deviation_fact = fact_claims[0] if fact_claims else deviation_desc
-    deviation_clause = _strip_framing(deviation_fact).strip().rstrip(".")
+    # deviation_as_clause turns a canonical "<subject> — <condition>" string
+    # into a grammatical clause; leaves an already-formed clause untouched
+    # (Phase 9.2 Issue 1 -- no em-dash fragment in the evidence-boundary text).
+    deviation_clause = deviation_as_clause(_strip_framing(deviation_fact).strip().rstrip("."))
     if deviation_clause and deviation_clause[0].isupper() and not deviation_clause.split()[0].isupper():
         deviation_clause = deviation_clause[0].lower() + deviation_clause[1:]
 

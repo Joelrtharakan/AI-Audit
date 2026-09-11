@@ -217,3 +217,37 @@ def test_traceability_rejects_reference_with_no_graph_at_all():
     state = {"investigation_plan": InvestigationPlan(questions=[q])}
     ok, violations = evaluate_all_invariants(state)
     assert any("INV-INVEST-012" in v for v in violations)
+
+
+# --------------------------------------------------------------------------- #
+# unstructured-fallback investigation gaps stay SEPARATE per semantic class --
+# closes a real runtime defect (production-hardening / runtime-trace charter,
+# defect 6): the causal-mechanism gap and the governing-requirement gap were
+# being merged into one compound question ("the cause of, and applicable
+# requirement for, ..."), even though a single evidence item resolving one
+# does not resolve the other.
+# --------------------------------------------------------------------------- #
+
+import pytest
+
+from app.services.canonical_semantic_models import CanonicalFindingContext
+
+
+@pytest.mark.parametrize("subject,condition", [
+    ("the widget", "was out of spec"),
+    ("the access control list", "included an inactive account"),
+    ("the sterilization cycle", "ran below the validated temperature"),
+])
+def test_unstructured_fallback_splits_cause_and_requirement_gaps(subject, condition):
+    ctx = CanonicalFindingContext.model_validate({
+        "primary_deviation": f"{subject} {condition}", "observed_condition": condition,
+        "finding_subject": subject, "root_cause_status": "NOT_ESTABLISHED",
+    })
+    _hyps, plan = build_deterministic_investigation_plan(
+        "x", [], canonical_subject=subject, semantic_context=ctx)
+    texts = [q.question.lower() for q in plan.questions]
+    assert len(plan.questions) >= 2
+    assert any("mechanism" in t or "cause" in t for t in texts)
+    assert any("requirement" in t or "specification" in t or "procedure" in t for t in texts)
+    # no single question conflates both gaps with "and"
+    assert not any(("cause" in t or "mechanism" in t) and "requirement" in t for t in texts)

@@ -157,6 +157,11 @@ def render_causal_transition_answer(source_node: Any, target_node: Any, edge_sta
         return target_node.label
     source_ref = getattr(source_node, "concept_ref", None) or source_node.label
     target_ref = getattr(target_node, "concept_ref", None) or target_node.label
+    # A canonical "<subject> — <condition>" label is not a noun phrase and
+    # cannot sit after "contributing factor to <X>" / "whether <X> resulted
+    # from" -- use the subject noun (Phase 9.3.1).
+    if isinstance(source_ref, str) and " — " in source_ref:
+        source_ref = source_ref.split(" — ", 1)[0].strip()
 
     # Phase 12 Step 7: when the source node carries structured
     # comparison/measurement context (populated only from
@@ -220,6 +225,17 @@ def _graph_node_why_question(node: Any) -> str:
     label = node.label or ""
     if " — " in label:
         subj, _, cond = label.partition(" — ")
+        cond = cond.strip()
+        # A condition that is already a full active-voice negated clause
+        # ("did not match the quotation", "does not meet the limit") must not
+        # be routed through the "was/were <cond>" template ("Why was X did not
+        # match ...?" -- double aux). Restructure it directly.
+        _m = re.match(r"^(?:did|does|do)\s+not\s+(.+)$", cond, re.IGNORECASE)
+        if _m:
+            _s = subj.strip()
+            _s = _s[0].lower() + _s[1:] if _s[:1].isupper() and not _s.split()[0].isupper() else _s
+            _s = _s if re.match(r"^(?:the|a|an|this|that)\b", _s, re.IGNORECASE) else f"the {_s}"
+            return f"Why did {_s} not {_m.group(1).strip()}?"
         return format_deviation_why_question(subj, cond)
     if label:
         return declarative_to_why_question(label)
@@ -340,6 +356,16 @@ def build_graph_grounded_five_why(causal_graph: Any) -> Any | None:
         visited.add(target.node_id)
         current_id = target.node_id
 
+        # Phase 9.3.1: the evidence boundary is a HARD TERMINAL STATE. Only a
+        # VERIFIED causal edge is an established mechanism the chain may
+        # continue from. A REPORTED (or POSSIBLE) edge is the boundary itself
+        # -- a reported contributing factor is not an established mechanism, so
+        # it must be the LAST step; nothing may be appended after it. Enforced
+        # from the edge's structured status, never from prose or finding text.
+        if edge.status != CausalGraphEdgeStatus.VERIFIED:
+            stopped_at_boundary = False
+            break
+
     if not steps:
         return None
 
@@ -355,9 +381,13 @@ def build_graph_grounded_five_why(causal_graph: Any) -> Any | None:
     # unconditionally appended a 2nd UNKNOWN marker step). The last
     # emitted transition step already terminates the chain in that case --
     # relabel it EVIDENCE_BOUNDARY in place instead of duplicating it.
-    if steps[-1].status == "UNKNOWN":
+    if steps[-1].status in ("UNKNOWN", "REPORTED"):
+        # A POSSIBLE-licensed step (status UNKNOWN) is already the boundary
+        # statement; a REPORTED step (Phase 9.3.1) is terminal -- a reported
+        # contributing factor does not authorize a deeper Why. Either way the
+        # last step IS the boundary; do not append a duplicate marker.
         steps[-1].boundary_status = "EVIDENCE_BOUNDARY"
-        stopped_at_boundary = False  # already represented; nothing to append
+        stopped_at_boundary = False
 
     # Phase 11 Step 8: when the walk stopped because no further causal edge
     # is licensed (as opposed to hitting the 5-step cap with more real

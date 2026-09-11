@@ -38,8 +38,12 @@ async def _run(payload, evidence, finding="A required verification was not perfo
 
 
 def _c(**kw):
+    # value_kind classifies the economic ROLE (this is remediation expenditure);
+    # it is orthogonal to whether the figure is evidence-anchored. Unanchored
+    # ASSUMED components are still stripped by the anchoring check below.
     base = {"component_id": "C0", "description": "d", "cost_category": "labor",
-            "amount_type": "COMPONENT", "recurrence": "ONE_TIME"}
+            "amount_type": "COMPONENT", "recurrence": "ONE_TIME",
+            "value_kind": "REMEDIATION_COST"}
     base.update(kw)
     return base
 
@@ -127,6 +131,7 @@ async def test_partial_estimate_keeps_priced_and_lists_unpriced():
          "overall_status": "EVIDENCE_BACKED"},
         [_ev("Vendor quoted INR 40,000 for the replacement part", EvidenceStatus.REPORTED)],
     )
-    assert res.most_likely_estimate == 40000.0          # only the anchored part
+    assert res.one_time_cost == 40000.0                 # only the anchored part
+    assert res.most_likely_estimate is None             # partial -> not a point estimate
     assert res.is_partial_estimate is True
     assert any("revalidation" in a.lower() for a in res.unpriced_activities)

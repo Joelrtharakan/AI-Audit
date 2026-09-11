@@ -392,7 +392,7 @@ async def generate_report_node(state: AgentState) -> AgentState:
         except Exception as exc:  # noqa: BLE001 - last-resort crash guard only
             logger.warning("Remediation cost estimation crashed unexpectedly (%s); reporting honestly.", exc)
             from app.remediation.engine import honest_not_assessable
-            remediation_cost = honest_not_assessable("LLM_UNAVAILABLE")
+            remediation_cost = honest_not_assessable("LLM_INVALID", "MODEL_OUTPUT_INVALID")
         _rem_ms = int((time.monotonic() - _t) * 1000)
 
     # -- Internal-only financial-exposure context (never rendered as its own
@@ -510,6 +510,17 @@ async def generate_report_node(state: AgentState) -> AgentState:
     # SAME canonical semantic interpretation.
     # ------------------------------------------------------------------
     _finalize_report_consistency(report, state.get("canonical_finding_state"))
+
+    # Structured, machine-readable human-review contract (spec Phase 4).
+    # Derived from settled report fields only.
+    from app.agent.review_state import derive_review_state
+
+    report.review = derive_review_state(report)
+
+    # Unified, immutable report-level AI provenance (spec Phase 6).
+    from app.agent.provenance import derive_analysis_provenance
+
+    report.provenance = derive_analysis_provenance(report, state)
 
     if report.analysis_mode == "DETERMINISTIC":
         trace.append(AgentTraceStep.ok(

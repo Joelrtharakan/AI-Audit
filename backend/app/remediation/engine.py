@@ -36,6 +36,10 @@ from app.remediation.validator import validate_and_plan
 
 logger = logging.getLogger(__name__)
 
+# Bump when the remediation semantic schema (RemediationInterpretation /
+# RemediationCostComponent / RemediationCalculationProposal) changes shape.
+_REMEDIATION_SCHEMA_VERSION = "2026-09-01"
+
 _PROFESSIONAL_REASON = {
     "IMPLEMENTATION_SCOPE_UNKNOWN": (
         "Remediation cost cannot be reliably estimated because the implementation scope "
@@ -64,6 +68,44 @@ _PROFESSIONAL_REASON = {
         "Remediation cost cannot be reliably estimated because the evidence contains "
         "conflicting information about the required implementation work or its cost."
     ),
+    "RECURRENCE_NOT_ESTABLISHED": (
+        "The AI model could not establish whether this remediation cost is one-time or "
+        "recurring. It has NOT been assumed one-time. Confirm whether the cost occurs "
+        "once or repeats and, if it repeats, the period and the horizon it applies over, "
+        "before relying on a figure. (Review required.)"
+    ),
+    "RECURRENCE_CLASSIFICATION_UNRELIABLE": (
+        "This remediation cost repeats over time, but a trustworthy recurring interpretation "
+        "could not be established — whether it is one-time or recurring, the recurrence "
+        "period, and any horizon to total it over were internally inconsistent. Confirm the "
+        "recurrence and horizon before relying on a figure. (Review required — the recurring "
+        "classification was not established, so no headline amount is shown.)"
+    ),
+    "UNIT_OR_RATE_BASIS_UNRESOLVED": (
+        "A remediation cost combines a time-based rate with a quantity stated on a "
+        "different, unestablished time basis (for example an hourly rate against a quantity "
+        "in days). The quantity and rate could not be reconciled on the same basis, so no "
+        "amount was produced. Confirm the quantity and the rate on a common time basis. "
+        "(Review required.)"
+    ),
+    # PROVIDER-FAILURE reasons (spec §19): a model/provider failure is NOT an
+    # evidence problem and must never be reported as one. Human review required.
+    "MODEL_UNAVAILABLE": (
+        "The remediation cost could not be assessed because the AI semantic model was "
+        "unavailable for this run (no provider, connection error, or an unrecoverable "
+        "provider error). This is a system-availability issue, not an evidence gap — retry, "
+        "or have the finding reviewed manually. (Review required.)"
+    ),
+    "MODEL_TIMEOUT": (
+        "The remediation cost could not be assessed because the AI semantic model did not "
+        "respond within the allowed time. This is a system-performance issue, not an "
+        "evidence gap — retry, or have the finding reviewed manually. (Review required.)"
+    ),
+    "MODEL_OUTPUT_INVALID": (
+        "The remediation cost could not be assessed because the AI semantic model returned "
+        "output that failed structural validation. This is a model-output issue, not an "
+        "evidence gap — retry, or have the finding reviewed manually. (Review required.)"
+    ),
     "INSUFFICIENT_EVIDENCE": (
         "Remediation cost cannot be reliably estimated from the available evidence because "
         "the implementation scope and pricing basis are not sufficiently established."
@@ -75,8 +117,80 @@ _PROFESSIONAL_REASON = {
 }
 
 
+def _record_semantic_reliability_metrics(result: "RemediationCostResult") -> None:
+    """One counter update per completed remediation-cost result, from its
+    FINAL structured state (spec Pass 63 §7/§18). Reads no finding text; every
+    dimension is low-cardinality (status / reason code). Best-effort -- a
+    metrics failure never affects the result."""
+    try:
+        from app.services import llm_metrics as _m
+        _m.increment("remediation_runs_total")
+        _ps = str(getattr(result, "pricing_status", "") or "")
+        if _ps == "EXACT_ESTIMATE":
+            _m.increment("remediation_exact_estimate")
+        elif _ps == "PARTIAL_ESTIMATE":
+            _m.increment("remediation_partial_estimate")
+        elif _ps == "NOT_ASSESSABLE":
+            _m.increment("remediation_not_assessable")
+        if getattr(result, "review_required", False):
+            _m.increment("remediation_review_required")
+        _rs = str(getattr(result, "remediation_semantic_status", "") or "")
+        if _rs == "LLM_UNAVAILABLE":
+            _m.increment("remediation_model_unavailable")
+        elif _rs == "LLM_TIMEOUT":
+            _m.increment("remediation_model_timeout")
+        elif _rs == "LLM_INVALID":
+            _m.increment("remediation_model_output_invalid")
+        if getattr(result, "reasoning_source", "") == "LLM_SEMANTIC" and _rs != "OK":
+            _m.increment("remediation_deterministic_fallback")
+        _codes = {getattr(r, "reason_code", "") for r in (getattr(result, "rejected_items", []) or [])}
+        # also recover the dominant reason from the (own, constant) professional
+        # sentence when the pure-NOT_ASSESSABLE path carried no rejected_items.
+        _nar = getattr(result, "not_assessable_reason", "") or ""
+        _dom = next((k for k, v in _PROFESSIONAL_REASON.items()
+                     if k and v and v[:48] == _nar[:48]), "")
+        if "RECURRENCE_NOT_ESTABLISHED" in _codes or _dom == "RECURRENCE_NOT_ESTABLISHED":
+            _m.increment("remediation_recurrence_not_established")
+        if "RECURRENCE_INCONSISTENT" in _codes or _dom == "RECURRENCE_CLASSIFICATION_UNRELIABLE":
+            _m.increment("remediation_recurrence_inconsistent")
+        if "UNIT_OR_RATE_BASIS_UNRESOLVED" in _codes or _dom == "UNIT_OR_RATE_BASIS_UNRESOLVED":
+            _m.increment("remediation_unit_rate_unresolved")
+    except Exception:  # noqa: BLE001 - telemetry must never break the result
+        pass
+
+
+def _build_ai_provenance(result: "RemediationCostResult") -> dict:
+    """AI provenance persisted on EVERY result (spec §26/§31) -- so an
+    AI-assisted cost is reproducible from the stored record, not only logs.
+    Contains no chain-of-thought."""
+    import datetime as _dt
+
+    # Record the semantic-reliability counters exactly ONCE per result -- the
+    # first provenance stamp (honest_not_assessable / first _enforce pass);
+    # a re-stamp (ai_provenance already populated) does not re-count.
+    if not getattr(result, "ai_provenance", None):
+        _record_semantic_reliability_metrics(result)
+
+    from app.config import get_settings as _gs
+    _s = _gs()
+    return {
+        "remediation_model": (_s.remediation_cost_model or _s.ollama_model),
+        "remediation_prompt_version": _s.remediation_cost_prompt_version,
+        "canonical_model": (_s.canonical_semantic_model or _s.ollama_model),
+        "canonical_prompt_version": _s.canonical_semantic_prompt_version,
+        "analysis_prompt_version": _s.analysis_prompt_version,
+        "provider": _s.llm_provider,
+        "semantic_schema_version": _REMEDIATION_SCHEMA_VERSION,
+        "remediation_semantic_status": result.remediation_semantic_status,
+        "reasoning_source": result.reasoning_source,
+        "review_required": result.review_required,
+        "pricing_status": result.pricing_status,
+        "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
 def honest_not_assessable(semantic_status: str, machine_reason: str = "") -> RemediationCostResult:
-    return RemediationCostResult(
+    _r = RemediationCostResult(
         status=RemediationEstimateStatus.NOT_ASSESSABLE,
         confidence=RemediationConfidence.NOT_ASSESSABLE,
         estimate_classification=CostBasis.NOT_ESTABLISHED,
@@ -85,6 +199,8 @@ def honest_not_assessable(semantic_status: str, machine_reason: str = "") -> Rem
         remediation_semantic_status=semantic_status,
         review_required=True,
     )
+    _r.ai_provenance = _build_ai_provenance(_r)
+    return _r
 
 
 def _hypothesis_ids(root_cause: Any) -> set[str]:
@@ -152,6 +268,41 @@ def _enforce_result_consistency(result: RemediationCostResult) -> RemediationCos
             a for a in result.conditional_activities if str(a).strip().lower() not in _inv
         ]
 
+    # 1b. ACTIVITY / PRICING-STATE SINGLE-VALUEDNESS (final-hardening ISSUE 1/2).
+    #     `implementation_activities` is the full list; `unpriced_activities` is
+    #     the subset with no established price. A description must not appear in
+    #     BOTH a priced sense and an unpriced sense. Collapse the lists by
+    #     normalised text: if the same description is present priced (in
+    #     implementation but NOT in unpriced) AND unpriced, the priced state
+    #     wins and the unpriced entry is dropped. Duplicates within each list
+    #     are removed. Pure structural de-duplication -- no semantic merge of
+    #     two DIFFERENT descriptions (spec: ambiguous distinctness is preserved,
+    #     never merged).
+    def _nk(s: str) -> str:
+        return " ".join(str(s).strip().lower().split())
+
+    _seen: set[str] = set()
+    _impl_dedup: list[str] = []
+    for a in result.implementation_activities:
+        k = _nk(a)
+        if k and k not in _seen:
+            _seen.add(k)
+            _impl_dedup.append(a)
+    result.implementation_activities = _impl_dedup
+    _priced_keys = {_nk(a) for a in result.implementation_activities} - {
+        _nk(a) for a in result.unpriced_activities
+    }
+    _u_seen: set[str] = set()
+    _unpriced_dedup: list[str] = []
+    for a in result.unpriced_activities:
+        k = _nk(a)
+        if k and k not in _u_seen and k not in _priced_keys and k in {
+            _nk(x) for x in result.implementation_activities
+        }:
+            _u_seen.add(k)
+            _unpriced_dedup.append(a)
+    result.unpriced_activities = _unpriced_dedup
+
     # 2. conditional_activities must be a subset of implementation_activities.
     _impl = {str(a).strip().lower() for a in result.implementation_activities}
     result.conditional_activities = [
@@ -193,6 +344,23 @@ def _enforce_result_consistency(result: RemediationCostResult) -> RemediationCos
     ):
         result.auditor_inputs_required = []
 
+    # 3c. PARTIAL_ESTIMATE has NO justified complete low / most-likely / high
+    #     (final-hardening ISSUE 4). A degenerate spread (low == most_likely ==
+    #     high == the priced-point sum) is NOT a range -- it is the known
+    #     priced portion echoed three times, and displaying it as
+    #     Low/Most Likely/High invites reading it as a complete estimate.
+    #     Keep the three fields ONLY when there is a GENUINE spread
+    #     (low != high) that some component's own unit_cost_low/high or an
+    #     ALTERNATIVE group established -- and even then it describes only the
+    #     priced portion. `one_time_cost` / `recurring_cost` remain: they carry
+    #     the KNOWN PRICED amount, which the renderer labels as such.
+    if result.is_partial_estimate:
+        _lo, _hi = result.low_estimate, result.high_estimate
+        if _lo is None or _hi is None or _lo == _hi:
+            result.low_estimate = None
+            result.most_likely_estimate = None
+            result.high_estimate = None
+
     # 4. A calculated estimate cannot coexist with zero implementation activities.
     if (
         result.status != RemediationEstimateStatus.NOT_ASSESSABLE
@@ -204,6 +372,12 @@ def _enforce_result_consistency(result: RemediationCostResult) -> RemediationCos
         result.not_assessable_reason = _PROFESSIONAL_REASON["REMEDIATION_NOT_DEFINED"]
         result.one_time_cost = result.recurring_cost = None
         result.low_estimate = result.most_likely_estimate = result.high_estimate = None
+
+    # 5. AI provenance persisted on the record (spec §26/§31) -- reproducibility
+    #    from the stored result, not only logs. Always re-stamped here so the
+    #    review_required / pricing_status reflect the FINAL consistency-checked
+    #    state.
+    result.ai_provenance = _build_ai_provenance(result)
 
     return result
 
@@ -404,8 +578,15 @@ async def estimate_remediation_cost(
         return _scope_only_result("NO_EVIDENCE", "INSUFFICIENT_EVIDENCE")
     if interp is None:
         # Semantic interpretation unavailable/invalid -> fail closed on the
-        # NUMBER, but still give the auditor the finding-specific scope.
-        return _scope_only_result(status, "")
+        # NUMBER, but still give the auditor the finding-specific scope. A
+        # PROVIDER failure is named as such (spec §19) -- never as an evidence
+        # gap.
+        _provider_reason = {
+            "LLM_UNAVAILABLE": "MODEL_UNAVAILABLE",
+            "LLM_TIMEOUT": "MODEL_TIMEOUT",
+            "LLM_INVALID": "MODEL_OUTPUT_INVALID",
+        }.get(status, "")
+        return _scope_only_result(status, _provider_reason)
 
     try:
         # The FINDING text is always a valid citable pricing source (spec Pass
@@ -414,6 +595,15 @@ async def estimate_remediation_cost(
         # in its own text (no separate evidence ledger) can never be priced --
         # every stated rate is stripped as "unanchored".
         valid_evidence_ids = {f"E{i}" for i in range(len(evidence_ledger))} | {"FINDING"}
+        # Only E-ids whose ledger item is VERIFIED-status. A price the model
+        # marks "VERIFIED" that cites nothing from this set is capped at
+        # REPORTED -- arithmetic never upgrades epistemic status (Phase 9.2
+        # Issue 2). "FINDING" is deliberately excluded: the finding narrates,
+        # it is not an independently-verified record.
+        verified_evidence_ids = {
+            f"E{i}" for i, _it in enumerate(evidence_ledger)
+            if str(getattr(_it, "status", "")).upper().endswith("VERIFIED")
+        }
         # EVIDENCE-REFERENCE RESOLUTION (spec §2/§6/§22): the context block
         # feeds evidence as E0/E1/..., but a finding whose own text labels its
         # claims ("C1: ...", "C2: ...") leads the model to cite "C1"/"C2".
@@ -462,11 +652,12 @@ async def estimate_remediation_cost(
             valid_evidence_ids=valid_evidence_ids,
             valid_hypothesis_ids=_hypothesis_ids(root_cause),
             valid_capa_refs=_capa_refs(capa),
+            verified_evidence_ids=verified_evidence_ids,
         )
         est = assemble_estimate(components, proposals, outcome.traces)
     except Exception as exc:  # fail-closed: a bug must never fabricate a number
         logger.warning("Remediation cost validation/calculation failed unexpectedly (%s).", exc)
-        return honest_not_assessable("LLM_INVALID")
+        return honest_not_assessable("LLM_INVALID", "MODEL_OUTPUT_INVALID")
 
     from app.remediation.scope import looks_like_prompt_echo
 
@@ -662,6 +853,23 @@ async def estimate_remediation_cost(
             confidence = RemediationConfidence.MEDIUM
 
     uncertainty = _dedup(interp.uncertainty_reasons + est.uncertainty_reasons)
+    # Surface a recurrence-classification firewall rejection on the priced /
+    # partial path too (it may only have stripped ONE of several components).
+    if any(getattr(r, "reason_code", "") in ("RECURRENCE_INCONSISTENT", "RECURRENCE_NOT_ESTABLISHED") for r in outcome.rejected):
+        uncertainty = _dedup([
+            *uncertainty,
+            "One or more remediation costs repeat over time but could not be given a "
+            "trustworthy recurring interpretation (one-time vs recurring, the period, and "
+            "any horizon were internally inconsistent); those components are shown unpriced "
+            "and the recurrence must be confirmed before relying on a figure.",
+        ])
+    if any(getattr(r, "reason_code", "") == "UNIT_OR_RATE_BASIS_UNRESOLVED" for r in outcome.rejected):
+        uncertainty = _dedup([
+            *uncertainty,
+            "One or more remediation costs combine a time-based rate with a quantity on a "
+            "different, unestablished time basis; those components are shown unpriced and "
+            "the quantity and rate must be confirmed on a common basis.",
+        ])
     _unpriced_count = len(_unpriced_established_acts) + len(_unpriced_component_ids)
     if is_partial and _unpriced_count:
         uncertainty.append(
@@ -714,6 +922,17 @@ async def estimate_remediation_cost(
         _reason_code = interp.not_assessable_reason or "PRICING_BASIS_UNAVAILABLE"
         if canon and _sc_remediation:
             _reason_code = "INSUFFICIENT_PRICING_INFORMATION"
+        # A recurrence-classification firewall rejection (Strategy A) is the
+        # dominant reason -- name it so the auditor sees the recurring
+        # interpretation was NOT established, rather than a generic pricing gap.
+        if any(getattr(r, "reason_code", "") == "RECURRENCE_NOT_ESTABLISHED" for r in outcome.rejected):
+            _reason_code = "RECURRENCE_NOT_ESTABLISHED"
+        elif any(getattr(r, "reason_code", "") == "RECURRENCE_INCONSISTENT"
+                 for r in outcome.rejected):
+            _reason_code = "RECURRENCE_CLASSIFICATION_UNRELIABLE"
+        elif any(getattr(r, "reason_code", "") == "UNIT_OR_RATE_BASIS_UNRESOLVED"
+                 for r in outcome.rejected):
+            _reason_code = "UNIT_OR_RATE_BASIS_UNRESOLVED"
         result = honest_not_assessable("OK", _reason_code)
         result.remediation_rationale = strategy.remediation_type or ""
         result.established_basis = strategy.established_basis or ""

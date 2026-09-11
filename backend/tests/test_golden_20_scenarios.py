@@ -229,7 +229,11 @@ async def test_scenario_13_previous_capa_recurrence():
     state, report, is_valid, violations = await _run_agent_pipeline(text)
 
     assert is_valid, f"Violations: {violations}"
-    assert report.root_cause.risk_of_recurrence in ("HIGH", "MEDIUM")
+    # Phase 5 §2: recurrence + no established cause -> future risk is not
+    # assessable; observed recurrence alone is not a HIGH-risk determination.
+    assert report.root_cause.status == RootCauseStatus.NOT_ESTABLISHED
+    assert report.root_cause.risk_of_recurrence == "NOT_ASSESSABLE"
+    assert "recurr" in (report.root_cause.risk_of_recurrence_rationale or "").lower()
 
 
 # Scenario 14: Proven ineffective CAPA
@@ -239,7 +243,12 @@ async def test_scenario_14_proven_ineffective_capa():
     state, report, is_valid, violations = await _run_agent_pipeline(text)
 
     assert is_valid, f"Violations: {violations}"
-    assert report.root_cause.risk_of_recurrence in ("HIGH", "MEDIUM")
+    # Phase 5 §2: recurrence after a prior CAPA, with no established causal
+    # mechanism, does not establish a future-recurrence-risk LEVEL. The observed
+    # recurrence is surfaced; the level is NOT_ASSESSABLE (assessment required).
+    assert report.root_cause.status == RootCauseStatus.NOT_ESTABLISHED
+    assert report.root_cause.risk_of_recurrence == "NOT_ASSESSABLE"
+    assert "recurr" in (report.root_cause.risk_of_recurrence_rationale or "").lower()
 
 
 # Scenario 15: Multiple competing causes

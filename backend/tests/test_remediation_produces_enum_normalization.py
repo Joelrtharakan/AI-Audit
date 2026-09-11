@@ -48,14 +48,15 @@ async def test_total_produces_does_not_drop_the_sum_proposal():
             {"component_id": "C0", "description": "units", "activity_ids": ["R1"],
              "quantity": 2, "quantity_basis": "EVIDENCED", "unit_cost": 100,
              "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "PER_UNIT",
-             "source_reference_ids": ["E0"]},
+             "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"]},
             {"component_id": "C1", "description": "labour", "activity_ids": ["R1"],
              "quantity": 3, "quantity_basis": "EVIDENCED", "unit_cost": 50,
              "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "PER_HOUR",
-             "source_reference_ids": ["E0"]},
+             "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"]},
         ],
         "calculation_proposals": [{"calculation_id": "K0", "operation": "SUM",
-                                   "component_ids": ["C0", "C1"], "produces": "TOTAL"}],
+                                   "component_ids": ["C0", "C1"], "produces": "TOTAL",
+                                   "frequency": "ONE_TIME"}],
         "estimability": "ESTIMABLE", "overall_status": "EVIDENCE_BACKED",
     }
     res = await estimate_remediation_cost(

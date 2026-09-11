@@ -1,8 +1,11 @@
-"""Parallel combinator: runs impact_assessment and capa_analysis concurrently.
+"""LEGACY NODE — NOT PART OF LIVE GRAPH.
+This module exists only for isolated unit-test guard checks. It combines the
+legacy impact_assessment and capa_analysis nodes; core_synthesis_node is the
+SOLE authoritative synthesis path.
 
+Parallel combinator: runs impact_assessment and capa_analysis concurrently.
 Both nodes only depend on root_cause output and the evidence ledger — they are
-completely independent of each other. Running them in parallel saves one full
-Ollama round-trip (~10-30 seconds on a local model).
+completely independent of each other.
 """
 
 from __future__ import annotations

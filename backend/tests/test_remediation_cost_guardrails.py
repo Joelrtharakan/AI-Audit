@@ -43,11 +43,11 @@ async def test_llm_cannot_set_the_headline_numbers_directly():
             "component_id": "C0", "description": "install effort", "cost_category": "installation",
             "quantity": 5, "unit_cost": 2000, "quantity_basis": "EVIDENCED",
             "unit_cost_basis": "REPORTED", "currency": "INR", "amount_type": "PER_UNIT",
-            "source_reference_ids": ["E0"],
+            "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"],
         }],
         "calculation_proposals": [{
             "calculation_id": "K0", "operation": "MULTIPLY", "component_ids": ["C0"],
-            "produces": "MOST_LIKELY", "proposed_result_value": 1000000,
+            "produces": "MOST_LIKELY", "proposed_result_value": 1000000, "frequency": "ONE_TIME",
         }],
         "overall_status": "EVIDENCE_BACKED",
     }

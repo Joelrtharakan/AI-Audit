@@ -94,8 +94,17 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     # A finding that EXPLICITLY enumerates competing causal mechanisms always
     # carries actionable uncertainty -- the mechanisms must be discriminated.
     # Never short-circuit to "no investigation needed" for it (spec 9/28).
-    from app.agent.causal_guard import extract_stated_causal_alternatives as _esca_plan
-    _has_stated_alts = len(_esca_plan(request.finding_text)) >= 2
+    # Semantic authority: on canonical SUCCESS the canonical LLM already owns
+    # this (its `stated_causal_alternatives` / `causal_alternatives_unresolved`
+    # -- spec Pass 44); the raw-text regex `extract_stated_causal_alternatives`
+    # runs ONLY on the deterministic-fallback path.
+    if semantic_context is not None:
+        _has_stated_alts = bool(getattr(semantic_context, "causal_alternatives_unresolved", False)) or (
+            len(getattr(semantic_context, "stated_causal_alternatives", []) or []) >= 2
+        )
+    else:
+        from app.agent.causal_guard import extract_stated_causal_alternatives as _esca_plan
+        _has_stated_alts = len(_esca_plan(request.finding_text)) >= 2
 
     if _graph_result.planner_mode == "NO_ACTIONABLE_UNCERTAINTY" and not _has_stated_alts:
         trace.append(AgentTraceStep.ok(

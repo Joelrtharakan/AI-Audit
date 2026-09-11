@@ -64,3 +64,42 @@ def test_genuine_leading_article_still_lowercases():
 def test_empty_label_falls_back_to_generic_question_not_empty_string():
     q = _graph_node_why_question(_node(""))
     assert q == "Why did this occur?"
+
+
+# --------------------------------------------------------------------------- #
+# subject-verb number agreement -- a singular head noun that happens to end in
+# a common record-type word ("certificate", "record", "report", "result",
+# "log") must take "was", not "were". Regression: a tail-word regex matched
+# both singular and plural of those nouns and forced "were" unconditionally.
+# Domain-general morphology test -- no finding vocabulary, no domain rules.
+# --------------------------------------------------------------------------- #
+
+import pytest
+from app.services.semantic_subject import format_deviation_why_question, subject_is_plural
+
+
+@pytest.mark.parametrize("subject", [
+    "the calibration record for balance B-12",
+    "the vendor's audit certificate",
+    "the deviation report",
+    "the final inspection result",
+    "the equipment maintenance log",
+    "the training completion check",
+])
+def test_singular_record_type_subject_takes_was(subject):
+    assert subject_is_plural(subject) is False
+    q = format_deviation_why_question(subject, "incomplete")
+    assert "Why was " in q and "Why were " not in q
+
+
+@pytest.mark.parametrize("subject", [
+    "the calibration records",
+    "the audit certificates",
+    "the deviation reports",
+    "the inspection results",
+    "the maintenance logs",
+])
+def test_plural_record_type_subject_takes_were(subject):
+    assert subject_is_plural(subject) is True
+    q = format_deviation_why_question(subject, "incomplete")
+    assert "Why were " in q

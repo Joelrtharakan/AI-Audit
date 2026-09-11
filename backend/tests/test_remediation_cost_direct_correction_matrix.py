@@ -72,7 +72,7 @@ GUARD_INTERP = {
             "activity_ids": ["RA-001"], "cost_category": "materials",
             "quantity": 2, "quantity_unit": "guard", "quantity_basis": "EVIDENCED",
             "unit_cost": 18000, "unit_cost_basis": "VERIFIED", "currency": "INR",
-            "amount_type": "PER_UNIT", "source_reference_ids": ["C3", "C1"],
+            "amount_type": "PER_UNIT", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["C3", "C1"],
             "rationale": "2 guards x 18,000 per guard = 36,000",
         },
         {
@@ -80,7 +80,7 @@ GUARD_INTERP = {
             "activity_ids": ["RA-001"], "cost_category": "labor",
             "quantity": 12, "quantity_unit": "technician-hour", "quantity_basis": "EVIDENCED",
             "unit_cost": 1200, "unit_cost_basis": "VERIFIED", "currency": "INR",
-            "amount_type": "PER_HOUR", "source_reference_ids": ["C3", "C1"],
+            "amount_type": "PER_HOUR", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["C3", "C1"],
             "rationale": "2 machines x 6 technician-hours x 1,200 per hour = 14,400",
         },
     ],
@@ -150,7 +150,10 @@ async def test_case_d_partial_pricing_yields_partial_estimate():
         client=FakeLLMClient(json.dumps(interp)),
         semantic_context=None,
     )
-    assert res.most_likely_estimate == 36000.0
+    # Current contract: a PARTIAL_ESTIMATE reports the priced portion via
+    # one_time_cost; most_likely_estimate stays None (not a point estimate).
+    assert res.one_time_cost == 36000.0
+    assert res.most_likely_estimate is None
     assert res.is_partial_estimate
     assert res.pricing_status == "PARTIAL_ESTIMATE"
     assert len(res.auditor_inputs_required) == 1
@@ -247,7 +250,10 @@ async def test_case_l_unsupported_assumptions_are_excluded():
         client=FakeLLMClient(json.dumps(interp)),
         semantic_context=None,
     )
-    # contingency carries no evidence -> not added to the total, no priced amount
-    assert res.most_likely_estimate == 50400.0
+    # contingency carries no evidence -> not added to the total, no priced amount.
+    # The evidence-backed portion (P0+P1 = 50,400) is preserved; the stripped
+    # unsupported line makes the overall estimate PARTIAL, so the figure is
+    # reported via one_time_cost.
+    assert res.one_time_cost == 50400.0
     contingency = [c for c in res.cost_components if "contingency" in c.description.lower()]
     assert contingency and contingency[0].calculated_amount is None

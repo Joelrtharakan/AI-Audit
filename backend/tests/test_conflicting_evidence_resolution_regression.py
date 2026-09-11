@@ -257,4 +257,8 @@ async def test_scenario_l_previous_capa_conflicting_effectiveness():
 
     rc = s3["root_cause"]
     assert rc.status == RootCauseStatus.NOT_ESTABLISHED
-    assert rc.risk_of_recurrence == "HIGH"
+    # Phase 5 §2: NOT_ESTABLISHED cause -> future recurrence risk is not
+    # assessable from the observed recurrence alone (an unqualified HIGH here
+    # would be exactly the epistemic error: NOT_ESTABLISHED cause + HIGH risk).
+    assert rc.risk_of_recurrence == "NOT_ASSESSABLE"
+    assert "recurr" in (rc.risk_of_recurrence_rationale or "").lower()

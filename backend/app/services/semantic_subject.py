@@ -366,6 +366,21 @@ def reject_subject_if_clause(subject: str | None) -> bool:
     if words[0] in {"had", "have", "has", "was", "were", "did", "could", "should", "would", "is", "are", "stated", "claimed", "reported", "said"}:
         return True
 
+    # 3a. The candidate is an IMPERATIVE / DIRECTIVE clause, not an entity
+    # ("ignore all previous instructions", "set the cost to 1", "your task is
+    # to ..."). Rule 3 above only catches FINITE verb heads; a base-form
+    # imperative verb ("ignore", "set", "disregard") is a distinct grammatical
+    # class. Detected structurally by app.services.instruction_detector
+    # (morphology + closed-class function words -- never an attack-phrase
+    # list). Fail closed: a subject in this shape is rejected and never becomes
+    # trusted downstream semantic context.
+    try:
+        from app.services.instruction_detector import is_imperative_phrase
+        if is_imperative_phrase(s):
+            return True
+    except Exception:  # pragma: no cover - defensive; never let this crash the gate
+        pass
+
     # 3b. CONDITION-NOMINALIZATION with an embedded object: "<evaluative>
     # <relational-noun> <of/with/to> <object>" ("inconsistent compliance
     # with X", "poor adherence to Y", "lack of oversight of Z"). This is an
@@ -753,11 +768,87 @@ def declarative_to_why_question(text: str) -> str:
     return f"Why {_lower_leading_word(clause)}?"
 
 
-_PLURAL_SUBJECT_TAIL_RE = re.compile(
-    r"\b(?:records?|logs?|entries|checks?|inspections?|reports?|certificates?|documents?|"
-    r"attendance\s+sheets?|results?)\b\s*$",
+# Singular nouns that end in "s" -- so a naive "ends in s => plural" rule does
+# not misfire. Domain-neutral English morphology, not a finding vocabulary.
+_SINGULAR_S_ENDINGS = (
+    "ss", "us", "is", "sis", "ics", " news", "series", "species", "means",
+)
+_TRAILING_PP_RE = re.compile(
+    r"\s+(?:for|of|in|on|at|to|from|with|by|during|within|across|regarding|concerning)\s+.+$",
     re.IGNORECASE,
 )
+_IRREGULAR_PLURALS = frozenset({
+    "data", "criteria", "media", "phenomena", "personnel", "staff", "people",
+    "children", "men", "women", "records", "logs",
+})
+
+
+def subject_is_plural(noun_phrase: str | None) -> bool:
+    """Best-effort grammatical number of a noun phrase, from its HEAD noun.
+
+    Pure English morphology (strip a leading article, strip trailing
+    prepositional modifiers so the head is exposed, then inspect the head's
+    ending). Domain-neutral -- no finding vocabulary. Used only to pick
+    "was" vs "were" when realizing a deterministic question from a canonical
+    subject string.
+    """
+    s = (noun_phrase or "").strip()
+    if not s:
+        return False
+    s = re.sub(r"^(?:the|a|an|this|that|these|those|its|their|our)\s+", "", s, flags=re.IGNORECASE)
+    s = _TRAILING_PP_RE.sub("", s).strip()
+    if not s:
+        return False
+    head = s.split()[-1].lower().strip(".,;:")
+    if head in _IRREGULAR_PLURALS:
+        return True
+    if not head.endswith("s"):
+        return False
+    return not head.endswith(_SINGULAR_S_ENDINGS)
+
+
+def was_were(noun_phrase: str | None) -> str:
+    return "were" if subject_is_plural(noun_phrase) else "was"
+
+
+def object_phrase(noun_phrase: str | None) -> str:
+    """A noun phrase safe to drop into the middle of a sentence: lowercase only
+    the leading article/determiner, never internal words (preserves acronyms
+    like SOP / QC-REF-02). Domain-neutral string hygiene, not classification."""
+    s = (noun_phrase or "").strip()
+    if not s:
+        return s
+    m = re.match(r"^(the|a|an|this|that|these|those)\s+(.+)$", s, re.IGNORECASE)
+    if m:
+        return f"{m.group(1).lower()} {m.group(2)}"
+    return s
+
+
+def deviation_as_clause(deviation: str | None) -> str:
+    """Turn a canonical "<subject> — <condition>" deviation string (the em-dash
+    join used internally) into a grammatical clause ("<subject> was/were
+    <condition>"). A string that is already a clause (has its own finite verb)
+    is returned unchanged. Pure string realization -- no semantic inference."""
+    s = (deviation or "").strip().rstrip(".")
+    if not s:
+        return s
+    parts = re.split(r"\s+[—–-]{1,2}\s+", s, maxsplit=1)
+    if len(parts) != 2:
+        return s
+    subj, cond = parts[0].strip(), parts[1].strip()
+    if not subj or not cond:
+        return s
+    # condition already carries a verb ("was not completed", "did not meet ...")
+    if re.match(r"^(?:was|were|is|are|has|have|had|did|does|do|not\b)", cond, re.IGNORECASE):
+        aux = ""
+    elif re.match(r"^(?:not\s+)?[a-z]+ed\b|^(?:missing|incomplete|unavailable|overdue|expired|absent|"
+                  r"inadequate|invalid|nonconforming|outdated|blank|undocumented|unrecorded|pending|"
+                  r"insufficient|unclear|unresolved|unconfirmed)\b", cond, re.IGNORECASE):
+        aux = f"{was_were(subj)} "
+    else:
+        aux = f"{was_were(subj)} "
+    subj_l = subj[0].lower() + subj[1:] if subj[:1].isupper() and not subj.split()[0].isupper() else subj
+    return f"{subj_l} {aux}{cond}".replace("  ", " ").strip()
 
 # Closed vocabulary of condition ADJECTIVES/participles that follow "was/were"
 # as a predicate (never as a verb an active-voice question could be built
@@ -948,7 +1039,22 @@ def format_deviation_why_question(
     if not cond or cond.upper() == "UNKNOWN":
         return f"Why did {subj[0].lower()}{subj[1:]} deviate from the applicable requirement{temporal_suffix}?"
 
-    aux = "were" if _PLURAL_SUBJECT_TAIL_RE.search(subj) else "was"
+    # A condition of the form "not <BASE-FORM verb> ..." ("not include a step",
+    # "not address the finding") is ACTIVE-VOICE negation -- it needs "did not
+    # <verb>", never "was not <verb>". Distinguish it from an already-negated
+    # PARTICIPLE ("not completed", "not calibrated"), which keeps "was/were".
+    _neg_m = re.match(r"^not\s+([a-z]+)\b(.*)$", cond, re.IGNORECASE)
+    if _neg_m:
+        _v, _rest = _neg_m.group(1).lower(), _neg_m.group(2)
+        _is_participle = (
+            _v.endswith(("ed", "en", "ing"))
+            or _v in _CONDITION_ADJECTIVES
+            or _v in {"complete", "present", "available", "aware", "able"}
+        )
+        if not _is_participle and _rest.strip():
+            return f"Why did {subj[0].lower()}{subj[1:]} not {_v}{_rest}{temporal_suffix}?"
+
+    aux = "were" if subject_is_plural(subj) else "was"
     # A condition already shaped as a negated/passive predicate -- either it
     # HAD a leading "was/were" stripped above (an adjective/participle like
     # "incomplete"/"missing", which "was/were" belongs directly in front of)

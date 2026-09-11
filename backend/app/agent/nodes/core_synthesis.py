@@ -911,7 +911,10 @@ def _derive_ca_draft_fields(root_cause, impact, canonical=None) -> dict:
     elif affected.strip().lower().endswith(("status", "qualification")) or " status for " in affected.lower() or " qualification for " in affected.lower():
         lead_word = affected.split(" ", 1)[0].lower()
         article = "" if lead_word in ("the", "a", "an") else "the "
-        immediate_action = f"Verify {article}{affected[0].lower()}{affected[1:]} against authorized records before permitting independent execution or release, where applicable."
+        immediate_action = (
+            f"Verify {article}{affected[0].lower()}{affected[1:]} against authorized records "
+            "and confirm the current position before the affected record is relied on for further decisions."
+        )
     elif _re.search(r"\b(records?|logs?|documentation)\b", affected, _re.IGNORECASE):
         # The affected object IS itself a record/log/documentation artifact
         # (e.g. "Temperature monitoring records for refrigerator
@@ -927,10 +930,23 @@ def _derive_ca_draft_fields(root_cause, impact, canonical=None) -> dict:
             "affected item(s) in accordance with the applicable procedure."
         )
     else:
-        immediate_action = (
-            f"Verify the current status of {affected} against authorized records before permitting "
-            "independent execution or release, where applicable."
-        )
+        # Generic grounded fallback: a verification action only -- no assumed
+        # release/execution/containment dependency the finding never establishes
+        # (charter §H / Phase 9 Part G). Phase 9.3 Issue 3: when the canonical
+        # state carries an observed condition, make the action condition-aware
+        # rather than a bare "verify the status of <object>".
+        _cond = (getattr(canonical, "deviation_condition", None)
+                 or getattr(canonical, "observed_deviation", None) or "").strip().rstrip(".")
+        if _cond and _cond.upper() not in ("UNKNOWN", "NOT_ESTABLISHED") and len(_cond.split()) <= 12:
+            immediate_action = (
+                f"Verify {affected} against authorized records and the applicable requirement, and "
+                f"confirm whether the condition identified in the finding ({_cond}) has been addressed."
+            )
+        else:
+            immediate_action = (
+                f"Verify the current status of {affected} against authorized records and assess the "
+                "affected item(s) in accordance with the applicable procedure."
+            )
 
     return {
         "immediate_action": immediate_action,
@@ -1700,8 +1716,11 @@ def _synthesize_from_canonical_state(
     if recurrence_info is None:  # defensive: reached only if context is absent
         recurrence_info = detect_recurrence(finding_text)
     if recurrence_info.is_recurring:
-        root_cause.risk_of_recurrence = "HIGH"
-        root_cause.risk_of_recurrence_rationale = build_recurrence_rationale(recurrence_info)
+        from app.agent.recurrence_guard import assess_recurrence_risk
+        _rc_established = root_cause.status in (RootCauseStatus.ESTABLISHED, RootCauseStatus.SUPPORTED)
+        root_cause.risk_of_recurrence, root_cause.risk_of_recurrence_rationale = assess_recurrence_risk(
+            recurrence_info, _rc_established
+        )
 
     capa = CapaAnalysis(
         status=CapaStatus.INVESTIGATION_REQUIRED,
@@ -2274,11 +2293,13 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
             from app.agent.analytical_validator import apply_conflict_tie_override
             apply_conflict_tie_override(root_cause, has_unresolved_conflict)
 
-            from app.agent.recurrence_guard import build_recurrence_rationale, detect_recurrence
+            from app.agent.recurrence_guard import assess_recurrence_risk, detect_recurrence
             recurrence_info = detect_recurrence(request.finding_text)
             if recurrence_info.is_recurring:
-                root_cause.risk_of_recurrence = "HIGH"
-                root_cause.risk_of_recurrence_rationale = build_recurrence_rationale(recurrence_info)
+                _rc_est = root_cause.status in (RootCauseStatus.ESTABLISHED, RootCauseStatus.SUPPORTED)
+                root_cause.risk_of_recurrence, root_cause.risk_of_recurrence_rationale = assess_recurrence_risk(
+                    recurrence_info, _rc_est
+                )
 
             # CAPA areas reuse the same dynamically-derived, finding-grounded
             # investigation plan used for hypotheses above rather than a fixed

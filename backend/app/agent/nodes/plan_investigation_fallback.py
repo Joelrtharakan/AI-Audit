@@ -131,8 +131,19 @@ def _plan_from_canonical_structure(
         _pri = {"HIGH": "P1", "MEDIUM": "P2", "LOW": "P3"}
         for i, s in enumerate(_steps):
             t = (s.unknown or "").strip()
-            if not t.endswith("?"):
-                t = f"What does the evidence establish about: {t.rstrip('.')}?"
+            if t and not t.endswith("?"):
+                # Realize a canonical gap phrase as a natural question. Not a
+                # single mechanical frame prepended to every gap: the phrasing
+                # follows the gap's shape (Phase 9.2 Issue 6 / causal-separation
+                # charter §3).
+                _g = t.rstrip(". ")
+                _gl = _g[0].lower() + _g[1:] if _g[:1].isupper() and not _g.split()[0].isupper() else _g
+                if re.match(r"^(?:whether|why|how|which|when|where)\b", _gl, re.IGNORECASE):
+                    t = f"What does the available evidence show about {_gl}?"
+                elif re.match(r"^(?:what|is|are|was|were|does|do|did|has|have|can|could)\b", _gl, re.IGNORECASE):
+                    t = _gl + "?"
+                else:
+                    t = f"What objective evidence establishes {_gl}?"
             _q(f"Q_LLM_{i + 1}", t,
                s.why_it_matters or "Resolve an open question this finding raises",
                s.evidence_that_would_resolve or "not specified",
@@ -193,13 +204,23 @@ def _plan_from_canonical_structure(
                "Determine whether the repetition is systemic or independent")
 
     if not questions:
-        # C. genuinely nothing structured -> one minimal, honest question.
-        _q("Q_EVIDENCE_REQUIRED",
-           f"What objective evidence would establish the cause of, and applicable requirement for, "
+        # C. genuinely nothing structured -> two minimal, honest questions, one
+        # per independently unresolved gap. The causal-mechanism gap and the
+        # governing-requirement gap are semantically distinct (charter §7 /
+        # §K): a single evidence item can resolve one without resolving the
+        # other, so they must not be asked as one compound question.
+        _q("Q_CAUSE_REQUIRED",
+           f"What objective evidence establishes the mechanism responsible for "
            f"the observed condition affecting {subject}?",
-           "The canonical interpretation established the condition but not its cause or governing requirement",
+           "The canonical interpretation established the condition but not its causal mechanism",
            "not specified", "P1",
-           "Until this evidence is obtained, no root cause or systemic corrective action can be concluded.")
+           "Until this evidence is obtained, no root cause can be concluded.")
+        _q("Q_REQUIREMENT_REQUIRED",
+           f"What governing requirement, specification, or procedure applies to {subject}?",
+           "The canonical interpretation did not establish the applicable governing requirement",
+           "not specified", "P1",
+           "Until the applicable requirement is established, compliance cannot be assessed and no "
+           "systemic corrective action can be concluded.")
 
     areas = [f"Verify compliance and control records for {subject}"]
     _gaps_all = [str(g).strip().rstrip(".") for g in (getattr(sc, "information_gaps", []) or []) if str(g).strip()]
@@ -1775,11 +1796,16 @@ def build_deterministic_investigation_plan(
         subject_bare = re.sub(r"\s{2,}", " ", subject_bare).strip()
         subject_has_status_word = bool(re.search(r"\b(?:status|condition)\b", subject or "", re.IGNORECASE))
         subject_cap = subject[0].upper() + subject[1:] if subject else "The affected item"
+        # Phase 9.2 Issue 7: give each area a role-typed label ("<role> for
+        # <subject>") rather than jamming the subject phrase against a role
+        # suffix ("<subject> status and authorization"). Pure realization.
+        _subj_lc = (subject or "the affected item")
+        _subj_lc = _subj_lc[0].lower() + _subj_lc[1:] if _subj_lc[:1].isupper() and not _subj_lc.split()[0].isupper() else _subj_lc
         plan_areas = [
-            f"{subject_cap} and authorization" if subject_has_status_word else f"{subject_cap} status and authorization",
-            f"{subject_cap} governing procedure and control requirements",
-            f"Downstream impact of the {subject_bare or subject} condition" if not subject_has_status_word
-            else f"Downstream impact of the {subject}",
+            (f"Current position and authorization for {_subj_lc}"
+             if subject_has_status_word else f"Status and authorization records for {_subj_lc}"),
+            f"Governing procedure, specification, and control requirements for {_subj_lc}",
+            f"Downstream impact and affected scope of {subject_bare.strip() or _subj_lc}",
         ]
         is_operating_range_deviation = bool(re.search(
             r"\b(?:operated|used|run|performed)\s+outside\b|\b(?:validated|operating)\s+(?:range|limit|parameters?)\b",

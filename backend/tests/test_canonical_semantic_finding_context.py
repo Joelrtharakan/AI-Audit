@@ -206,22 +206,36 @@ def test_genuine_explicit_causal_claim_survives():
 
 
 # ---------------------------------------------------------------------------
-# 4. Previous CAPA cannot be inferred from recurrence alone
+# 4. Previous CAPA is gated on a CITED, RESOLVING evidence id (Pass 42 §5).
+#    The former raw-finding-text deterministic re-check was deliberately
+#    removed -- on the canonical-success path semantic recurrence is LLM-owned;
+#    the deterministic gate only verifies the evidence citation resolves.
 # ---------------------------------------------------------------------------
 
-def test_previous_capa_flag_forced_false_without_deterministic_confirmation():
-    """Exact reproduction from the adversarial finding: 'Historical
-    records show the same failure occurred 10 times' must never establish
-    a previous CAPA, even if the LLM (incorrectly) set the flag true."""
+def test_previous_capa_flag_forced_false_without_a_resolving_evidence_id():
+    """A previous-CAPA claim with no cited evidence id -- or an id that does not
+    resolve against the ledger -- is forced False (fail-closed), regardless of
+    what the finding prose says."""
     finding = "Historical records show the same failure occurred 10 times during the previous 12 months."
-    context = CanonicalFindingContext.model_validate({
+    ledger = _evidence((finding, EvidenceStatus.VERIFIED))  # -> only E0 exists
+
+    # (a) no evidence ids cited at all
+    ctx_a = CanonicalFindingContext.model_validate({
         "explicit_previous_capa_reference": True,
-        "previous_capa_evidence_ids": ["E0"],
+        "previous_capa_evidence_ids": [],
     })
-    ledger = _evidence((finding, EvidenceStatus.VERIFIED))
-    validated = validate_canonical_context(context, ledger, finding)
-    assert validated.explicit_previous_capa_reference is False
-    assert validated.previous_capa_evidence_ids == []
+    v_a = validate_canonical_context(ctx_a, ledger, finding)
+    assert v_a.explicit_previous_capa_reference is False
+    assert v_a.previous_capa_evidence_ids == []
+
+    # (b) cites an id that does not resolve
+    ctx_b = CanonicalFindingContext.model_validate({
+        "explicit_previous_capa_reference": True,
+        "previous_capa_evidence_ids": ["E7"],
+    })
+    v_b = validate_canonical_context(ctx_b, ledger, finding)
+    assert v_b.explicit_previous_capa_reference is False
+    assert v_b.previous_capa_evidence_ids == []
 
 
 def test_previous_capa_flag_survives_with_genuine_reference_and_confirmation():

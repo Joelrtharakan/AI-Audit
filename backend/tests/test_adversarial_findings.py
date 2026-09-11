@@ -426,12 +426,18 @@ async def test_adversarial_t1_single_technician_slip_not_systemic():
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_adversarial_u1_recurring_finding_elevates_risk():
-    """Finding recurring 3 times with prior CAPA-2025-010 elevates risk of recurrence."""
+async def test_adversarial_u1_recurring_finding_without_established_cause_requires_risk_assessment():
+    """Phase 5 §2: observed historical recurrence does NOT by itself establish a
+    HIGH future-recurrence-risk level. With no established causal mechanism the
+    correct epistemic state is NOT_ASSESSABLE (assessment required), and the
+    rationale must surface the observed recurrence."""
     text = "The same temperature excursion recurred in cold room CR-2 for the third time despite CAPA-2025-010 being marked closed."
     state, report, is_valid, violations = await _run_agent_pipeline(text)
     assert is_valid, f"Violations: {violations}"
-    assert report.root_cause.risk_of_recurrence in ("HIGH", "MEDIUM")
+    assert report.root_cause.status == RootCauseStatus.NOT_ESTABLISHED
+    assert report.root_cause.risk_of_recurrence == "NOT_ASSESSABLE"
+    _rat = (report.root_cause.risk_of_recurrence_rationale or "").lower()
+    assert "recurr" in _rat and ("assessment" in _rat or "not been established" in _rat)
 
 
 # ===========================================================================

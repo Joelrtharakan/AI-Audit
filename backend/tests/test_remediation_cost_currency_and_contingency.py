@@ -50,7 +50,7 @@ async def test_figure_with_no_currency_anywhere_is_carried_unpriced():
         "cost_components": [{
             "component_id": "C0", "description": "control installation",
             "cost_category": "implementation", "unit_cost": 15000,
-            "unit_cost_basis": "REPORTED", "amount_type": "COMPONENT",
+            "unit_cost_basis": "REPORTED", "amount_type": "COMPONENT", "value_kind": "REMEDIATION_COST",
             "recurrence": "ONE_TIME", "source_reference_ids": ["E0"],
         }],
         "overall_status": "EVIDENCE_BACKED", "estimability": "ESTIMABLE",
@@ -74,10 +74,10 @@ async def test_missing_currency_adopts_the_single_established_one():
         "cost_components": [
             {"component_id": "C0", "description": "replacement part", "cost_category": "materials",
              "unit_cost": 40000, "unit_cost_basis": "REPORTED", "currency": "INR",
-             "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "source_reference_ids": ["E0"]},
+             "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"]},
             {"component_id": "C1", "description": "recertification service", "cost_category": "services",
              "unit_cost": 10000, "unit_cost_basis": "REPORTED", "amount_type": "COMPONENT",
-             "recurrence": "ONE_TIME", "source_reference_ids": ["E1"]},
+             "recurrence": "ONE_TIME", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E1"]},
         ],
         "overall_status": "EVIDENCE_BACKED", "estimability": "ESTIMABLE",
     }
@@ -98,7 +98,7 @@ async def test_contingent_approach_is_framed_as_candidate_when_root_cause_not_es
         "cost_components": [{
             "component_id": "C0", "description": "relay replacement", "cost_category": "materials",
             "unit_cost": 8000, "unit_cost_basis": "REPORTED", "currency": "INR",
-            "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "source_reference_ids": ["E0"],
+            "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"],
         }],
         "overall_status": "EVIDENCE_BACKED", "estimability": "ESTIMABLE",
     }
@@ -115,7 +115,7 @@ async def test_established_root_cause_keeps_direct_approach_wording():
         "cost_components": [{
             "component_id": "C0", "description": "relay replacement", "cost_category": "materials",
             "unit_cost": 8000, "unit_cost_basis": "VERIFIED", "currency": "INR",
-            "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "source_reference_ids": ["E0"],
+            "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"],
         }],
         "overall_status": "EVIDENCE_BACKED", "estimability": "ESTIMABLE",
     }

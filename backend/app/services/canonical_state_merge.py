@@ -189,6 +189,25 @@ def deviation_info_from_canonical(ctx):
             di.measurement_value = float(_mag)
             di.measurement_unit = getattr(cmp_, "unit", None)
         di.semantic_type = "COMPARISON"
+        # The deterministic deviation text must READ as a comparison
+        # (INV-SEMANTIC-002) -- otherwise a downstream node that consumes
+        # `condition` / `deviation` collapses an active comparison to a bare
+        # subject phrase. Build it here from the LLM's OWN comparison fields
+        # (no finding-text inspection).
+        _ref = di.comparison_right or di.comparison_basis or "the reference value"
+        _u = "%" if getattr(cmp_, "unit", None) == "%" else (
+            f" {cmp_.unit}" if getattr(cmp_, "unit", None) else ""
+        )
+        _mstr = f"{_mag:g}{_u}" if _mag is not None else ""
+        _dir = {"BELOW": "below", "EXCEEDED": "above"}.get(di.comparison_type, "")
+        if _dir and _mstr:
+            _cmp_cond = f"{'shortfall' if _dir == 'below' else 'excess'} of {_mstr} {_dir} {_ref}"
+        elif _mstr:
+            _cmp_cond = f"differed from {_ref} by {_mstr}"
+        else:
+            _cmp_cond = f"did not match {_ref}"
+        di.condition = _cmp_cond
+        di.deviation = _cmp_cond
 
     return di
 

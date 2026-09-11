@@ -1008,15 +1008,25 @@ def _check_verified_recurrence_not_denied(state: dict[str, Any]) -> tuple[bool, 
 
 
 def _check_recurrence_not_establish_future_risk(state: dict[str, Any]) -> tuple[bool, str | None]:
-    """INV-REC-002: recurrence evidence cannot independently establish
-    future recurrence risk -- a HIGH risk_of_recurrence rating must carry
-    its own rationale, not merely cite that recurrence already occurred."""
-    rc = state.get("root_cause")
+    """INV-REC-002 (Phase 5 §2/§3): observed historical recurrence cannot
+    independently establish a HIGH FUTURE recurrence-risk level. A HIGH rating
+    must carry a supporting rationale AND be backed by an established causal
+    mechanism -- otherwise the correct epistemic state is NOT_ASSESSABLE
+    (assessment required)."""
+    rc = state.get("root_cause") or state.get("report") and getattr(state.get("report"), "root_cause", None)
     if not rc or getattr(rc, "risk_of_recurrence", None) != "HIGH":
         return True, None
     rationale = (getattr(rc, "risk_of_recurrence_rationale", None) or "").strip()
     if not rationale:
         return False, "risk_of_recurrence=HIGH with no supporting rationale"
+    _status = str(getattr(rc, "status", "")).upper()
+    _cause_established = ("ESTABLISHED" in _status or "SUPPORTED" in _status
+                         or "VERIFIED" in _status)
+    if not _cause_established and "established" not in rationale.lower():
+        return False, (
+            "risk_of_recurrence=HIGH but the causal mechanism is not established -- "
+            "observed recurrence alone does not establish future recurrence risk"
+        )
     return True, None
 
 

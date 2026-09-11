@@ -255,6 +255,42 @@ def build_recurrence_rationale(rec: RecurrenceInfo) -> str:
     )
 
 
+def assess_recurrence_risk(
+    rec: "RecurrenceInfo", root_cause_established: bool
+) -> tuple[str, str]:
+    """Separate OBSERVED historical recurrence from FUTURE recurrence RISK.
+
+    These are different propositions (Phase 5 §2/§3/§10):
+
+    * `rec.is_recurring` establishes only that the condition was observed to
+      occur repeatedly in the PAST.
+    * A future-recurrence-risk *level* (HIGH/MEDIUM/LOW) is a forward-looking
+      assessment that needs an evidence-grounded basis -- typically an
+      established causal mechanism that will persist until corrected.
+
+    Rule (epistemic, not lexical -- generalizes to any finding):
+      recurring + causal mechanism ESTABLISHED  -> HIGH (it will keep recurring
+                                                   until the known cause is fixed)
+      recurring + cause NOT established          -> NOT_ASSESSABLE
+                                                   (observed recurrence alone
+                                                    does not establish future risk)
+
+    Returns ``(risk_level, rationale)``.
+    """
+    if root_cause_established:
+        return "HIGH", (
+            build_recurrence_rationale(rec)
+            + " The causal mechanism is established, so the condition is expected to "
+            "recur until the cause is corrected and the corrective action verified effective."
+        )
+    return "NOT_ASSESSABLE", (
+        "The finding describes a recurring / repeated condition, but the causal "
+        "mechanism has not been established. Observed historical recurrence does not "
+        "by itself establish future recurrence risk -- a risk level requires evidence "
+        "about whether the cause is understood and controlled. Assessment required."
+    )
+
+
 def is_previous_capa_mechanism_hypothesis(statement: str | None) -> bool:
     """True if `statement` concerns the implementation/verification/
     effectiveness of a PREVIOUS corrective action -- used to gate hypothesis

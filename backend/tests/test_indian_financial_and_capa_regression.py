@@ -174,7 +174,12 @@ async def test_recurring_defect_with_previous_capa():
     state, report, is_valid, violations = await _run_agent_pipeline(text)
     assert is_valid, f"Violations: {violations}"
     rc = report.root_cause
-    assert rc.risk_of_recurrence == "HIGH"
+    # Phase 5 §2: a recurring defect with an unavailable effectiveness review and
+    # no established causal mechanism does not establish future recurrence risk.
+    # The observed recurrence is surfaced in the rationale; the level is
+    # NOT_ASSESSABLE (assessment required), not HIGH.
+    assert rc.risk_of_recurrence == "NOT_ASSESSABLE"
+    assert "recurr" in (rc.risk_of_recurrence_rationale or "").lower()
     # Must not assert ineffectiveness as settled, unqualified fact (the
     # invariant registry -- checked via is_valid above -- already verifies
     # this with proper negation-window handling; this is a direct

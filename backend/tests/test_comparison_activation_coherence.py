@@ -42,6 +42,19 @@ FALSE_COMPARISONS = [
         why_comparable="different components of the same remediation",
         direction="UNKNOWN",
     ),
+    # Pass 62 (cert A1b class): two priced quantities with digits but NO
+    # baseline/standard operand and no direction/magnitude -> "several numbers
+    # exist" is not a comparison (spec §12).
+    dict(
+        left="Rs 200 per label", right="Rs 900 per hour",
+        status="ACTUAL_CONFLICT", why_comparable="both are costs for the labelling remediation",
+        comparison_basis="remediation cost", direction="UNKNOWN",
+    ),
+    dict(
+        left="8000 for delivery", right="12000 for installation",
+        status="UNRESOLVED_COMPARISON", why_comparable="the two amounts appear together",
+        direction="UNKNOWN",
+    ),
 ]
 
 

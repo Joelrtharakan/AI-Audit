@@ -47,6 +47,21 @@ _COUNTERS: dict[str, int] = {
     "llm_hypotheses_accepted": 0,
     "llm_hypotheses_rejected": 0,
     "deterministic_hypotheses_generated": 0,
+    # Remediation-cost SEMANTIC RELIABILITY counters (spec Pass 63 §7/§18).
+    # Incremented once per completed remediation-cost result from its FINAL
+    # structured state -- never from finding text. Low-cardinality only.
+    "remediation_runs_total": 0,
+    "remediation_exact_estimate": 0,
+    "remediation_partial_estimate": 0,
+    "remediation_not_assessable": 0,
+    "remediation_review_required": 0,
+    "remediation_recurrence_not_established": 0,   # RECURRENCE_NOT_ESTABLISHED reject
+    "remediation_recurrence_inconsistent": 0,      # RECURRENCE_INCONSISTENT reject
+    "remediation_unit_rate_unresolved": 0,         # UNIT_OR_RATE_BASIS_UNRESOLVED reject
+    "remediation_model_unavailable": 0,
+    "remediation_model_timeout": 0,
+    "remediation_model_output_invalid": 0,
+    "remediation_deterministic_fallback": 0,
 }
 
 # Structured validation-event reason taxonomy (Phase 4): deliberately a
@@ -229,6 +244,23 @@ def aggregated() -> dict:
         ),
         "validation_rejections_total": c.get("validation_rejections_total", 0),
         "validation_repairs": c.get("validation_repairs_total", 0),
+
+        # Remediation-cost semantic-reliability (spec Pass 63 §7/§18) -- where
+        # the small model's semantic mistakes surface, at low cardinality.
+        "remediation": {
+            "runs_total": c.get("remediation_runs_total", 0),
+            "exact_estimate": c.get("remediation_exact_estimate", 0),
+            "partial_estimate": c.get("remediation_partial_estimate", 0),
+            "not_assessable": c.get("remediation_not_assessable", 0),
+            "review_required": c.get("remediation_review_required", 0),
+            "recurrence_not_established": c.get("remediation_recurrence_not_established", 0),
+            "recurrence_inconsistent": c.get("remediation_recurrence_inconsistent", 0),
+            "unit_rate_unresolved": c.get("remediation_unit_rate_unresolved", 0),
+            "model_unavailable": c.get("remediation_model_unavailable", 0),
+            "model_timeout": c.get("remediation_model_timeout", 0),
+            "model_output_invalid": c.get("remediation_model_output_invalid", 0),
+            "deterministic_fallback": c.get("remediation_deterministic_fallback", 0),
+        },
 
         "average_primary_latency_ms": (
             round(_SUMS["llm_primary_elapsed_ms_total"] / primary_success, 1) if primary_success else None

@@ -262,7 +262,7 @@ def test_conditionality_and_pricing_are_independent_axes():
                     {"component_id": "K0", "description": "external calibration service", "activity_ids": ["A0"],
                      "cost_category": "service", "unit_cost": 6000, "unit_cost_basis": "REPORTED",
                      "currency": "INR", "amount_type": "COMPONENT", "recurrence": "ONE_TIME",
-                     "source_reference_ids": ["E0"]},
+                     "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E0"]},
                 ],
                 "overall_status": "EVIDENCE_BACKED",
             })
@@ -295,7 +295,7 @@ def test_partial_estimate_evidence_needed_targets_only_the_unpriced_gap():
         components=[
             {"component_id": "C0", "description": "external calibration service",
              "cost_category": "service", "unit_cost": 6000, "unit_cost_basis": "REPORTED",
-             "currency": "INR", "amount_type": "COMPONENT", "recurrence": "ONE_TIME",
+             "currency": "INR", "amount_type": "COMPONENT", "recurrence": "ONE_TIME", "value_kind": "REMEDIATION_COST",
              "source_reference_ids": ["E0"]},
             {"component_id": "C1", "description": "method revalidation effort",
              "cost_category": "labor", "quantity_basis": "NOT_ESTABLISHED",

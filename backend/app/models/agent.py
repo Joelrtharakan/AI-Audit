@@ -17,7 +17,7 @@ import datetime as dt
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.financial.models import FinancialAnalysisResult
 from app.remediation.models import RemediationCostResult
@@ -1732,6 +1732,93 @@ class EvidenceGap(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Human-review contract (structured, machine-readable)
+# ---------------------------------------------------------------------------
+
+
+class ReviewReason(BaseModel):
+    """One machine-readable reason a report must be reviewed by a human before
+    its conclusions are acted on. `code` is a stable enum-like token for an
+    integrator to branch on; `detail` is a short human-readable explanation."""
+
+    code: str
+    detail: str
+
+
+class ReviewState(BaseModel):
+    """Authoritative, structured representation of the human-review requirement.
+
+    Derived entirely from settled backend report state (never from UI text).
+    `human_review_required` remains on InvestigationReport for backward
+    compatibility; this object carries the WHY so an integrating system cannot
+    silently ignore a mandatory-review condition.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    required: bool = True
+    status: Literal["PENDING_HUMAN_REVIEW"] = "PENDING_HUMAN_REVIEW"
+    reasons: list[ReviewReason] = Field(default_factory=list)
+
+    @property
+    def reason_codes(self) -> list[str]:
+        return [r.code for r in self.reasons]
+
+    @field_validator("required")
+    @classmethod
+    def _review_is_always_required(cls, v: bool) -> bool:
+        # This system operates under mandatory human review; there is no
+        # backend path that produces an auto-approved AI result.
+        if not v:
+            raise ValueError("review.required must always be True")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Unified report-level AI provenance
+# ---------------------------------------------------------------------------
+
+
+class StageProvenance(BaseModel):
+    """Provenance for one semantic stage. When the stage did not run, `attempted`
+    is False and model/prompt fields stay None -- never fabricated."""
+
+    model_config = ConfigDict(frozen=True)
+
+    attempted: bool = False
+    model: str | None = None
+    prompt_version: str | None = None
+    schema_version: str | None = None
+    status: str | None = None  # stage-specific status token (OK / LLM_TIMEOUT / NOT_ATTEMPTED / ...)
+
+
+class AnalysisProvenance(BaseModel):
+    """Immutable, unified provenance for an investigation report.
+
+    Consolidates the scattered per-field provenance (analysis_mode,
+    provider_used, fallback_used, ...) into one object the ASP.NET layer can
+    persist verbatim. Derived once from settled report/state; never
+    re-resolved at render time.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: str | None = None
+    provider_attempts: list[str] = Field(default_factory=list)
+    execution_mode: Literal["LLM", "DETERMINISTIC", "DEGRADED"] = "LLM"
+    analysis_engine: Literal["LLM", "DETERMINISTIC"] = "LLM"
+    semantic_mode: Literal["CANONICAL_LLM", "DETERMINISTIC_FALLBACK", "DETERMINISTIC"] = "DETERMINISTIC"
+    fallback_used: bool = False
+    review_required: bool = True
+    reason_codes: list[str] = Field(default_factory=list)
+    generated_at: str = ""
+
+    canonical: StageProvenance = Field(default_factory=StageProvenance)
+    synthesis: StageProvenance = Field(default_factory=StageProvenance)
+    remediation: StageProvenance = Field(default_factory=StageProvenance)
+
+
+# ---------------------------------------------------------------------------
 # Full investigation report (spec section 18)
 # ---------------------------------------------------------------------------
 
@@ -1787,6 +1874,14 @@ class InvestigationReport(BaseModel):
     # with a licensed edge chain back to the deviation.
     causal_paths: list[CausalPath] = []
     human_review_required: bool = True  # always True -- enforced here, not just prompted
+    # Structured, machine-readable review contract (spec Phase 4). Populated by
+    # app.agent.review_state.derive_review_state from settled report fields.
+    review: ReviewState = Field(default_factory=ReviewState)
+    # Unified, immutable AI provenance (spec Phase 6). The scattered fields
+    # below (analysis_mode, provider_used, fallback_used, ...) are retained for
+    # backward compatibility; `provenance` is the authoritative consolidated
+    # record the ASP.NET layer persists verbatim.
+    provenance: AnalysisProvenance = Field(default_factory=AnalysisProvenance)
     analysis_mode: Literal["LLM", "DETERMINISTIC", "DEGRADED"] = "LLM"
     analysis_engine: Literal["LLM", "DETERMINISTIC"] = "LLM"
     provider_used: str | None = None

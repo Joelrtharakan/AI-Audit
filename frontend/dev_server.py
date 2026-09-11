@@ -33,6 +33,7 @@ Usage:
 """
 
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -87,32 +88,71 @@ class DevRequestHandler(SimpleHTTPRequestHandler):
             super().log_message(format, *args)
 
 
+def _port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
+
+
 def start_backend_process():
-    """Start the FastAPI backend server on port 8010 if not already running."""
+    """Start the FastAPI backend server on port 8010, unless something is
+    already listening there (e.g. a backend left running from a previous
+    dev_server.py run, or started manually)."""
+    if _port_is_listening(8010):
+        print("🚀 Backend API already running on http://localhost:8010 (reusing it)")
+        return None
+
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     backend_dir = os.path.join(project_root, "backend")
     venv_python = os.path.join(backend_dir, ".venv", "bin", "python")
-    
+
     python_bin = venv_python if os.path.exists(venv_python) else sys.executable
     cmd = [python_bin, "-m", "uvicorn", "app.main:app", "--reload", "--port", "8010"]
-    
+
     try:
         proc = subprocess.Popen(cmd, cwd=backend_dir)
-        print(f"🚀 Started Backend API server on http://localhost:8010 (PID: {proc.pid})")
-        return proc
     except Exception as exc:
         print(f"⚠️ Could not automatically start backend: {exc}")
         return None
 
+    # Give it a moment to bind before we report success, so a crash-on-start
+    # (e.g. missing deps, bad .env) is visible immediately instead of silently
+    # leaving the frontend pointed at a dead backend.
+    for _ in range(20):
+        if _port_is_listening(8010):
+            print(f"🚀 Started Backend API server on http://localhost:8010 (PID: {proc.pid})")
+            return proc
+        if proc.poll() is not None:
+            print(f"⚠️ Backend process exited immediately (code {proc.returncode}) -- "
+                  f"check backend logs above.")
+            return None
+        time.sleep(0.25)
+
+    print(f"⚠️ Backend process started (PID: {proc.pid}) but isn't answering on 8010 yet -- "
+          f"check backend logs above.")
+    return proc
+
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5510
-    
-    # Automatically launch backend alongside frontend
+
+    # Automatically launch backend alongside frontend (or reuse one already running)
     backend_proc = start_backend_process()
-    
+
+    if _port_is_listening(port):
+        print(f"✨ Frontend already being served on http://localhost:{port}/index.html "
+              f"-- nothing more to start.")
+        return
+
     ThreadingHTTPServer.allow_reuse_address = True
-    server = ThreadingHTTPServer(("", port), DevRequestHandler)
+    try:
+        server = ThreadingHTTPServer(("", port), DevRequestHandler)
+    except OSError as exc:
+        print(f"⚠️ Could not bind http://localhost:{port}: {exc}")
+        if backend_proc:
+            backend_proc.terminate()
+        sys.exit(1)
+
     print(f"✨ Serving frontend on http://localhost:{port}/index.html")
     print(f"🔑 Microsoft Entra sign-in: http://localhost:8010/api/auth/microsoft/login")
     print(f"Shimming {len(SHIMMED_PAGE_METHODS)} read-only ASP.NET PageMethod calls (see dev_server.py).")

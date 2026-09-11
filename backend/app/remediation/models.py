@@ -100,7 +100,7 @@ class RemediationCostComponentResult(BaseModel):
     calculated_amount_low: float | None = None  # when the component carried a unit-cost range
     calculated_amount_high: float | None = None
     calculation_formula: str = ""
-    recurrence: Literal["ONE_TIME", "RECURRING"] = "ONE_TIME"
+    recurrence: Literal["ONE_TIME", "RECURRING", "UNKNOWN"] = "ONE_TIME"
     recurring_period: str | None = None
     confidence: RemediationConfidence = RemediationConfidence.LOW
     source_reference_ids: list[str] = Field(default_factory=list)
@@ -215,11 +215,15 @@ class RemediationCostResult(BaseModel):
 
     # ---- provenance / audit -- never a numeric authority ----
     reasoning_source: Literal["LLM_SEMANTIC", "NONE"] = "NONE"
-    # OK | LLM_UNAVAILABLE | LLM_INVALID | LLM_INCOMPLETE | NO_EVIDENCE -- for
-    # logs / invariants only; the renderer never shows this.
+    # OK | LLM_UNAVAILABLE | LLM_TIMEOUT | LLM_INVALID | LLM_INCOMPLETE | NO_EVIDENCE
+    # -- for logs / invariants only; the renderer never shows this.
     remediation_semantic_status: str = "OK"
     calculation_traces: list[RemediationCalculationTrace] = Field(default_factory=list)
     rejected_items: list[RemediationRejectedItem] = Field(default_factory=list)
+
+    # ---- AI provenance persisted on the record (spec §31) -- so an
+    # AI-assisted cost is reproducible from the stored result, not only logs.
+    ai_provenance: dict = Field(default_factory=dict)
 
     @field_validator(
         "one_time_cost", "recurring_cost", "recurring_horizon_total", "recurring_horizon",

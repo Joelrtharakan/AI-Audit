@@ -183,11 +183,13 @@ async def interpret_finding_canonically_with_status(
             _meta = {}
 
         logger.info(
-            "CANONICAL SEMANTIC INTERPRETATION status=%s latency_ms=%d timeout_s=%s "
+            "CANONICAL SEMANTIC INTERPRETATION status=%s prompt_version=%s model=%s latency_ms=%d timeout_s=%s "
             "prompt_chars=%d prompt_tokens=%s output_tokens=%s finish_reason=%s "
             "load_ms=%s prompt_eval_ms=%s gen_ms=%s total_ms=%s tok_per_s=%s "
             "max_tokens=%s num_ctx=%s response_chars=%d%s",
-            status, int((time.monotonic() - _t0) * 1000), effective_timeout,
+            status, settings.canonical_semantic_prompt_version,
+            (settings.canonical_semantic_model or settings.ollama_model),
+            int((time.monotonic() - _t0) * 1000), effective_timeout,
             _prompt_chars, _meta.get("prompt_eval_count", "?"), _meta.get("eval_count", "?"),
             _meta.get("done_reason", "?"),
             _meta.get("native_load_ms", "?"), _meta.get("native_prompt_eval_ms", "?"),

@@ -194,7 +194,6 @@ _LLM_DIRECTION_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 def _sig_words(s: str | None) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]{3,}", (s or "").lower())}
 
@@ -281,20 +280,32 @@ def _validate_llm_primary_fields(ctx: CanonicalFindingContext, finding_text: str
     if _c is not None and getattr(_c, "status", "NOT_ESTABLISHED") in (
         "ACTUAL_CONFLICT", "UNRESOLVED_COMPARISON",
     ):
-        _ref = (getattr(_c, "reference", None) or "").strip()
-        _ref_is_baseline = bool(_ref) and not re.fullmatch(
-            r"(?:[EeCc]\d+[\s,;/&]*)+", _ref
-        )
-        _lr_numeric = bool(re.search(r"\d", getattr(_c, "left", "") or "")) and bool(
-            re.search(r"\d", getattr(_c, "right", "") or "")
-        )
-        _has_deviation = (
-            getattr(_c, "direction", "UNKNOWN") in ("ABOVE", "BELOW", "MISMATCH")
-            or getattr(_c, "magnitude", None) is not None
-            or _ref_is_baseline
-            or _lr_numeric
-        )
-        if not _has_deviation:
+        # A coherent comparison is a RELATIONSHIP AGAINST A STANDARD: one of the
+        # model's own comparison fields (left / right / reference /
+        # comparison_basis / why_comparable) must name what is being compared
+        # against -- a specification / limit / target / budget / prior value /
+        # requirement / before-after / a stated estimate or quotation. This is
+        # generic comparison vocabulary (the same footing as `_CALENDAR_PERIODS`),
+        # NOT domain knowledge and NOT finding-text inspection -- it reads ONLY
+        # the model's OWN comparison operand strings.
+        #
+        # `direction` and `magnitude` are attributes the model can attach to ANY
+        # pair of numbers; on their own they do NOT establish that the model has
+        # identified a genuine discrepancy (the demonstrated qwen3:8b failure:
+        # direction=MISMATCH over two independent cost components / rates).
+        # Likewise a free-text `reference` that names no standard ("abc",
+        # "Rs 900 per hour") does not establish one. "Several numbers exist" is
+        # NOT a comparison (spec §12).
+        _blob = " ".join(str(getattr(_c, f, "") or "").lower() for f in
+                         ("left", "right", "reference", "comparison_basis", "why_comparable"))
+        _has_relationship = any(w in _blob for w in (
+            "specification", "spec ", "limit", "target", "budget", "baseline",
+            "required", "requirement", "allowable", "approved", "expected",
+            "previous", "prior", "threshold", "benchmark", "standard", "acceptance",
+            "tolerance", "nominal", "planned", "forecast", "authorised", "authorized",
+            "before ", "after ", "actual ", "estimate", "estimated", "quotation", "quoted",
+        ))
+        if not _has_relationship:
             _c.status = "NOT_ESTABLISHED"
             ctx.comparison = None
 

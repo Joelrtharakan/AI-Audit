@@ -53,26 +53,30 @@ def _pharm_interp(refrigerator_qty, refrig_basis="EVIDENCED", refrig_auditor=Fal
          "activity_ids": ["RA001"], "cost_category": "materials", "quantity": 2,
          "quantity_unit": "sensor", "quantity_basis": "EVIDENCED", "unit_cost": 7500,
          "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "PER_UNIT",
+         "value_kind": "REMEDIATION_COST",
          "source_reference_ids": ["E1"], "rationale": "2 sensors x 7,500"},
         {"component_id": "C2", "description": "automated alarm system (equipment)",
          "activity_ids": ["RA002"], "cost_category": "equipment", "quantity": 1,
          "quantity_unit": "system", "quantity_basis": "EVIDENCED", "unit_cost": 45000,
          "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "COMPONENT",
+         "value_kind": "REMEDIATION_COST",
          "source_reference_ids": ["E3"], "rationale": "1 alarm system x 45,000"},
         {"component_id": "C3", "description": "alarm system installation",
          "activity_ids": ["RA002"], "cost_category": "installation", "unit_cost": 8000,
          "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "COMPONENT",
+         "value_kind": "REMEDIATION_COST",
          "source_reference_ids": ["E3"], "rationale": "installation 8,000"},
         {"component_id": "C4", "description": "alarm system validation",
          "activity_ids": ["RA003"], "cost_category": "labor", "quantity": 6,
          "quantity_unit": "hour", "quantity_basis": "EVIDENCED", "unit_cost": 1500,
          "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "PER_HOUR",
+         "value_kind": "REMEDIATION_COST",
          "source_reference_ids": ["E3"], "rationale": "6 h x 1,500 = 9,000"},
     ]
     c1 = {"component_id": "C1", "description": "sensor installation",
           "activity_ids": ["RA001"], "cost_category": "installation", "unit_cost": 3000,
           "quantity_unit": "refrigerator", "unit_cost_basis": "VERIFIED", "currency": "INR",
-          "amount_type": "PER_UNIT", "source_reference_ids": ["E2"]}
+          "amount_type": "PER_UNIT", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E2"]}
     if refrigerator_qty is not None:
         c1["quantity"] = refrigerator_qty
         c1["quantity_basis"] = refrig_basis
@@ -125,7 +129,8 @@ async def test_case_c_refrigerator_count_not_stated_is_partial_with_auditor_inpu
         semantic_context=None,
     )
     # priced portion: 15,000 + 45,000 + 8,000 + 9,000
-    assert res.most_likely_estimate == 77000.0
+    assert res.one_time_cost == 77000.0
+    assert res.most_likely_estimate is None
     assert res.pricing_status == "PARTIAL_ESTIMATE"
     assert len(res.auditor_inputs_required) == 1
     assert "refrigerator" in res.auditor_inputs_required[0].missing_input.lower()
@@ -152,7 +157,8 @@ async def test_case_d_missing_alarm_price_partial_prices_the_rest():
         client=_Fake(json.dumps(interp)), semantic_context=None,
     )
     # 15,000 + 6,000 + 8,000 + 9,000  (alarm equipment unpriced)
-    assert res.most_likely_estimate == 38000.0
+    assert res.one_time_cost == 38000.0
+    assert res.most_likely_estimate is None
     assert res.pricing_status == "PARTIAL_ESTIMATE"
     assert any("alarm" in a.missing_input.lower() for a in res.auditor_inputs_required)
 
@@ -195,11 +201,11 @@ async def test_pricing_input_the_llm_dropped_is_surfaced_not_silently_lost():
             {"component_id": "C0", "description": "sensor replacement", "activity_ids": ["RA1"],
              "quantity": 2, "quantity_basis": "EVIDENCED", "unit_cost": 7500,
              "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "PER_UNIT",
-             "source_reference_ids": ["E1"]},
+             "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E1"]},
             # the weak model priced ONLY the alarm installation, dropping the 45,000 equipment
             {"component_id": "C1", "description": "alarm system installation", "activity_ids": ["RA2"],
              "unit_cost": 8000, "unit_cost_basis": "VERIFIED", "currency": "INR",
-             "amount_type": "COMPONENT", "source_reference_ids": ["E3"]},
+             "amount_type": "COMPONENT", "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E3"]},
         ],
         "estimability": "ESTIMABLE", "overall_status": "EVIDENCE_BACKED",
     }
@@ -227,7 +233,7 @@ async def test_nonreconciling_subtotal_is_not_a_clean_exact():
         "component_id": "CS", "description": "vendor subtotal for the alarm package",
         "activity_ids": ["RA002"], "cost_category": "equipment", "unit_cost": 70000,
         "unit_cost_basis": "VERIFIED", "currency": "INR", "amount_type": "SUBTOTAL",
-        "source_reference_ids": ["E3"],
+        "value_kind": "REMEDIATION_COST", "source_reference_ids": ["E3"],
     })
     res = await estimate_remediation_cost(
         finding_text=PHARM_FIND, evidence_ledger=_pharm_ev(True),
