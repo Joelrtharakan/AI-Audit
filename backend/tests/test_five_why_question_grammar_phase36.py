@@ -103,3 +103,74 @@ def test_plural_record_type_subject_takes_were(subject):
     assert subject_is_plural(subject) is True
     q = format_deviation_why_question(subject, "incomplete")
     assert "Why were " in q
+
+
+# --------------------------------------------------------------------------- #
+# modal auxiliaries carry their own tense/modality and must never receive a
+# second, incompatible auxiliary in front of them (production-hardening /
+# runtime-trace charter, Issue 2/3: "Why was X could promote..." is invalid
+# and silently strengthens a possibility into a flat assertion). Generalized
+# over the full closed set of English modal auxiliaries and multiple
+# unrelated domains/subjects -- no finding-specific wording.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("modal", ["could", "can", "may", "might", "would", "should", "must", "will", "shall"])
+@pytest.mark.parametrize("subject,rest", [
+    ("the purified-water system", "promote biofilm formation"),
+    ("the vendor onboarding process", "not meet the specification"),
+    ("the control", "have been effective"),
+    ("the reconciliation", "not resolve the variance"),
+])
+def test_modal_auxiliary_is_never_preceded_by_a_second_auxiliary(modal, subject, rest):
+    q = format_deviation_why_question(subject, f"{modal} {rest}")
+    assert q.startswith(f"Why {modal} ")
+    assert " was " not in q.lower() and " did " not in q.lower() and " does " not in q.lower()
+    assert rest in q
+
+
+def test_modal_auxiliary_preserves_the_canonical_modality_word():
+    # "could" must remain "could" -- never collapse to a flat past-tense
+    # assertion ("promoted") or an unrelated modal.
+    q = format_deviation_why_question("the system", "could promote biofilm formation")
+    assert "could" in q.lower()
+    assert "promoted" not in q.lower()
+
+
+def test_non_modal_conditions_are_unaffected_by_the_modal_branch():
+    assert format_deviation_why_question("the checklist", "was incomplete") == \
+        "Why was the checklist incomplete?"
+    assert format_deviation_why_question("the SOP", "not include a step") == \
+        "Why did the SOP not include a step?"
+
+
+# --------------------------------------------------------------------------- #
+# a subject noun phrase must never be echoed twice within one mechanically
+# assembled Why question (production-hardening Phase 9.4 Defect B: "Why were
+# the preventive-maintenance controls inadequate preventive-maintenance
+# controls?"). Pure string-level deduplication of two spans already
+# extracted from the same sentence -- generalized across unrelated subjects.
+# --------------------------------------------------------------------------- #
+
+from app.services.semantic_subject import declarative_to_why_question as _d2q
+
+
+@pytest.mark.parametrize("subject,tail_condition", [
+    ("the preventive-maintenance controls", "inadequate preventive-maintenance controls"),
+    ("the calibration program", "insufficient calibration program"),
+    ("the vendor qualification process", "incomplete vendor qualification process"),
+])
+def test_subject_is_never_echoed_twice_in_a_why_question(subject, tail_condition):
+    q = format_deviation_why_question(subject, tail_condition)
+    subj_words = subject.replace("the ", "").lower()
+    assert q.lower().count(subj_words) == 1, q
+
+
+def test_declarative_to_why_question_drops_a_trailing_subject_echo():
+    q = _d2q("The preventive-maintenance controls were found to be inadequate preventive-maintenance controls.")
+    assert q.lower().count("preventive-maintenance controls") == 1
+    assert q == "Why were the preventive-maintenance controls found to be inadequate?"
+
+
+def test_declarative_to_why_question_unaffected_when_no_echo_present():
+    assert _d2q("The preventive-maintenance controls were inadequate.") == \
+        "Why were the preventive-maintenance controls inadequate?"

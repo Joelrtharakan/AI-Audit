@@ -107,3 +107,51 @@ def test_mixed_currency_sum_proposal_rejected():
     _, accepted, outcome = validate_and_plan(interp, EV)
     assert accepted == []
     assert any(r.reason_code == "INCOMPATIBLE_CURRENCY" for r in outcome.rejected)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.4 Defect D: a REPORTED unit cost backed ONLY by BELIEF-status
+# evidence (an epistemic stance/opinion, e.g. a preliminary estimate --
+# "strictly weaker than REPORTED" by design) must not remain REPORTED. Same
+# structural technique as the existing VERIFIED->REPORTED cap, one tier
+# down. Generalized: unrelated amounts/domains, no finding-specific wording.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("amount", [15000, 185000, 2500000])
+def test_reported_cost_backed_only_by_belief_evidence_is_capped_to_estimated(amount):
+    interp = _interp([{
+        "component_id": "C0", "description": "materials and labor", "cost_category": "labor",
+        "unit_cost": amount, "unit_cost_basis": "REPORTED", "currency": "INR",
+        "amount_type": "TOTAL", "source_reference_ids": ["E0"], "value_kind": "QUOTED_PRICE",
+    }])
+    comps, _, outcome = validate_and_plan(
+        interp, EV, verified_evidence_ids=set(), belief_evidence_ids={"E0"},
+    )
+    assert comps[0].unit_cost_basis == "ESTIMATED"
+    assert any("belief" in d.lower() for d in outcome.llm_disagreements)
+
+
+def test_reported_cost_backed_by_non_belief_evidence_is_unaffected():
+    interp = _interp([{
+        "component_id": "C0", "description": "materials and labor", "cost_category": "labor",
+        "unit_cost": 50000, "unit_cost_basis": "REPORTED", "currency": "INR",
+        "amount_type": "TOTAL", "source_reference_ids": ["E0"], "value_kind": "QUOTED_PRICE",
+    }])
+    comps, _, outcome = validate_and_plan(
+        interp, EV, verified_evidence_ids=set(), belief_evidence_ids=set(),
+    )
+    assert comps[0].unit_cost_basis == "REPORTED"
+    assert not any("belief" in d.lower() for d in outcome.llm_disagreements)
+
+
+def test_belief_cap_does_not_touch_an_already_estimated_basis():
+    interp = _interp([{
+        "component_id": "C0", "description": "part A", "cost_category": "materials",
+        "unit_cost": 1000, "unit_cost_basis": "ESTIMATED", "currency": "INR",
+        "amount_type": "TOTAL", "source_reference_ids": ["E0"], "value_kind": "QUOTED_PRICE",
+    }])
+    comps, _, outcome = validate_and_plan(
+        interp, EV, verified_evidence_ids=set(), belief_evidence_ids={"E0"},
+    )
+    assert comps[0].unit_cost_basis == "ESTIMATED"
+    assert not any("belief" in d.lower() for d in outcome.llm_disagreements)

@@ -604,6 +604,16 @@ async def estimate_remediation_cost(
             f"E{i}" for i, _it in enumerate(evidence_ledger)
             if str(getattr(_it, "status", "")).upper().endswith("VERIFIED")
         }
+        # E-ids whose ledger item is BELIEF-status -- an epistemic STANCE
+        # about the world (e.g. a preliminary/opinion-based estimate), never
+        # an asserted observation, and "strictly weaker than REPORTED" by
+        # design (EvidenceStatus.BELIEF). A REPORTED unit cost backed ONLY by
+        # belief-status evidence is capped one tier down (Phase 9.4 Defect D)
+        # -- the same structural technique as the VERIFIED cap above.
+        belief_evidence_ids = {
+            f"E{i}" for i, _it in enumerate(evidence_ledger)
+            if str(getattr(_it, "status", "")).upper().endswith("BELIEF")
+        }
         # EVIDENCE-REFERENCE RESOLUTION (spec §2/§6/§22): the context block
         # feeds evidence as E0/E1/..., but a finding whose own text labels its
         # claims ("C1: ...", "C2: ...") leads the model to cite "C1"/"C2".
@@ -653,6 +663,7 @@ async def estimate_remediation_cost(
             valid_hypothesis_ids=_hypothesis_ids(root_cause),
             valid_capa_refs=_capa_refs(capa),
             verified_evidence_ids=verified_evidence_ids,
+            belief_evidence_ids=belief_evidence_ids,
         )
         est = assemble_estimate(components, proposals, outcome.traces)
     except Exception as exc:  # fail-closed: a bug must never fabricate a number

@@ -25,9 +25,73 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests.certification.semantic_capability_benchmark import BENCHMARK, material_dimensions  # noqa: E402
+from app.agent.autonomy import get_certificate_store  # noqa: E402
+from app.models.autonomy import (  # noqa: E402
+    CapabilityDimension as _CD,
+    CapabilityResult as _CR,
+    ModelCapabilityCertificate,
+)
 
 _OUT = Path("/private/tmp/claude-501") / "cert"
 _MATERIAL = material_dimensions()
+
+# Maps each EXISTING, unmodified benchmark case to the named capability
+# dimension(s) it substantively exercises (spec §3-§4). This is metadata
+# ABOUT the benchmark, not a change to it -- no case, oracle key, or scoring
+# rule is touched. A dimension not referenced by any case is left
+# NOT_CERTIFIED rather than guessed at (this benchmark does not directly
+# score INVESTIGATION_REASONING / FIVE_WHY_REASONING / REMEDIATION_REASONING
+# / CAPA_REASONING as standalone `expect` keys, so those remain
+# NOT_CERTIFIED here -- an honest gap, not a fabricated PASS).
+_CASE_DIMENSIONS: dict[str, list] = {
+    "A1": [_CD.QUANTITY_UNIT_REASONING, _CD.PRICING_SEMANTICS, _CD.COST_CALCULATION_INTERPRETATION],
+    "A1b": [_CD.QUANTITY_UNIT_REASONING, _CD.PRICING_SEMANTICS, _CD.COST_CALCULATION_INTERPRETATION],
+    "C1": [_CD.PRICING_SEMANTICS, _CD.COST_CALCULATION_INTERPRETATION],
+    "C2": [_CD.OBSERVATION_SEMANTICS, _CD.PRICING_SEMANTICS],
+    "D1": [_CD.RECURRENCE_REASONING, _CD.COST_CALCULATION_INTERPRETATION],
+    "G1": [_CD.RECURRENCE_REASONING],
+    "E1": [_CD.RECURRENCE_REASONING],
+    "E2": [_CD.RECURRENCE_REASONING],
+    "H1": [_CD.RECURRENCE_REASONING, _CD.EPISTEMIC_PRESERVATION, _CD.FAIL_CLOSED_BEHAVIOR],
+    "K1": [_CD.QUANTITY_UNIT_REASONING, _CD.COST_CALCULATION_INTERPRETATION],
+    "L1": [_CD.QUANTITY_UNIT_REASONING, _CD.EPISTEMIC_PRESERVATION, _CD.FAIL_CLOSED_BEHAVIOR],
+    "M1": [_CD.QUANTITY_UNIT_REASONING, _CD.PRICING_SEMANTICS],
+    "O1": [_CD.COMPARISON_REASONING],
+    "O2": [_CD.COMPARISON_REASONING],
+    "Q1": [_CD.CAUSAL_REASONING, _CD.EVIDENCE_GROUNDING, _CD.EPISTEMIC_PRESERVATION],
+    "P1": [_CD.CAUSAL_REASONING, _CD.CAUSAL_DEPTH, _CD.EVIDENCE_GROUNDING],
+    "W1": [_CD.PRICING_SEMANTICS, _CD.EPISTEMIC_PRESERVATION],
+    "V1": [_CD.PRICING_SEMANTICS, _CD.EPISTEMIC_PRESERVATION],
+    "X1": [_CD.IMPACT_SEMANTICS, _CD.EVIDENCE_GROUNDING],
+    "Z1": [_CD.FAIL_CLOSED_BEHAVIOR],
+    "XD1": [_CD.QUANTITY_UNIT_REASONING, _CD.COST_CALCULATION_INTERPRETATION],
+    "XD2": [_CD.QUANTITY_UNIT_REASONING, _CD.COST_CALCULATION_INTERPRETATION],
+}
+_PASSING_VERDICTS = ("CORRECT", "SAFE_ABSTENTION")
+
+
+def compute_capability_results(results: list[dict]) -> dict[str, str]:
+    """A dimension is PASS iff EVERY benchmark case that exercises it
+    produced CORRECT or SAFE_ABSTENTION -- a single CAUGHT_ERROR on any case
+    mapped to a dimension fails that whole dimension (spec §32: a
+    CAUGHT_ERROR is not harmless, it demonstrates the model CAN produce a
+    materially unsafe interpretation for that capability)."""
+    by_dim: dict[str, list[str]] = {}
+    for r in results:
+        for dim in _CASE_DIMENSIONS.get(r["id"], []):
+            by_dim.setdefault(dim.value, []).append(r["verdict"])
+    out = {dim: (_CR.PASS.value if all(v in _PASSING_VERDICTS for v in verdicts) else _CR.FAIL.value)
+           for dim, verdicts in by_dim.items()}
+    # Cross-cutting structural dimensions: not tied to one case, tied to
+    # whether the run produced any unsafe/uncaught failure at all.
+    run_err = sum(1 for r in results if r["verdict"] in ("RUN_ERROR",))
+    sme = sum(1 for r in results if r["verdict"] == "SILENT_MATERIAL_ERROR")
+    out[_CD.SERIALIZATION_CONTRACT.value] = _CR.PASS.value if run_err == 0 else _CR.FAIL.value
+    out[_CD.FAIL_CLOSED_BEHAVIOR.value] = (
+        _CR.PASS.value if (sme == 0 and out.get(_CD.FAIL_CLOSED_BEHAVIOR.value, _CR.PASS.value) != _CR.FAIL.value)
+        else _CR.FAIL.value
+    )
+    return out
 
 
 def _ev_items(evidence):
@@ -86,12 +150,17 @@ def _preflight(model: str) -> dict:
     try:
         r = httpx.get(f"{base}/api/tags", timeout=4.0)
         r.raise_for_status()
-        installed = {m["name"] for m in r.json().get("models", [])}
+        _tags = r.json().get("models", [])
+        installed = {m["name"] for m in _tags}
+        _digest_by_name = {m["name"]: m.get("digest", "") for m in _tags}
     except Exception as exc:
         return {"ok": False, "reason": f"PROVIDER_UNAVAILABLE: {base}/api/tags -> {type(exc).__name__}: {exc}", "meta": meta}
     meta["installed_models"] = sorted(installed)
     if model not in installed:
         return {"ok": False, "reason": f"MODEL_UNAVAILABLE: {model!r} not installed in the configured Ollama ({sorted(installed)})", "meta": meta}
+    # Exact identity signal for the capability certificate (spec §2) -- the
+    # Ollama content digest, not merely the friendly tag name.
+    meta["model_digest"] = _digest_by_name.get(model, "")[:24]
 
     return {"ok": True, "reason": "OK", "meta": meta}
 
@@ -273,7 +342,7 @@ async def certify(model: str, ids: set[str] | None) -> dict:
         if r["verdict"] == "SILENT_MATERIAL_ERROR" and r.get("error_class"):
             err_classes[r["error_class"]] = err_classes.get(r["error_class"], 0) + 1
     return {"model": model, "status": "DONE", "n": len(results), "tally": tally,
-            "silent_error_classes": err_classes, "results": results}
+            "silent_error_classes": err_classes, "results": results, "meta": pf["meta"]}
 
 
 def evaluate_certification_gates(tally: dict, n: int) -> dict:
@@ -354,7 +423,70 @@ async def main():
         print(f"{'':4}{'FINAL STATUS':32} : {gates['FINAL_STATUS']}")
         if s.get("silent_error_classes"):
             print(f"{'':12} silent-error capability gaps: {s['silent_error_classes']}")
+        cert = build_and_save_certificate(s, t, gates)
+        print_capability_certificate(cert)
+    _OUT.mkdir(parents=True, exist_ok=True)
     json.dump(summary, open(_OUT / "cert_summary.json", "w"), indent=2, default=str)
+
+
+def build_and_save_certificate(run: dict, tally: dict, gates: dict) -> ModelCapabilityCertificate:
+    """Builds the per-execution-configuration `ModelCapabilityCertificate`
+    (spec §2, §31) from this run's already-computed tally/gates and persists
+    it to the certificate store keyed by exact identity (spec §13, §26) --
+    the SAME store `app.agent.autonomy.evaluate_autonomy` reads at runtime.
+    """
+    from app.agent.autonomy import build_current_execution_identity
+
+    meta = run.get("meta") or {}
+    # Reuses the SAME identity formula the runtime controller uses (spec
+    # §13) -- settings at this point already reflect the just-certified
+    # model (the preflight asserted `model == settings.ollama_model` before
+    # any case ran), so this identity is exactly what a runtime lookup for
+    # this configuration will compute.
+    identity = build_current_execution_identity(model_version=meta.get("model_digest", ""))
+    generated_at = time.time()
+    capability_results = compute_capability_results(run["results"])
+    cert = ModelCapabilityCertificate(
+        certificate_id=ModelCapabilityCertificate.make_id(identity, generated_at),
+        identity=identity,
+        generated_at=generated_at,
+        correct_count=tally.get("CORRECT", 0),
+        safe_abstention_count=tally.get("SAFE_ABSTENTION", 0),
+        caught_error_count=tally.get("CAUGHT_ERROR", 0),
+        silent_material_error_count=tally.get("SILENT_MATERIAL_ERROR", 0),
+        run_error_count=tally.get("RUN_ERROR", 0),
+        total_cases=run["n"],
+        capability_results=capability_results,
+        semantic_safety_gate=gates["SEMANTIC_SAFETY_GATE"],
+        autonomous_capability_gate=gates["AUTONOMOUS_CAPABILITY_GATE"],
+        human_reviewed_production_gate=gates["HUMAN_REVIEWED_PRODUCTION_GATE"],
+    )
+    path = get_certificate_store().save(cert)
+    print(f"{'':4}{'Capability certificate saved':32} : {path}")
+    return cert
+
+
+def print_capability_certificate(cert: ModelCapabilityCertificate) -> None:
+    print("\n---- MODEL CAPABILITY CERTIFICATE ----")
+    print(f"Provider:            {cert.identity.provider}")
+    print(f"Model:               {cert.identity.model}")
+    print(f"Model Version:       {cert.identity.model_version or '(unavailable)'}")
+    print(f"Semantic Schema:     {cert.identity.semantic_schema_version}")
+    print(f"Contract Version:    {cert.identity.contract_version}")
+    print(f"Benchmark Hash:      {cert.identity.benchmark_hash}")
+    for dim in _CD:
+        result = cert.capability_results.get(dim.value, _CR.NOT_CERTIFIED.value)
+        print(f"{dim.value.replace('_', ' ').title():28}: {result}")
+    print(f"Silent Material Errors: {cert.silent_material_error_count}")
+    print(f"Run Errors:             {cert.run_error_count}")
+    print(f"Safe Abstentions:       {cert.safe_abstention_count}")
+    print(f"Caught Errors:          {cert.caught_error_count}")
+    print(f"SEMANTIC_SAFETY_GATE:           {cert.semantic_safety_gate}")
+    print(f"AUTONOMOUS_CAPABILITY_GATE:     {cert.autonomous_capability_gate}")
+    print(f"HUMAN_REVIEWED_PRODUCTION_GATE: {cert.human_reviewed_production_gate}")
+    print(f"Capability Certificate ID: {cert.certificate_id}")
+    print(f"Generated At:              {cert.generated_at}")
+    print("---------------------------------------\n")
 
 
 if __name__ == "__main__":

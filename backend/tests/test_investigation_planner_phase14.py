@@ -251,3 +251,46 @@ def test_unstructured_fallback_splits_cause_and_requirement_gaps(subject, condit
     assert any("requirement" in t or "specification" in t or "procedure" in t for t in texts)
     # no single question conflates both gaps with "and"
     assert not any(("cause" in t or "mechanism" in t) and "requirement" in t for t in texts)
+
+
+# --------------------------------------------------------------------------- #
+# investigation-gap question realization must never produce a redundant
+# double-frame ("What objective evidence establishes the requirement
+# establishing that X?") when the canonical gap phrase itself already
+# contains the word "establish" -- (production-hardening / runtime-trace
+# charter, Issue 4). Generalized across unrelated gap categories (a
+# requirement gap, a mechanism gap, a chronology gap, a scope gap) -- no
+# category-specific raw-text detection, just a grammatical redundancy guard.
+# --------------------------------------------------------------------------- #
+
+from app.agent.nodes.plan_investigation_fallback import _realize_gap_as_question
+
+
+@pytest.mark.parametrize("gap", [
+    "the requirement establishing that dead legs must be removed",
+    "the specification establishing the applicable tolerance",
+    "the procedure establishing the review frequency",
+    "the policy establishing the escalation threshold",
+])
+def test_gap_realization_never_double_frames_an_already_establish_headed_gap(gap):
+    q = _realize_gap_as_question(gap)
+    assert q.lower().count("establish") == 1
+    assert q.endswith("?")
+    assert gap in q or gap.rstrip(".") in q
+
+
+@pytest.mark.parametrize("gap,expected_prefix", [
+    ("whether the control was operating at the time", "What does the available evidence show about"),
+    ("was the record independently verified", None),
+    ("the applicable calibration interval", "What objective evidence establishes"),
+])
+def test_gap_realization_routes_by_gap_shape_not_a_fixed_template(gap, expected_prefix):
+    q = _realize_gap_as_question(gap)
+    if expected_prefix:
+        assert q.startswith(expected_prefix)
+    assert q.endswith("?")
+
+
+def test_gap_realization_leaves_an_already_phrased_question_untouched():
+    q = _realize_gap_as_question("What does the batch record show?")
+    assert q == "What does the batch record show?"

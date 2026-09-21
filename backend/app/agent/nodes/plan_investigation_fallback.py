@@ -73,6 +73,32 @@ def _extract_transmission_object(text: str) -> str | None:
     return None
 
 
+def _realize_gap_as_question(t: str) -> str:
+    """Realize one canonical gap phrase (an LLM-authored short noun/verb
+    phrase describing missing information -- never raw finding text) as a
+    natural investigation question. Not a single mechanical frame
+    concatenated onto every gap: the phrasing follows the gap's own
+    grammatical shape (Phase 9.2 Issue 6 / causal-separation charter §3),
+    and a gap phrase that is ITSELF already headed by "establish(es/ing)"
+    (e.g. "the requirement establishing that X") is never wrapped in a
+    SECOND "establish" frame -- that collision ("What objective evidence
+    establishes the requirement establishing that X?") is a grammatical
+    redundancy, not a semantic classification, and is avoided the same way
+    the whether/what routing below already avoids other mismatched frames."""
+    t = (t or "").strip()
+    if not t or t.endswith("?"):
+        return t
+    _g = t.rstrip(". ")
+    _gl = _g[0].lower() + _g[1:] if _g[:1].isupper() and not _g.split()[0].isupper() else _g
+    if re.match(r"^(?:whether|why|how|which|when|where)\b", _gl, re.IGNORECASE):
+        return f"What does the available evidence show about {_gl}?"
+    if re.match(r"^(?:what|is|are|was|were|does|do|did|has|have|can|could)\b", _gl, re.IGNORECASE):
+        return _gl + "?"
+    if re.search(r"\bestablish(es|ing|ed)?\b", _gl, re.IGNORECASE):
+        return f"What objective evidence is available regarding {_gl}?"
+    return f"What objective evidence establishes {_gl}?"
+
+
 def _plan_from_canonical_structure(
     semantic_context: Any, canonical_subject: str | None,
 ) -> tuple[list[CandidateHypothesis], InvestigationPlan]:
@@ -130,20 +156,7 @@ def _plan_from_canonical_structure(
     if _steps:
         _pri = {"HIGH": "P1", "MEDIUM": "P2", "LOW": "P3"}
         for i, s in enumerate(_steps):
-            t = (s.unknown or "").strip()
-            if t and not t.endswith("?"):
-                # Realize a canonical gap phrase as a natural question. Not a
-                # single mechanical frame prepended to every gap: the phrasing
-                # follows the gap's shape (Phase 9.2 Issue 6 / causal-separation
-                # charter §3).
-                _g = t.rstrip(". ")
-                _gl = _g[0].lower() + _g[1:] if _g[:1].isupper() and not _g.split()[0].isupper() else _g
-                if re.match(r"^(?:whether|why|how|which|when|where)\b", _gl, re.IGNORECASE):
-                    t = f"What does the available evidence show about {_gl}?"
-                elif re.match(r"^(?:what|is|are|was|were|does|do|did|has|have|can|could)\b", _gl, re.IGNORECASE):
-                    t = _gl + "?"
-                else:
-                    t = f"What objective evidence establishes {_gl}?"
+            t = _realize_gap_as_question((s.unknown or "").strip())
             _q(f"Q_LLM_{i + 1}", t,
                s.why_it_matters or "Resolve an open question this finding raises",
                s.evidence_that_would_resolve or "not specified",
@@ -154,7 +167,7 @@ def _plan_from_canonical_structure(
         _gaps = [str(g).strip() for g in (getattr(sc, "information_gaps", []) or []) if str(g).strip()]
         _ambigs = [str(g).strip() for g in (getattr(sc, "unresolved_ambiguities", []) or []) if str(g).strip()]
         for i, g in enumerate(_gaps or _ambigs):
-            _q(f"Q_GAP_{i + 1}", f"What objective evidence would establish: {g.rstrip('.')}?",
+            _q(f"Q_GAP_{i + 1}", _realize_gap_as_question(g),
                "Resolve an information gap identified in the canonical interpretation")
 
         cmp_ = getattr(sc, "comparison", None)

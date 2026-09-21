@@ -707,6 +707,24 @@ _DECLARATIVE_PAST_VERB_RE = re.compile(
 )
 
 
+def _strip_redundant_subject_echo(subject: str, rest: str) -> str:
+    """If `rest` ends with the SAME noun phrase already extracted as
+    `subject` (a source sentence like "X were found to be inadequate X"),
+    drop that trailing echo before composing the question. Pure string-level
+    deduplication between two spans ALREADY extracted from the same
+    sentence -- never an inference about what the finding means -- so
+    "Why were X inadequate X?" realizes as "Why were X inadequate?" instead
+    of restating the subject twice. Leaves `rest` untouched when no exact
+    echo is present, for any subject/domain."""
+    subj_norm = re.sub(r"^(?:the|a|an)\s+", "", subject.strip(), flags=re.IGNORECASE).rstrip(".")
+    if not subj_norm:
+        return rest
+    rest_stripped = rest.rstrip(".")
+    pattern = re.compile(rf"(?:^|\s)(?:the|a|an)?\s*{re.escape(subj_norm)}\s*$", re.IGNORECASE)
+    new_rest = pattern.sub("", rest_stripped).rstrip()
+    return new_rest if new_rest else rest
+
+
 def _lower_leading_word(text: str) -> str:
     """Lowercase a sentence-initial capital only when it's an ordinary
     word being moved mid-question -- never a short all-caps token (an
@@ -738,14 +756,14 @@ def declarative_to_why_question(text: str) -> str:
     if m:
         subject = m.group("subject").strip()
         aux = m.group("aux")
-        rest = m.group("rest").strip()
+        rest = _strip_redundant_subject_echo(subject, m.group("rest").strip())
         subject_lc = _lower_leading_word(subject) if subject else subject
         return f"Why {aux} {subject_lc} {rest}?"
     m_past = _DECLARATIVE_PAST_VERB_RE.match(clause)
     if m_past:
         subject = m_past.group("subject").strip()
         verb = m_past.group("verb").lower()
-        rest = m_past.group("rest").strip()
+        rest = _strip_redundant_subject_echo(subject, m_past.group("rest").strip())
         subject_lc = _lower_leading_word(subject) if subject else subject
         # Convert past tense verb to base form if simple rule applies
         base_verb = verb[:-1] if verb.endswith("ed") and not verb.endswith("eed") else verb
@@ -1010,6 +1028,26 @@ def format_deviation_why_question(
         raw_subj_cap = raw_subj[0].upper() + raw_subj[1:] if raw_subj else raw_subj
         subj_phrase = raw_subj_cap if re.match(r"^(?:the|a|an|this|that)\b", raw_subj, re.IGNORECASE) else f"The {raw_subj}"
         return f"Why did {subj_phrase[0].lower()}{subj_phrase[1:]} occur{temporal_suffix}?"
+    # A condition already headed by a MODAL auxiliary ("could promote...",
+    # "may have expired", "should have been validated") already carries its
+    # own tense/modality -- it is a complete predicate, not a strippable
+    # marker or a bare adjective. Prepending "was/did" in front of it
+    # produces a double-auxiliary ("Why was X could promote...?") and,
+    # worse, silently strengthens a possibility into a flat past-tense
+    # assertion. English modal auxiliaries are a small, closed grammatical
+    # class (not finding vocabulary) -- recognizing one to invert it to the
+    # front of the question ("Why could X promote...?") is subject-aux
+    # question inversion, the same grammatical operation already applied to
+    # "was/were" below; it never changes what the condition asserts.
+    _modal_m = re.match(
+        r"^(could|can|may|might|would|should|must|will|shall)\b\s+(.+)$", cond, re.IGNORECASE)
+    if _modal_m:
+        modal = _modal_m.group(1).lower()
+        rest = _modal_m.group(2).strip()
+        subj_phrase = raw_subj if re.match(r"^(?:the|a|an|this|that)\b", raw_subj, re.IGNORECASE) else f"the {raw_subj}"
+        subj_phrase = subj_phrase[0].lower() + subj_phrase[1:] if subj_phrase[:1].isupper() and not subj_phrase.split()[0].isupper() else subj_phrase
+        return f"Why {modal} {subj_phrase} {rest}{temporal_suffix}?"
+
     cond_aux_match = re.match(r"^(?:was|were)\s+(.+)$", cond, re.IGNORECASE)
     # A condition that ALREADY starts with "was/were" (e.g. "was incomplete",
     # "was missing") is an adjective/participle PREDICATE -- "was" belongs
@@ -1101,6 +1139,7 @@ def format_deviation_why_question(
             return f"Why {aux} {subj[0].lower()}{subj[1:]} not {v}ed{temporal_suffix}?"
         return f"Why did {subj[0].lower()}{subj[1:]} not {v}{temporal_suffix}?"
 
+    cond = _strip_redundant_subject_echo(subj, cond)
     return f"Why {aux} {subj[0].lower()}{subj[1:]} {cond}{temporal_suffix}?"
 
 

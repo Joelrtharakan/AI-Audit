@@ -11,12 +11,71 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any
 
+from app.agent.autonomy import build_current_execution_identity, evaluate_autonomy
 from app.config import get_settings
-from app.models.agent import AnalysisProvenance, InvestigationReport, StageProvenance
+from app.models.agent import (
+    AnalysisProvenance,
+    EvidenceCompleteness,
+    InvestigationReport,
+    RootCauseStatus,
+    StageProvenance,
+)
+from app.models.autonomy import AutonomyDecision
 
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def _required_tasks_for(report: InvestigationReport) -> list[str]:
+    """Structural presence check ONLY -- which sections of the ALREADY
+    SETTLED report actually exist -- never an inspection of finding text
+    (spec §35)."""
+    tasks = ["RCA", "CAPA"]
+    if getattr(report.five_why, "steps", None):
+        tasks.append("FIVE_WHY")
+    if getattr(report.investigation, "questions", None):
+        tasks.append("INVESTIGATION")
+    if report.remediation_cost is not None:
+        tasks.append("REMEDIATION_COSTING")
+    return tasks
+
+
+def _derive_autonomy_decision(report: InvestigationReport, state: dict[str, Any]) -> AutonomyDecision | None:
+    """Evaluates the autonomy framework (app.agent.autonomy) for THIS
+    settled report/state, from structured signals only:
+        - required tasks: which report sections are actually present
+        - evidence_sufficient: `report.evidence_completeness`
+        - causal_consistent: `report.root_cause.status` is not a
+          CONTRADICTED/CONFLICTED terminal state
+        - structural_safety_ok: no node recorded a structural error in
+          `state["errors"]`
+    Never inspects finding text or introduces a new semantic rule -- every
+    signal reads a field the pipeline already computed. Returns None (never
+    a fabricated decision) if evaluation itself fails for any reason.
+    """
+    try:
+        identity = build_current_execution_identity()
+        evidence_sufficient = report.evidence_completeness == EvidenceCompleteness.COMPLETE
+        causal_consistent = report.root_cause.status not in (
+            RootCauseStatus.CONTRADICTED, RootCauseStatus.CONFLICTED,
+        )
+        structural_safety_ok = not bool(state.get("errors"))
+        return evaluate_autonomy(
+            identity,
+            _required_tasks_for(report),
+            evidence_sufficient=evidence_sufficient,
+            structural_safety_ok=structural_safety_ok,
+            epistemic_consistent=True,
+            causal_consistent=causal_consistent,
+            provenance_ok=True,
+        )
+    except Exception:
+        # Fail-closed for the autonomy ANNOTATION only -- never lets a
+        # provenance/autonomy computation error block report generation.
+        # A missing `autonomy` field is treated by every consumer exactly
+        # like NOT_CERTIFIED (see app.agent.autonomy fail-closed default).
+        return None
 
 
 def derive_analysis_provenance(report: InvestigationReport, state: dict[str, Any]) -> AnalysisProvenance:
@@ -69,4 +128,5 @@ def derive_analysis_provenance(report: InvestigationReport, state: dict[str, Any
         canonical=canonical,
         synthesis=synthesis,
         remediation=remediation,
+        autonomy=_derive_autonomy_decision(report, state),
     )

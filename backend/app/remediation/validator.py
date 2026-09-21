@@ -109,6 +109,7 @@ def _validate_component(
     valid_evidence_ids: set[str],
     outcome: RemediationValidationOutcome,
     verified_evidence_ids: set[str] | None = None,
+    belief_evidence_ids: set[str] | None = None,
 ) -> RemediationCostComponent | None:
     """Return a possibly-adjusted copy of the component, or None if it must be
     dropped entirely. Adjustments (basis downgrade, pricing strip) are recorded
@@ -197,6 +198,25 @@ def _validate_component(
         outcome.llm_disagreements.append(
             f"{c.component_id}: unit cost marked VERIFIED but the cited evidence is not an "
             "independently-verified record -- capped at REPORTED."
+        )
+
+    # --- Phase 9.4 Defect D: "REPORTED" means someone stated an observed
+    # fact/amount. A BELIEF-status evidence item (EvidenceStatus.BELIEF --
+    # "strictly weaker than REPORTED": an epistemic STANCE about the world,
+    # e.g. a preliminary/opinion-based estimate, never an asserted
+    # observation) cannot, by itself, back a REPORTED unit cost -- the same
+    # structural check as the VERIFIED cap above, one tier down. Never
+    # touches ESTIMATED/ASSUMED (those already concede uncertainty).
+    if (
+        data.get("unit_cost_basis") == "REPORTED"
+        and belief_evidence_ids is not None
+        and kept_refs
+        and all(r in belief_evidence_ids for r in kept_refs)
+    ):
+        data["unit_cost_basis"] = "ESTIMATED"
+        outcome.llm_disagreements.append(
+            f"{c.component_id}: unit cost marked REPORTED but the cited evidence is only a "
+            "stated belief/opinion, not a reported observation -- capped at ESTIMATED."
         )
 
     if c.quantity_basis == "EVIDENCED" and not has_evidence_ref:
@@ -606,6 +626,7 @@ def validate_and_plan(
     valid_hypothesis_ids: set[str] | None = None,
     valid_capa_refs: set[str] | None = None,
     verified_evidence_ids: set[str] | None = None,
+    belief_evidence_ids: set[str] | None = None,
 ) -> tuple[list[RemediationCostComponent], list[RemediationCalculationProposal], RemediationValidationOutcome]:
     """Validate structure + provenance. Returns
     (surviving_components, accepted_proposals, outcome). No arithmetic."""
@@ -618,7 +639,7 @@ def validate_and_plan(
     components: list[RemediationCostComponent] = []
     for c in interpretation.cost_components:
         adjusted = _validate_component(
-            c, valid_reference_ids, valid_evidence_ids, outcome, verified_evidence_ids
+            c, valid_reference_ids, valid_evidence_ids, outcome, verified_evidence_ids, belief_evidence_ids
         )
         if adjusted is None:
             outcome.dropped_component_ids.append(c.component_id)

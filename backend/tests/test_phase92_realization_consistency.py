@@ -261,11 +261,17 @@ def test_domain_change_does_not_change_the_epistemic_rule():
 
 
 def test_amount_change_does_not_change_evidence_status():
+    # Phase 9.4 Defect D: the ONLY cited evidence is BELIEF-status (an
+    # epistemic stance, "strictly weaker than REPORTED") -- the VERIFIED cap
+    # (Phase 9.2) still applies first, but a belief-only citation cannot
+    # support REPORTED either, so the basis caps one tier further to
+    # ESTIMATED. The invariant under test (amount does not change the
+    # classification) is unaffected by which tier it lands on.
     for amt in (1000, 50000, 999999):
         r = _cost([_c("C0", "part", unit_cost=amt, unit_cost_basis="VERIFIED", amount_type="COMPONENT")],
                   evidence=[EvidenceItem(claim=f"estimate ~Rs {amt}", status=EvidenceStatus.BELIEF, source="e")],
                   finding=f"A part estimated at Rs {amt}.")
-        assert str(r.cost_components[0].unit_cost_basis).split(".")[-1] == "REPORTED"
+        assert str(r.cost_components[0].unit_cost_basis).split(".")[-1] == "ESTIMATED"
 
 
 def test_periodic_rate_without_horizon_never_creates_a_finite_total():

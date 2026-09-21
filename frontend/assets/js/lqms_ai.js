@@ -486,7 +486,13 @@
                 html += "<div style='font-weight:700; font-size:14px; color:#0f172a; line-height:1.4;'>" + escapeHtml(step.question) + "</div>";
                 html += "<div style='font-size:13px; color:#334155; margin-top:8px; display:flex; align-items:center; justify-content:space-between; background:#ffffff; padding:10px 14px; border-radius:8px; border:1px solid #f1f5f9;'>";
                 html += "<span style='font-weight:500;'>↳ " + escapeHtml(step.answer || "Requires verification") + "</span>";
-                html += "<span style='background:" + badgeBg + "; color:" + badgeTxt + "; border:1px solid " + badgeBorder + "; font-size:10px; font-weight:800; padding:3px 10px; border-radius:12px; flex-shrink:0; margin-left:12px; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(stStatus) + "</span>";
+                // A literal space between these two <span> elements -- flexbox
+                // spacing is visual-only and does not exist for copy/paste or
+                // any programmatic text extraction, so without it the prose
+                // sentence and the structured status badge glue together with
+                // no separator (e.g. "...can be drawn.UNKNOWN") the moment the
+                // text is extracted rather than rendered on screen.
+                html += " <span style='background:" + badgeBg + "; color:" + badgeTxt + "; border:1px solid " + badgeBorder + "; font-size:10px; font-weight:800; padding:3px 10px; border-radius:12px; flex-shrink:0; margin-left:12px; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(stStatus) + "</span>";
                 html += "</div>";
                 html += "</div></div>";
             });

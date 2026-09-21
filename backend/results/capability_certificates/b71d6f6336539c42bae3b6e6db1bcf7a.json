@@ -1,0 +1,37 @@
+{
+  "certificate_id": "d1ed80708c18f28ce2c37254",
+  "identity": {
+    "provider": "ollama",
+    "model": "qwen3:8b",
+    "model_version": "500a1f067a9f782620b40bee",
+    "semantic_schema_version": "3c84fc68de63c116",
+    "contract_version": "ad682f1b14fdb729",
+    "inference_config_hash": "b26993598dffd1f1",
+    "benchmark_hash": "038066fd75ec4623"
+  },
+  "generated_at": 1789980427.262461,
+  "correct_count": 16,
+  "safe_abstention_count": 0,
+  "caught_error_count": 6,
+  "silent_material_error_count": 0,
+  "run_error_count": 0,
+  "total_cases": 22,
+  "capability_results": {
+    "QUANTITY_UNIT_REASONING": "FAIL",
+    "PRICING_SEMANTICS": "PASS",
+    "COST_CALCULATION_INTERPRETATION": "FAIL",
+    "OBSERVATION_SEMANTICS": "PASS",
+    "RECURRENCE_REASONING": "FAIL",
+    "EPISTEMIC_PRESERVATION": "PASS",
+    "FAIL_CLOSED_BEHAVIOR": "PASS",
+    "COMPARISON_REASONING": "PASS",
+    "CAUSAL_REASONING": "FAIL",
+    "EVIDENCE_GROUNDING": "FAIL",
+    "CAUSAL_DEPTH": "FAIL",
+    "IMPACT_SEMANTICS": "PASS",
+    "SERIALIZATION_CONTRACT": "PASS"
+  },
+  "semantic_safety_gate": "PASS",
+  "autonomous_capability_gate": "FAIL",
+  "human_reviewed_production_gate": "PASS (CONDITIONAL)"
+}

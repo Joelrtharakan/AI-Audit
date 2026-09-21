@@ -184,6 +184,25 @@ def test_frontend_does_not_label_the_mixed_list_as_evidence_artifacts():
     assert "Additional evidence and open points to resolve" in js
 
 
+def test_frontend_five_why_answer_and_status_badge_are_text_separated():
+    # Production-hardening / runtime-trace charter Issue 1: the 5-Why answer
+    # <span> and the structured status-badge <span> sit side by side in a
+    # flex row -- CSS flex spacing is visual-only and does not exist for
+    # copy/paste or any programmatic text extraction, so without a literal
+    # space between the two concatenated strings a sentence and a raw status
+    # token glue together with no separator the moment the HTML is read as
+    # plain text (observed: "...before a causal conclusion can be
+    # drawn.UNKNOWN"). Asserts the source literally separates them.
+    js = (Path(__file__).resolve().parent.parent.parent / "frontend" / "assets" / "js" / "lqms_ai.js").read_text()
+    idx = js.index("Requires verification")
+    window = js[idx:idx + 800]
+    concat_idx = window.index("html += ", window.index("</span>"))
+    # the next string literal concatenated after the answer's closing
+    # </span> must itself start with a literal space, not immediately "<span"
+    next_string_start = window.index('"', concat_idx)
+    assert window[next_string_start:next_string_start + 2] == '" '
+
+
 # --------------------------------------------------------------------------- #
 # 3. immediate action -- condition-aware, no invented restriction
 # --------------------------------------------------------------------------- #

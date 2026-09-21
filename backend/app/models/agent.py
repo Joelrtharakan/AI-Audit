@@ -20,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.financial.models import FinancialAnalysisResult
+from app.models.autonomy import AutonomyDecision
 from app.remediation.models import RemediationCostResult
 
 
@@ -1816,6 +1817,15 @@ class AnalysisProvenance(BaseModel):
     canonical: StageProvenance = Field(default_factory=StageProvenance)
     synthesis: StageProvenance = Field(default_factory=StageProvenance)
     remediation: StageProvenance = Field(default_factory=StageProvenance)
+
+    # Exact autonomy-framework context for THIS execution (app.agent.autonomy
+    # / app.models.autonomy) -- the certificate identity, capability results,
+    # required capabilities, and blocking reasons that produced this
+    # investigation's autonomy decision. None only when the framework could
+    # not be evaluated at all (never fabricated). `autonomy.review_required`
+    # is always True, same as the `review_required` field above -- this
+    # object never grants an autonomy-based bypass of that gate.
+    autonomy: AutonomyDecision | None = None
 
 
 # ---------------------------------------------------------------------------
