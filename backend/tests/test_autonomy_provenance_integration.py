@@ -294,3 +294,30 @@ def test_13_identity_builder_matches_certification_script_formula():
     assert identity.semantic_schema_version and len(identity.semantic_schema_version) == 16
     assert identity.contract_version and len(identity.contract_version) == 16
     assert identity.benchmark_hash and len(identity.benchmark_hash) == 16
+
+
+def test_14_identity_binds_exact_canonical_prompt_bytes(tmp_path):
+    # Editing the canonical prompt text -- WITHOUT bumping any version string --
+    # must change the certificate identity, so an old certificate can never
+    # match a prompt it did not certify.
+    from app.config import get_settings
+
+    class _S:
+        def __init__(self, base, directory):
+            self._b, self.prompts_dir = base, directory
+
+        def __getattr__(self, name):
+            return getattr(self._b, name)
+
+    base = get_settings()
+    (tmp_path / "canonical_finding_interpretation_system_prompt.txt").write_text("prompt v1 {schema}")
+    with patch("app.config.get_settings", return_value=_S(base, tmp_path)), \
+            patch("app.agent.autonomy._cached_model_digest", return_value="x"):
+        before = build_current_execution_identity(model_version="x")
+        (tmp_path / "canonical_finding_interpretation_system_prompt.txt").write_text("prompt v2 {schema}")
+        after = build_current_execution_identity(model_version="x")
+        (tmp_path / "canonical_finding_interpretation_system_prompt.txt").unlink()
+        missing = build_current_execution_identity(model_version="x")
+    assert before.contract_version != after.contract_version
+    assert before.identity_key() != after.identity_key()
+    assert missing.contract_version not in (before.contract_version, after.contract_version)  # fail-closed

@@ -102,6 +102,10 @@ class RemediationCostComponentResult(BaseModel):
     calculation_formula: str = ""
     recurrence: Literal["ONE_TIME", "RECURRING", "UNKNOWN"] = "ONE_TIME"
     recurring_period: str | None = None
+    # Effective semantic relationship to the remediation (LLM-declared, or
+    # derived from the linked activity's LLM-declared disposition). Never
+    # derived from the amount or from arithmetic.
+    scope_role: str = "NOT_ESTABLISHED"
     confidence: RemediationConfidence = RemediationConfidence.LOW
     source_reference_ids: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -126,6 +130,17 @@ class RemediationCostResult(BaseModel):
     # label maps to itself. Rendering uses this so the auditor sees the label
     # the evidence carries, not an internal index.
     evidence_labels: dict[str, str] = Field(default_factory=dict)
+
+    # Phase 9.9 -- five SEPARATE facets that must never be conflated in labels:
+    #   arithmetic_status : EXACT | RANGE | PARTIAL | NONE   (calculator)
+    #   estimate_classification : existing CostBasis          (evidence basis)
+    #   scope_status      : semantic relationship to remediation (LLM-owned)
+    #   confidence        : existing `confidence`
+    #   evidence          : evidence_basis (+ evidence_labels for display)
+    # `scope_status` ESTABLISHED means every priced component was declared an
+    # established remediation; anything else is a priced ACTIVITY estimate.
+    arithmetic_status: str = "NONE"
+    scope_status: str = "NOT_ESTABLISHED"
 
     status: RemediationEstimateStatus = RemediationEstimateStatus.NOT_ASSESSABLE
 

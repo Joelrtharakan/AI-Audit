@@ -108,7 +108,13 @@ class Settings(BaseSettings):
     # (Pass 36 M6): the finding+evidence input is variable and an
     # under-budgeted window makes the provider thrash. 8192 covers a large
     # finding + full output with headroom.
-    canonical_semantic_num_ctx: int = 8192
+    # Sized for the CURRENT prompt: system prompt + schema hint is ~25.6k chars
+    # (~6.5-7k tokens) + finding/evidence (~0.5-1k) + up to 1400 output tokens
+    # ~= 8.5-9k tokens, which does not fit 8192 without context-shifting.
+    # Kept EQUAL to remediation_cost_num_ctx so the two calls of one request
+    # never force a model reload between them. If LLM RESPONSE logs show
+    # prompt_tokens + output_tokens comfortably below this, it can be lowered.
+    canonical_semantic_num_ctx: int = 10240
 
     # LLM-PRIMARY canonical semantic interpretation: when True, the LLM
     # canonical interpretation runs in understand_finding_node (once, reused
@@ -180,7 +186,10 @@ class Settings(BaseSettings):
     # production. 8192 fits input + a 1400-token response with headroom and
     # removes the thrash (measured ~62s -> ~18-25s). Still well below
     # ollama's 40960 native ceiling for qwen3:8b.
-    remediation_cost_num_ctx: int = 8192
+    # Re-sized after the prompt grew: system+schema ~21.8k chars (~5.5-6k tokens)
+    # + context (~1-2k) + up to 1800 output tokens ~= 8.5-9k. Equal to
+    # canonical_semantic_num_ctx on purpose (no reload between the two calls).
+    remediation_cost_num_ctx: int = 10240
 
     # -------------------------------------------------------------------------
     # LLM execution route (app.services.llm.execution / .providers.litellm_provider)
@@ -206,7 +215,7 @@ class Settings(BaseSettings):
     # core_synthesis -> critic sequence of a single investigation (and across
     # back-to-back investigations) instead of being evicted and reloaded --
     # a reload shows up as a large `load_ms` on the very next call.
-    ollama_keep_alive: str = "10m"
+    ollama_keep_alive: str = "30m"
     # qwen3:8b supports up to 40960 natively; 8192 comfortably covers a
     # typical finding + evidence ledger + full core_synthesis output with
     # headroom, without paying for a much larger KV cache than needed. This
@@ -333,6 +342,11 @@ class Settings(BaseSettings):
     # populated per-request from the authenticated session in production.
     copilot_model: str = "auto"
     copilot_github_token: str = ""
+    # After the application's GitHub login succeeds, the signed-in user's session
+    # token is the credential handed to the Copilot SDK session route
+    # (github_copilot_session/*) -- no separate Copilot login. Set False to use only
+    # COPILOT_GITHUB_TOKEN / LiteLLM's native cache instead.
+    copilot_use_app_oauth_token: bool = True
     copilot_timeout_seconds: float = 90.0
     copilot_log_level: str = "info"
 
@@ -389,8 +403,8 @@ class Settings(BaseSettings):
     # Per-stage semantic-contract versions (spec §26) -- bump when the
     # canonical / remediation prompt or its output schema changes so an
     # AI-assisted decision is reproducible. Stamped into the stage log lines.
-    canonical_semantic_prompt_version: str = "2026-10-01"
-    remediation_cost_prompt_version: str = "2026-09-01b"
+    canonical_semantic_prompt_version: str = "2026-10-01-P9.9-SINGLE-INFERENCE-06"
+    remediation_cost_prompt_version: str = "2026-10-01-DENSE-06"
 
     # -------------------------------------------------------------------------
     # ASP.NET LQMS integration
@@ -413,6 +427,21 @@ class Settings(BaseSettings):
     # not fit that; 330s does, with margin for the deterministic stages.
     agent_overall_timeout_seconds: float = 330.0
     agent_max_critic_iterations: int = 2
+    # SINGLE-INFERENCE NORMAL PATH. The canonical semantic interpretation is the
+    # ONE normal-path LLM call; everything downstream is deterministic. These
+    # flags gate the OTHER LLM invocations that exist in the graph so none of
+    # them runs automatically. All default OFF: a failure/uncertainty in the
+    # single inference is preserved and routed to human review (fail-closed),
+    # never answered by another full inference.
+    #   - synthesis fallback: when no validated canonical interpretation exists,
+    #     core_synthesis would otherwise issue a primary + a recovery LLM call.
+    #   - critic: a second LLM review pass (the deterministic critic firewall
+    #     still always runs).
+    #   - tool planning: the LLM investigation planner + per-tool evidence
+    #     recorder used when the ASP.NET tool loop is configured.
+    agent_synthesis_llm_fallback_enabled: bool = False
+    agent_critic_llm_enabled: bool = False
+    agent_llm_tool_planning_enabled: bool = False
 
     # -------------------------------------------------------------------------
     # Analysis result cache (app/agent/cache.py). Bounded in-process cache of

@@ -1,0 +1,26 @@
+{
+  "certificate_id": "dce5b5ce8d3cceb1510900c1",
+  "identity": {
+    "provider": "ollama",
+    "model": "qwen3:8b",
+    "model_version": "",
+    "semantic_schema_version": "001700d8847589c8",
+    "contract_version": "0550fb30554d3e91",
+    "inference_config_hash": "7866d63830422cd4",
+    "benchmark_hash": "038066fd75ec4623"
+  },
+  "generated_at": 1790842069.138023,
+  "correct_count": 16,
+  "safe_abstention_count": 0,
+  "caught_error_count": 6,
+  "silent_material_error_count": 0,
+  "run_error_count": 0,
+  "total_cases": 22,
+  "capability_results": {
+    "SERIALIZATION_CONTRACT": "PASS",
+    "FAIL_CLOSED_BEHAVIOR": "PASS"
+  },
+  "semantic_safety_gate": "PASS",
+  "autonomous_capability_gate": "FAIL",
+  "human_reviewed_production_gate": "PASS (CONDITIONAL)"
+}

@@ -438,6 +438,48 @@ def _derive_scope_from_canonical(canonical_state: Any, impact: Any, root_cause: 
         return RemediationScope()
 
 
+def derive_component_scope_roles(components: list, activities: list) -> None:
+    """Fill each component's `scope_role` ONLY where the model left it
+    NOT_ESTABLISHED, from the LLM-declared disposition flags of the activities
+    it is linked to (structural enum mapping -- never from the amount, the
+    arithmetic or any text). A component with no linked activity stays
+    NOT_ESTABLISHED. Mutates `components` in place."""
+    _act_by_id = {a.activity_id: a for a in activities}
+    _EST = ("IMMEDIATE_CORRECTION", "CONTAINMENT", "CORRECTIVE_ACTION")
+    for _c in components:
+        if getattr(_c, "scope_role", "NOT_ESTABLISHED") != "NOT_ESTABLISHED":
+            continue
+        _linked = [_act_by_id[i] for i in (_c.activity_ids or []) if i in _act_by_id]
+        if not _linked:
+            continue
+        if all(a.disposition in _EST and not a.is_hypothetical and not a.depends_on_root_cause for a in _linked):
+            _c.scope_role = "ESTABLISHED_REMEDIATION"
+        elif all(a.disposition == "EFFECTIVENESS_CHECK" for a in _linked):
+            _c.scope_role = "MONITORING"
+        elif any(a.disposition in ("CONDITIONAL_SYSTEMIC",) + _EST or a.is_hypothetical or a.depends_on_root_cause
+                 for a in _linked):
+            _c.scope_role = "PROPOSED_REMEDIATION"
+
+
+_SCOPE_MAP = {
+    "ESTABLISHED_REMEDIATION": "ESTABLISHED", "PROPOSED_REMEDIATION": "PROPOSED",
+    "PREVENTIVE": "PREVENTIVE_OR_MONITORING", "MONITORING": "PREVENTIVE_OR_MONITORING",
+    "OPTIONAL": "OPTIONAL", "UNRELATED": "UNRELATED", "NOT_ESTABLISHED": "NOT_ESTABLISHED",
+}
+
+
+def _aggregate_scope_status(roles: list[str]) -> str:
+    """Structural roll-up of the model's per-component scope declarations: all
+    ESTABLISHED -> ESTABLISHED; any NOT_ESTABLISHED -> NOT_ESTABLISHED (the weakest
+    link governs); all the same other role -> that role; mixed -> MIXED."""
+    if not roles:
+        return "NOT_ESTABLISHED"
+    if "NOT_ESTABLISHED" in roles:
+        return "NOT_ESTABLISHED"
+    mapped = {_SCOPE_MAP.get(r, "NOT_ESTABLISHED") for r in roles}
+    return mapped.pop() if len(mapped) == 1 else "MIXED"
+
+
 async def estimate_remediation_cost(
     finding_text: str,
     evidence_ledger: list[Any] | None = None,
@@ -448,7 +490,10 @@ async def estimate_remediation_cost(
     client=None,
     canonical_state: Any = None,
     semantic_context: Any = None,
+    timeout_seconds: float | None = None,
 ) -> RemediationCostResult:
+    # `timeout_seconds` (optional) clamps the cost LLM call to the request's
+    # remaining time budget; None keeps the configured timeout.
     # `financial_analysis` is intentionally not forwarded to the interpreter:
     # remediation cost does not depend on the financial LLM interpretation, so
     # the two run concurrently (see report_generator). The prompt already
@@ -526,6 +571,7 @@ async def estimate_remediation_cost(
         client=client,
         canonical_state=canonical_state,
         semantic_context=semantic_context,
+        timeout_seconds=timeout_seconds,
     )
 
     _scope = _derive_scope_from_canonical(canonical_state, impact, root_cause)
@@ -642,7 +688,16 @@ async def estimate_remediation_cost(
             verified_evidence_ids=verified_evidence_ids,
             belief_evidence_ids=belief_evidence_ids,
         )
-        est = assemble_estimate(components, proposals, outcome.traces)
+        # Phase 9.9: effective semantic scope of each priced component -- the
+        # model's own `scope_role`, else derived from the LINKED activity's
+        # LLM-declared disposition flags. Never from the amount or arithmetic.
+        derive_component_scope_roles(components, interp.activities or [])
+        _one_time_scoped = [c for c in components if c.recurrence != "RECURRING"]
+        _scope_established = bool(_one_time_scoped) and all(
+            c.scope_role == "ESTABLISHED_REMEDIATION" for c in _one_time_scoped)
+        from app.services import request_timing as _rt
+        with _rt.stage("cost_deterministic_calculation"):
+            est = assemble_estimate(components, proposals, outcome.traces, scope_established=_scope_established)
     except Exception as exc:  # fail-closed: a bug must never fabricate a number
         logger.warning("Remediation cost validation/calculation failed unexpectedly (%s).", exc)
         return honest_not_assessable("LLM_INVALID", "MODEL_OUTPUT_INVALID")
@@ -972,6 +1027,19 @@ async def estimate_remediation_cost(
         )
 
     result.remediation_strategy = _framed_strategy
+    try:
+        result.scope_status = _aggregate_scope_status(
+            [c.scope_role for c in components
+             if c.recurrence != "RECURRING"
+             and (c.unit_cost is not None or getattr(c, "unit_cost_low", None) is not None)])
+        if est.unpriced_component_ids:
+            result.arithmetic_status = "PARTIAL"
+        elif est.low is not None and est.high is not None and est.low != est.high:
+            result.arithmetic_status = "RANGE"
+        elif est.low is not None:
+            result.arithmetic_status = "EXACT"
+    except NameError:
+        pass
     try:
         _used = {r for c in components for r in c.source_reference_ids} | set(result.evidence_basis or [])
         result.evidence_labels = {r: _registry.display(r) for r in sorted(_used)}

@@ -162,7 +162,7 @@ _NOT_ESTABLISHED = "NOT ESTABLISHED"
 _UNRESOLVED_MARKERS = ("UNKNOWN", "UNRESOLVED", "NOT ESTABLISHED", "NOT_ESTABLISHED", "NOT_DETERMINED")
 
 
-def _finalize_report_consistency(report, canonical) -> None:
+def _finalize_report_consistency(report, canonical, semantic_context=None) -> None:
     """Cross-section consistency (spec §29). Downgrade / clear only -- never
     invents a value, never strengthens a conclusion. Every check keys on the
     canonical STRUCTURED state, not on parsing report prose."""
@@ -208,11 +208,47 @@ def _finalize_report_consistency(report, canonical) -> None:
         except Exception:  # pragma: no cover
             pass
 
+    # Phase 9.9: consume the CANONICAL action_status / impact state. Structural
+    # only (enum -> enum); every cap is RECORDED in semantic_consistency_issues,
+    # never applied silently.
+    if semantic_context is not None:
+        from app.models.agent import CanonicalImpactState, ImpactStatus, ReportActionItem
+        _items = []
+        for _a in (getattr(semantic_context, "remediation_activities", None) or []):
+            if getattr(_a, "disposition", None) in ("IMMEDIATE_CORRECTION", "CONTAINMENT"):
+                _items.append(ReportActionItem(
+                    action_id=_a.action_id, activity=_a.activity, disposition=_a.disposition,
+                    action_status=getattr(_a, "action_status", "PROPOSED"),
+                    evidence_ids=list(getattr(_a, "action_status_evidence_ids", []) or []),
+                ))
+        report.immediate_action_items = _items
+        _ci = getattr(semantic_context, "impact", None)
+        if _ci is not None:
+            report.canonical_impact = CanonicalImpactState(
+                status=_ci.status, categories=list(_ci.categories), evidence_ids=list(_ci.evidence_ids))
+            _ia = getattr(report, "impact_assessment", None)
+            if _ia is not None and _ia.status == ImpactStatus.IMPACT_VERIFIED and _ci.status != "OBSERVED":
+                _capped = (ImpactStatus.IMPACT_POSSIBLE if _ci.status == "POTENTIAL"
+                           else ImpactStatus.IMPACT_REQUIRES_ASSESSMENT)
+                report.semantic_consistency_issues.append(
+                    f"IMPACT_STATUS_EXCEEDS_CANONICAL:{_ia.status.value}>{_ci.status}")
+                _ia.status = _capped
+
+    # Investigation must stay open while the root cause is not established.
+    _rc_ne = getattr(getattr(report, "root_cause", None), "status", None) == "NOT_ESTABLISHED"
+    if _rc_ne and getattr(report, "investigation_required", None) == "NO":
+        report.semantic_consistency_issues.append("INVESTIGATION_CLOSED_WITH_ROOT_CAUSE_NOT_ESTABLISHED")
+        report.investigation_required = "YES"
+
     # §11/§29: NOT_ESTABLISHED root cause must not carry a leading hypothesis.
     r_rc = getattr(report, "root_cause", None)
     if r_rc is not None and getattr(r_rc, "status", None) == "NOT_ESTABLISHED":
         if getattr(r_rc, "leading_hypothesis", None):
             r_rc.leading_hypothesis = None
+
+
+class _CostBudgetExhausted(Exception):
+    """Control-flow signal: not enough request time budget left for the cost LLM call."""
 
 
 async def generate_report_node(state: AgentState) -> AgentState:
@@ -380,6 +416,17 @@ async def generate_report_node(state: AgentState) -> AgentState:
         _t = time.monotonic()
         try:
             from app.remediation.engine import estimate_remediation_cost
+            from app.services import request_timing as _rt
+            # Deadline-aware: the cost LLM call may only use the time the request
+            # still has. Too little left -> an honest "model was slow" result
+            # (never a number, never a hang) instead of a call that cannot finish.
+            _elapsed_s = (_rt.summary().get("total_ms") or 0) / 1000.0
+            _remaining_s = settings.agent_overall_timeout_seconds - _elapsed_s - 15.0
+            _cost_timeout = min(settings.remediation_cost_estimation_timeout_seconds, _remaining_s)
+            if _elapsed_s and _cost_timeout < 20.0:
+                from app.remediation.engine import honest_not_assessable
+                logger.warning("Remediation cost LLM skipped: only %.0fs of request budget remain.", _remaining_s)
+                raise _CostBudgetExhausted()
             remediation_cost = await estimate_remediation_cost(
                 finding_text=finding_text,
                 evidence_ledger=evidence_ledger,
@@ -388,12 +435,18 @@ async def generate_report_node(state: AgentState) -> AgentState:
                 impact=impact,
                 canonical_state=state.get("canonical_finding_state"),
                 semantic_context=state.get("canonical_semantic_context"),
+                timeout_seconds=_cost_timeout if _elapsed_s else None,
             )
+        except _CostBudgetExhausted:
+            from app.remediation.engine import honest_not_assessable
+            remediation_cost = honest_not_assessable("LLM_TIMEOUT")
         except Exception as exc:  # noqa: BLE001 - last-resort crash guard only
             logger.warning("Remediation cost estimation crashed unexpectedly (%s); reporting honestly.", exc)
             from app.remediation.engine import honest_not_assessable
             remediation_cost = honest_not_assessable("LLM_INVALID", "MODEL_OUTPUT_INVALID")
         _rem_ms = int((time.monotonic() - _t) * 1000)
+        from app.services import request_timing as _rt2
+        _rt2.record_stage("remediation_cost", _rem_ms)
 
     # -- Internal-only financial-exposure context (never rendered as its own
     #    section). The canonical LLM's pricing_information AND the priced
@@ -512,7 +565,7 @@ async def generate_report_node(state: AgentState) -> AgentState:
     # only -- never invents, never escalates. Every section must describe the
     # SAME canonical semantic interpretation.
     # ------------------------------------------------------------------
-    _finalize_report_consistency(report, state.get("canonical_finding_state"))
+    _finalize_report_consistency(report, state.get("canonical_finding_state"), state.get("canonical_semantic_context"))
 
     # Structured, machine-readable human-review contract (spec Phase 4).
     # Derived from settled report fields only.

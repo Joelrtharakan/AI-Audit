@@ -380,6 +380,11 @@ class CanonicalFindingContext(BaseModel):
     # "<subject> operational process" fabrication; leave null if the evidence
     # does not establish a process (spec §6/§15).
     affected_process: str | None = None
+    # Phase 9.9: an ACTIVITY (a task performed or skipped) and a REQUIREMENT
+    # (what must hold) are distinct from a PROCESS (an organised flow of work).
+    # None = not established. The model must not copy one phrase into several.
+    affected_activity: str | None = None
+    affected_requirement: str | None = None
     scope: str | None = None
 
     entities: list[CanonicalEntity] = Field(default_factory=list)

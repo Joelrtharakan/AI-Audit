@@ -210,6 +210,19 @@ def _cached_model_digest(settings) -> str:
     return digest
 
 
+def _canonical_prompt_sha256(settings, filename: str = "canonical_finding_interpretation_system_prompt.txt") -> str:
+    """Full SHA-256 of the exact bytes of the canonical interpretation system
+    prompt. Fail-closed: an unreadable prompt yields a fixed sentinel, which
+    matches no certificate (certificates are only saved for a readable prompt)."""
+    import hashlib
+
+    try:
+        path = settings.prompts_dir / filename
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except Exception:
+        return "PROMPT_UNREADABLE"
+
+
 def build_current_execution_identity(*, model_version: str | None = None) -> ExecutionConfigIdentity:
     """Builds the `ExecutionConfigIdentity` for the CURRENTLY CONFIGURED
     provider/model, using the EXACT SAME hash formulas
@@ -226,8 +239,13 @@ def build_current_execution_identity(*, model_version: str | None = None) -> Exe
     s = get_settings()
     model = s.ollama_model if s.llm_provider == "ollama" else (s.llm_model or "")
     resolved_version = model_version if model_version is not None else _cached_model_digest(s)
+    # The prompt VERSION strings stay in the identity, and the exact bytes of the
+    # canonical system prompt are bound in too: editing the prompt text without
+    # bumping a version can no longer leave an old certificate matching.
     inference_fields = "|".join(str(x) for x in (
         s.canonical_semantic_prompt_version, s.remediation_cost_prompt_version, s.analysis_prompt_version,
+        "canonical_prompt_sha256=" + _canonical_prompt_sha256(s),
+        "remediation_prompt_sha256=" + _canonical_prompt_sha256(s, "remediation_cost_interpretation_system_prompt.txt"),
     ))
     root = Path(__file__).resolve().parent.parent.parent
     schema_bytes = (root / "app" / "services" / "canonical_semantic_models.py").read_bytes()

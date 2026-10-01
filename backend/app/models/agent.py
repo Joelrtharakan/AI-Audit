@@ -1862,6 +1862,24 @@ class AnalysisProvenance(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ReportActionItem(BaseModel):
+    """One immediate/containment action as the CANONICAL state describes it.
+    `action_status` is the model's lifecycle claim after provenance validation
+    (AUTHORIZED / COMPLETED survive only with resolvable evidence ids)."""
+    action_id: str
+    activity: str
+    disposition: str
+    action_status: Literal["PROPOSED", "RECOMMENDED", "AUTHORIZED", "COMPLETED", "NOT_ESTABLISHED"] = "PROPOSED"
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class CanonicalImpactState(BaseModel):
+    """Canonical impact state projected into the report (not regenerated)."""
+    status: Literal["OBSERVED", "POTENTIAL", "NOT_ESTABLISHED", "REQUIRES_ASSESSMENT"] = "NOT_ESTABLISHED"
+    categories: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
 class InvestigationReport(BaseModel):
     observation_quality: Literal["SUFFICIENT", "INSUFFICIENT", "CONFLICTING"]
     observation_confidence: Literal["LOW", "MEDIUM", "HIGH"] = "HIGH"
@@ -1882,6 +1900,10 @@ class InvestigationReport(BaseModel):
     # review (and regeneration log). Codes only -- never prose. Non-empty =>
     # the review contract carries SEMANTIC_CONSISTENCY_ISSUES.
     semantic_consistency_issues: list[str] = Field(default_factory=list)
+    # Phase 9.9: canonical action/impact state, consumed by the report sections
+    # instead of being re-derived from prose.
+    immediate_action_items: list[ReportActionItem] = Field(default_factory=list)
+    canonical_impact: CanonicalImpactState | None = None
     evidence_completeness: EvidenceCompleteness = EvidenceCompleteness.COMPLETE
     root_cause: RootCauseAnalysis
     contributing_factors: list[ContributingFactor] = []

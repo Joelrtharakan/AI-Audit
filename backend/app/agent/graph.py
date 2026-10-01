@@ -42,6 +42,7 @@ errors in state and let the graph route gracefully.
 
 from __future__ import annotations
 
+import functools
 import logging
 
 from langgraph.graph import END, START, StateGraph
@@ -58,8 +59,19 @@ from app.agent.nodes.tool_executor import execute_tool_node
 from app.agent.nodes.understanding import understand_finding_node
 from app.agent.state import AgentState
 from app.config import get_settings
+from app.services import request_timing
 
 logger = logging.getLogger(__name__)
+
+
+def _timed(name: str, fn):
+    """Record wall time for one graph node in the request-scoped timing record
+    (observability only -- never alters state or control flow)."""
+    @functools.wraps(fn)
+    async def _wrapped(state):
+        with request_timing.stage(name):
+            return await fn(state)
+    return _wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -179,16 +191,16 @@ def build_agent_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     # Register all nodes
-    graph.add_node("understand_finding", understand_finding_node)
-    graph.add_node("plan_investigation", plan_investigation_node)
-    graph.add_node("execute_tool", execute_tool_node)
-    graph.add_node("record_evidence", record_evidence_node)
-    graph.add_node("core_synthesis", core_synthesis_node)  # Single consolidated synthesis
-    graph.add_node("causal_investigation_planner", causal_investigation_planner_node)  # Phase 17 Stage B
-    graph.add_node("acquire_evidence", acquire_evidence_node)  # Phase 19 adaptive evidence loop
-    graph.add_node("critic", critic_node)
-    graph.add_node("final_evidence_verification", final_evidence_verification_node)
-    graph.add_node("generate_report", generate_report_node)
+    graph.add_node("understand_finding", _timed("understand_finding", understand_finding_node))
+    graph.add_node("plan_investigation", _timed("plan_investigation", plan_investigation_node))
+    graph.add_node("execute_tool", _timed("execute_tool", execute_tool_node))
+    graph.add_node("record_evidence", _timed("record_evidence", record_evidence_node))
+    graph.add_node("core_synthesis", _timed("core_synthesis", core_synthesis_node))  # Single consolidated synthesis
+    graph.add_node("causal_investigation_planner", _timed("causal_investigation_planner", causal_investigation_planner_node))  # Phase 17 Stage B
+    graph.add_node("acquire_evidence", _timed("acquire_evidence", acquire_evidence_node))  # Phase 19 adaptive evidence loop
+    graph.add_node("critic", _timed("critic", critic_node))
+    graph.add_node("final_evidence_verification", _timed("final_evidence_verification", final_evidence_verification_node))
+    graph.add_node("generate_report", _timed("generate_report", generate_report_node))
 
     # Entry point
     graph.add_edge(START, "understand_finding")

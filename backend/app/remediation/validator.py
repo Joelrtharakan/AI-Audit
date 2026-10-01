@@ -271,7 +271,9 @@ def _validate_component(
     _rate_anchored = eff_basis in ("VERIFIED", "REPORTED") or (
         eff_basis == "ESTIMATED" and has_evidence_ref
     )
-    _is_rate = c.amount_type in ("PER_QUANTITY", "PER_HOUR", "PER_UNIT", "PER_EVENT", "PER_IMPLEMENTATION")
+    _is_rate = c.amount_type in ("PER_QUANTITY", "PER_HOUR", "PER_UNIT", "PER_EVENT", "PER_IMPLEMENTATION") or (
+        c.amount_type == "COMPONENT" and c.value_kind == "UNIT_RATE" and c.quantity is not None
+    )  # a UNIT_RATE multiplied by a quantity needs that quantity anchored too
     _qty_anchored = data.get("quantity_basis") in ("EVIDENCED", "DERIVED")
     _anchored = _rate_anchored and (_qty_anchored or not _is_rate)
 

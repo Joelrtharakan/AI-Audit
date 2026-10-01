@@ -70,6 +70,11 @@ AmountType = Literal[
 # review_required (spec §7/§8/§15/§29).
 Recurrence = Literal["ONE_TIME", "RECURRING", "UNKNOWN"]
 
+ScopeRole = Literal[
+    "ESTABLISHED_REMEDIATION", "PROPOSED_REMEDIATION", "PREVENTIVE", "MONITORING",
+    "OPTIONAL", "UNRELATED", "NOT_ESTABLISHED",
+]
+
 DerivedFrom = Literal[
     "FINDING", "EVIDENCE", "ROOT_CAUSE_HYPOTHESIS", "RECOMMENDED_CAPA", "IMPACT", "CONTEXT",
 ]
@@ -194,6 +199,12 @@ class RemediationCostComponent(BaseModel):
     is_primary_option: bool = False
     recurrence: Recurrence = "ONE_TIME"
     recurring_period: str | None = None
+    # Phase 9.9: the SEMANTIC relationship of this priced item to the
+    # remediation (LLM-declared). Arithmetic never implies it: a correctly
+    # calculated amount for an activity whose remediation status is unresolved
+    # is a priced activity estimate, not an established remediation cost.
+    # NOT_ESTABLISHED (default) = the model did not establish the relationship.
+    scope_role: ScopeRole = "NOT_ESTABLISHED"
     source_reference_ids: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     interpretation_confidence: Confidence = "LOW"

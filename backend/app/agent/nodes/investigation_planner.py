@@ -121,7 +121,10 @@ async def plan_investigation_node(state: AgentState) -> AgentState:
     # generate the authoritative deterministic investigation plan right here from the canonical state.
     client = get_llm_client()
     is_mocked = hasattr(client, "chat_completion") and isinstance(client.chat_completion, AsyncMock)
-    if not settings.lqms_aspnet_base_url and not is_mocked:
+    # The LLM tool-planner (and the per-tool LLM evidence recorder it feeds) is an
+    # extra inference; it runs only when explicitly enabled AND the ASP.NET tool
+    # loop is configured. Otherwise the deterministic plan below is authoritative.
+    if not is_mocked and (not settings.lqms_aspnet_base_url or not settings.agent_llm_tool_planning_enabled):
         from app.agent.nodes.plan_investigation_fallback import build_deterministic_investigation_plan
         from app.agent.causal_guard import select_investigation_strategy
 

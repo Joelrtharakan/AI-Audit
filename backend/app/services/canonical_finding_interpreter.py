@@ -26,6 +26,7 @@ from app.models.agent import EvidenceItem
 from app.services.canonical_semantic_models import CanonicalFindingContext
 from app.services.llm_client import get_llm_client
 from app.services.llm_json import parse_llm_json
+from app.services import request_timing
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,8 @@ _SCHEMA_HINT = (
     '"missing_record_status": "RECORD_EXISTS"|"RECORD_INCOMPLETE"|"RECORD_MISSING"|'
     '"RECORD_UNAVAILABLE"|"ACTIVITY_NOT_RECORDED"|"ACTIVITY_NOT_PERFORMED"|"UNKNOWN"|null, '
     '"activity_performance_ambiguity": bool, '
-    '"affected_period": str|null, "affected_process": str|null, "scope": str|null, '
+    '"affected_period": str|null, "affected_process": str|null, '
+    '"affected_activity": str|null, "affected_requirement": str|null, "scope": str|null, '
     '"root_cause_status": "ESTABLISHED"|"NOT_ESTABLISHED"|"STATED_UNVERIFIED"|"CONTRADICTED", '
     '"leading_hypothesis_id": str|null, '
     '"candidate_hypotheses": [{"hypothesis_id": str, "statement": str, '
@@ -110,10 +112,26 @@ _SCHEMA_HINT = (
 )
 
 
+_TEMPLATE_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def _load_system_template(path) -> str:
+    """Read the system prompt once per (path, mtime, size): the file is re-read
+    only when it actually changes, never on every request."""
+    st = path.stat()
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    cached = _TEMPLATE_CACHE.get(key)
+    if cached is None:
+        cached = path.read_text(encoding="utf-8")
+        _TEMPLATE_CACHE.clear()
+        _TEMPLATE_CACHE[key] = cached
+    return cached
+
+
 def _build_messages(finding_text: str, evidence_ledger: list[EvidenceItem]) -> list[dict[str, str]]:
     settings = get_settings()
-    system_template = (settings.prompts_dir / "canonical_finding_interpretation_system_prompt.txt").read_text(
-        encoding="utf-8"
+    system_template = _load_system_template(
+        settings.prompts_dir / "canonical_finding_interpretation_system_prompt.txt"
     )
     # Plain substitution (not str.format) -- the prompt body and the schema
     # hint both contain literal { } from JSON examples.
@@ -125,8 +143,17 @@ def _build_messages(finding_text: str, evidence_ledger: list[EvidenceItem]) -> l
         status = item.status.value if getattr(item, "status", None) is not None else "UNVERIFIED"
         evidence_lines.append(f"{eid} [{status}]: {item.claim}")
 
+    # Send the finding text ONCE: when the ledger is verbatim the whole finding
+    # (structural check; any excluded/reformatted/clipped text keeps both), the
+    # evidence list already carries it.
+    from app.services.context_dedup import ledger_covers_finding
+    _finding_block = (
+        "(full text = evidence items E0.. below, verbatim)"
+        if ledger_covers_finding(finding_text, [e.claim for e in evidence_ledger])
+        else finding_text
+    )
     user_prompt = (
-        f"FINDING:\n{finding_text}\n\n"
+        f"FINDING:\n{_finding_block}\n\n"
         f"EVIDENCE:\n" + ("\n".join(evidence_lines) if evidence_lines else "(none)")
     )
 
@@ -220,7 +247,8 @@ async def interpret_finding_canonically_with_status(
         return "PROVIDER_UNAVAILABLE", None
 
     try:
-        messages = _build_messages(finding_text, evidence_ledger)
+        with request_timing.stage("canonical_prompt_build"):
+            messages = _build_messages(finding_text, evidence_ledger)
         _prompt_chars = sum(len(m.get("content", "")) for m in messages)
     except Exception as exc:
         _log("PROMPT_BUILD_FAILED", detail=repr(exc))

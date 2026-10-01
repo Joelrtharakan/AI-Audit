@@ -166,6 +166,31 @@ async def investigate_finding(
         logger.info("Cache HIT for finding investigation: %s", cache_key[:12])
         return InvestigateResponse(**cached)
 
+    # FAIL FAST on a provider-authentication problem: before any graph stage and
+    # before any prompt is built or sent. One clear message, no polling, no waiting.
+    if exec_config.provider == "github_copilot" and exec_config.auth_source == "missing":
+        _signed_in = user_session is not None and user_session.auth_provider == "github"
+        _msg = (
+            "The GitHub Copilot session could not be initialized from your GitHub sign-in. "
+            "Please sign out and sign in with GitHub again."
+            if _signed_in else
+            "Sign in with GitHub to use GitHub Copilot."
+        )
+        logger.error(
+            "Investigation aborted: github_copilot authentication=missing github_login=%s (no prompt was sent).",
+            "present" if _signed_in else "absent",
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "status": "degraded",
+                "investigation_completed": False,
+                "reason": "llm_authentication_error",
+                "provider": "github_copilot",
+                "message": _msg,
+            },
+        )
+
     graph = get_agent_graph()
 
     # Initial state
@@ -199,6 +224,8 @@ async def investigate_finding(
         "errors": [],
     }
 
+    from app.services import request_timing
+    request_timing.begin()
     pipeline_t0 = time.monotonic()
     try:
         final_state_dict = await asyncio.wait_for(
@@ -260,6 +287,7 @@ async def investigate_finding(
         )
 
     pipeline_ms = int((time.monotonic() - pipeline_t0) * 1000)
+    request_timing.log_summary(logger)
     _log_performance_summary(final_state_dict.get("trace", []), pipeline_ms, final_state_dict.get("analysis_mode"))
 
     # Section 20/23 fail-closed enforcement: final_evidence_verification_node

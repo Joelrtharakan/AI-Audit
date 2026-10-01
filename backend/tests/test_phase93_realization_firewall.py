@@ -185,22 +185,20 @@ def test_frontend_does_not_label_the_mixed_list_as_evidence_artifacts():
 
 
 def test_frontend_five_why_answer_and_status_badge_are_text_separated():
-    # Production-hardening / runtime-trace charter Issue 1: the 5-Why answer
-    # <span> and the structured status-badge <span> sit side by side in a
-    # flex row -- CSS flex spacing is visual-only and does not exist for
-    # copy/paste or any programmatic text extraction, so without a literal
-    # space between the two concatenated strings a sentence and a raw status
-    # token glue together with no separator the moment the HTML is read as
-    # plain text (observed: "...before a causal conclusion can be
-    # drawn.UNKNOWN"). Asserts the source literally separates them.
+    # INVARIANT (unchanged): a 5-Why answer sentence and its status must never
+    # glue together when the HTML is read as plain text ("...drawn.UNKNOWN").
+    # Phase 9.9 MECHANISM CHANGE: instead of a literal space between two inline
+    # spans, the status is now a separate BLOCK element carrying a label and a
+    # human-readable value (never the raw enum). Asserted on the source:
     js = (Path(__file__).resolve().parent.parent.parent / "frontend" / "assets" / "js" / "lqms_ai.js").read_text()
     idx = js.index("Requires verification")
-    window = js[idx:idx + 800]
-    concat_idx = window.index("html += ", window.index("</span>"))
-    # the next string literal concatenated after the answer's closing
-    # </span> must itself start with a literal space, not immediately "<span"
-    next_string_start = window.index('"', concat_idx)
-    assert window[next_string_start:next_string_start + 2] == '" '
+    window = js[idx:idx + 900]
+    # the answer is closed as its own block before the status begins...
+    assert window.index('</div>";') < window.index("Evidence status:")
+    # ...the status text is labelled and passes through the humanizer...
+    assert "Evidence status: " in window and "statusLabel(stStatus)" in window
+    # ...and the raw enum is never emitted directly.
+    assert "escapeHtml(stStatus)" not in window
 
 
 # --------------------------------------------------------------------------- #
@@ -265,10 +263,18 @@ def test_frontend_investigation_areas_do_not_use_a_completion_checkmark():
 # --------------------------------------------------------------------------- #
 
 def test_frontend_confidence_badges_are_text_separated():
+    # INVARIANT (unchanged): Obs/RC/Overall confidence values never glue together
+    # ("Obs: HIGHRC: LOWOverall: MEDIUM"). Phase 9.9 MECHANISM CHANGE: each value
+    # is its own labelled BLOCK row with a full label and a humanized value.
     js = (Path(__file__).resolve().parent.parent.parent / "frontend" / "assets" / "js" / "lqms_ai.js").read_text()
-    idx = js.index('>Obs: "')
-    window = js[idx:idx + 600]
-    assert '"</span>";\n        html += "<span' not in window, "Obs/RC badges glued with no separator"
+    idx = js.index("Observation Confidence: ")
+    window = js[idx - 400:idx + 1300]
+    for label in ("Observation Confidence: ", "Root-Cause Confidence: ", "Overall Confidence: "):
+        assert label in window
+    assert window.count("statusLabel(") >= 3
+    assert "Obs: " not in window and "RC: " not in window
+    # every value row is a block <div>, never an inline <span> sibling
+    assert '"<span style=\'background:#eff6ff' not in window
 
 
 def test_frontend_cost_status_badges_are_text_separated():

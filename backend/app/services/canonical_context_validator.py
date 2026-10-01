@@ -154,13 +154,36 @@ def validate_canonical_context(
     _validate_llm_primary_fields(sanitized, finding_text)
     _validate_llm_reasoning_fields(sanitized, evidence_ledger, finding_text)
     _enforce_action_status_and_impact_provenance(sanitized, valid_ids)
+    # Provenance cap on the finding-level epistemic status (enum comparison
+    # only): VERIFIED needs at least one VERIFIED ledger item. With a non-empty
+    # ledger holding none, the strongest status actually present is the ceiling.
+    # The original claim is still reported by the review below (raw output).
+    if sanitized.epistemic_status == "VERIFIED" and evidence_ledger:
+        _present = {str(getattr(getattr(e, "status", None), "value", getattr(e, "status", ""))).upper()
+                    for e in evidence_ledger}
+        if not any(p.endswith("VERIFIED") and not p.endswith("UNVERIFIED") for p in _present):
+            sanitized.epistemic_status = (
+                "REPORTED" if "REPORTED" in _present else "BELIEF" if "BELIEF" in _present else "UNKNOWN")
+    # A process that is an exact copy of another field is not an established
+    # process (fail closed to NOT_ESTABLISHED); the contradiction is still
+    # reported by the review below.
+    def _nf(x):
+        return " ".join((x or "").split()).casefold()
+    if sanitized.affected_process and any(
+        _nf(v) == _nf(sanitized.affected_process)
+        for v in (sanitized.affected_activity, sanitized.finding_subject,
+                  sanitized.observed_condition, sanitized.affected_requirement)
+    ):
+        sanitized.affected_process = None
 
     # Phase 9.8: structural cross-section review of the model's RAW output
     # (before sanitization repaired it), so a contradiction the validator
     # silently fixed above is still surfaced for human review. The sanitized
     # content is not touched by the review -- only the issue list is recorded.
     from app.services.canonical_consistency_review import review_canonical_consistency
-    issues = review_canonical_consistency(context, len(evidence_ledger))
+    _stat = {str(getattr(getattr(e, "status", None), "value", getattr(e, "status", ""))).upper()
+             for e in evidence_ledger}
+    issues = review_canonical_consistency(context, len(evidence_ledger), _stat)
     issues = issues + [x for x in (context.regeneration_log or []) if x not in issues]
     sanitized.consistency_issues = issues
     sanitized.review_required = bool(issues)
@@ -172,9 +195,10 @@ def _assign_gap_identity(ctx: CanonicalFindingContext) -> None:
     every gap gets a unique, stable `gap_id`. A missing id is assigned G<n>; a
     duplicate id keeps its first holder and the later step is re-identified.
     The ORIGINAL contradiction (duplicate id) is still reported by the review,
-    which runs on the model's raw output. `information_gaps` becomes a pure
-    projection of the plan steps when steps exist, so the two can never
-    diverge into separately-worded copies of one gap."""
+    which runs on the model's raw output. `information_gaps` is NOT rewritten
+    (that would silently drop a gap that exists only there); a divergence
+    between it and the plan steps is reported as GAPS_LIST_DIVERGES_FROM_PLAN
+    for human review instead."""
     taken: set[str] = set()
     for s in ctx.investigation_plan:
         gid = (s.gap_id or "").strip()
@@ -187,8 +211,6 @@ def _assign_gap_identity(ctx: CanonicalFindingContext) -> None:
             n += 1
         s.gap_id = f"G{n}"
         taken.add(s.gap_id)
-    if ctx.investigation_plan:
-        ctx.information_gaps = [s.unknown.strip() for s in ctx.investigation_plan]
 
 
 def _enforce_action_status_and_impact_provenance(
@@ -664,7 +686,7 @@ def _validate_llm_reasoning_fields(
     valid_hyp_ids = {x.hypothesis_id for x in ctx.candidate_hypotheses}
     for s in ctx.investigation_plan:
         u = (s.unknown or "").strip()
-        if not u or _asserts_as_fact(u):
+        if not u:
             continue
         _uk = frozenset(_sig_words(u))
         if _uk and _uk in seen_unknowns:
@@ -679,7 +701,7 @@ def _validate_llm_reasoning_fields(
     # Role = UNKNOWN: a statement of what is not established. Kept unless it
     # actually asserts a cause/blame as fact.
     ctx.information_gaps = [
-        g for g in ctx.information_gaps if (g or "").strip() and not _asserts_as_fact(g)
+        g for g in ctx.information_gaps if (g or "").strip()
     ]
 
     # ---- REMEDIATION OBLIGATION ----------------------------------

@@ -33,6 +33,7 @@ Usage:
 """
 
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -94,12 +95,54 @@ def _port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
+def _listener_pids(port: int) -> set[int]:
+    """PIDs listening on `port`, plus their uvicorn --reload parents (killing only
+    the worker would just make the reloader respawn it)."""
+    try:
+        out = subprocess.run(["lsof", "-nP", f"-tiTCP:{port}", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return set()
+    pids = {int(x) for x in out.split() if x.strip().isdigit()}
+    for pid in list(pids):
+        try:
+            ppid = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                                      capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+            cmd = subprocess.run(["ps", "-o", "command=", "-p", str(ppid)],
+                                 capture_output=True, text=True, timeout=5).stdout
+            if ppid > 1 and "uvicorn" in cmd:
+                pids.add(ppid)
+        except Exception:
+            pass
+    return pids
+
+
+def stop_process_on_port(port: int) -> None:
+    """Stop whatever is listening on `port` so the backend always starts fresh."""
+    pids = _listener_pids(port)
+    if not pids:
+        return
+    print(f"♻️  Stopping existing process on port {port} (PID: {', '.join(map(str, sorted(pids)))}) ...")
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                print(f"⚠️ No permission to stop PID {pid}.")
+        for _ in range(20):
+            if not _port_is_listening(port):
+                return
+            time.sleep(0.25)
+
+
 def start_backend_process():
-    """Start the FastAPI backend server on port 8010, unless something is
-    already listening there (e.g. a backend left running from a previous
-    dev_server.py run, or started manually)."""
+    """Always start a FRESH FastAPI backend on port 8010: any process already
+    listening there (e.g. one left from a previous run) is stopped first."""
+    stop_process_on_port(8010)
     if _port_is_listening(8010):
-        print("🚀 Backend API already running on http://localhost:8010 (reusing it)")
+        print("⚠️ Port 8010 is still in use and could not be freed -- not starting a second backend.")
         return None
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

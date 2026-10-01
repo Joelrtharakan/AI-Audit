@@ -37,6 +37,7 @@ from typing import Any
 from app.config import get_settings
 from app.services.llm.base import LLMProvider, LLMResponse
 from app.services.llm.call_metadata import set_last_call_metadata
+from app.services.request_timing import record_llm_call as _record_llm_call
 from app.services.llm.exceptions import (
     LLMAuthenticationError,
     LLMConnectionError,
@@ -120,6 +121,16 @@ class LiteLLMProvider(LLMProvider):
             return {**base, "available": False, "model_installed": False, "installed_models": []}
 
         # Token/key presence only -- reachability is confirmed on the first real call.
+        if cfg.provider == "github_copilot":
+            from app.services.llm.github_copilot_auth import auth_status
+            _st = auth_status()
+            has_credential = cfg.auth_source in ("configured_token", "oauth_cache") and (
+                cfg.auth_source == "configured_token" or _st["status"] != "MISSING")
+            return {
+                **base, "available": has_credential,
+                "auth_source": cfg.auth_source, "authentication_status": _st["status"] if cfg.auth_source != "configured_token" else "AVAILABLE",
+                "error": None if has_credential else "GitHub Copilot authentication missing.",
+            }
         has_credential = bool(cfg.api_key)
         return {
             **base,
@@ -147,6 +158,17 @@ class LiteLLMProvider(LLMProvider):
 
         cfg = self._config
         request_id = current_request_id() or "-"
+
+        # FAIL FAST: GitHub Copilot with no usable credential. Nothing is sent to
+        # any provider (no prompt leaves the process) and no other provider is tried.
+        if cfg.provider == "github_copilot" and cfg.auth_source == "missing":
+            from app.services.llm.exceptions import LLMAuthenticationError
+            from app.services.llm.github_copilot_auth import missing_credentials_message
+            logger.warning(
+                "LLM REQUEST aborted request_id=%s provider=github_copilot node=%s "
+                "authentication_status=missing token_source=none", request_id, node,
+            )
+            raise LLMAuthenticationError(missing_credentials_message())
         effective_timeout = timeout_seconds or self._timeout_override or self._settings.ollama_timeout_seconds
 
         messages: list[dict[str, str]] = []
@@ -201,6 +223,7 @@ class LiteLLMProvider(LLMProvider):
                 "failure_type=%s raw=%r",
                 request_id, cfg.provider, cfg.model, node, elapsed_ms, type(mapped).__name__, str(exc)[:400],
             )
+            _record_llm_call(node, elapsed_ms, False)
             set_last_call_metadata({
                 "request_id": request_id, "provider_used": cfg.provider, "model": cfg.model,
                 "fallback_used": False, "provider_attempts": [cfg.provider],
@@ -215,6 +238,7 @@ class LiteLLMProvider(LLMProvider):
         except (AttributeError, IndexError):
             content = ""
         if not content.strip():
+            _record_llm_call(node, elapsed_ms, False)
             set_last_call_metadata({
                 "request_id": request_id, "provider_used": cfg.provider, "model": cfg.model,
                 "fallback_used": False, "provider_attempts": [cfg.provider],
@@ -252,6 +276,7 @@ class LiteLLMProvider(LLMProvider):
             _timing.get("gen_tok_per_s", "?"),
         )
 
+        _record_llm_call(node, elapsed_ms, True, prompt_tokens, output_tokens)
         set_last_call_metadata({
             "request_id": request_id,
             "provider_used": cfg.provider,

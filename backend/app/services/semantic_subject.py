@@ -1020,6 +1020,40 @@ def render_comparison_sentence(
     return f"The {left_cap} {verb_past} the {right}{magnitude}."
 
 
+# Phase 9.9 -- grammatical shape of a condition (closed-class function words
+# and English morphology only; no finding vocabulary). A condition that begins
+# with a past-tense/participle form followed by a DIRECT OBJECT ("missed
+# scheduled maintenance", "skipped the review") is an ACTIVE verb phrase: it is
+# a complete predicate and cannot follow "was/were" ("Why were the pumps missed
+# scheduled maintenance?" is ungrammatical). A participle/adjective used as a
+# state ("expired", "damaged during transit", "overdue by 5 weeks") is followed
+# by nothing, a preposition, a conjunction, an adverb or a measure.
+_NON_OBJECT_FOLLOWERS = frozenset({
+    "to", "for", "in", "on", "at", "by", "from", "with", "of", "during", "within",
+    "after", "before", "against", "as", "per", "into", "under", "over", "through",
+    "between", "since", "until", "upon", "across", "because", "due", "and", "or",
+    "but", "when", "while", "if", "than", "yet", "again", "late", "early", "twice",
+    "once", "too", "soon", "ago", "so", "then", "there", "here", "off", "out", "up",
+    "down", "away", "back",
+})
+_IRREGULAR_PAST = frozenset({
+    "left", "lost", "kept", "took", "made", "ran", "broke", "went", "did", "forgot",
+    "overlooked", "sent", "gave", "got", "held", "set", "put", "cut", "paid", "found",
+})
+
+
+def _is_active_past_transitive(cond: str) -> bool:
+    toks = cond.split()
+    if len(toks) < 2:
+        return False
+    w, nxt = toks[0].lower(), toks[1].lower().strip(",;.")
+    if not (w.endswith("ed") or w in _IRREGULAR_PAST):
+        return False
+    if nxt in _NON_OBJECT_FOLLOWERS or nxt.endswith("ly") or nxt[:1].isdigit() or nxt[:1] in "$€£₹":
+        return False
+    return True
+
+
 def format_deviation_why_question(
     subject: str | None, condition: str | None = None, temporal: str | None = None
 ) -> str:
@@ -1063,6 +1097,16 @@ def format_deviation_why_question(
         subj_phrase = subj_phrase[0].lower() + subj_phrase[1:] if subj_phrase[:1].isupper() and not subj_phrase.split()[0].isupper() else subj_phrase
         return f"Why {modal} {subj_phrase} {rest}{temporal_suffix}?"
 
+    # Finite auxiliary already carried by the condition: invert it to the front
+    # (subject-auxiliary inversion; never changes what the condition asserts).
+    _aux_m = re.match(r"^(did|does|do|had|has|have)\b\s+(.+)$", cond, re.IGNORECASE)
+    if _aux_m and not re.match(r"^(?:was|were)\b", cond, re.IGNORECASE):
+        _a = _aux_m.group(1).lower()
+        _a = {"does": "did", "do": "did", "has": "had", "have": "had"}.get(_a, _a)
+        _sp = raw_subj if re.match(r"^(?:the|a|an|this|that)\b", raw_subj, re.IGNORECASE) else f"the {raw_subj}"
+        _sp = _sp[0].lower() + _sp[1:] if _sp[:1].isupper() and not _sp.split()[0].isupper() else _sp
+        return f"Why {_a} {_sp} {_aux_m.group(2).strip()}{temporal_suffix}?"
+
     cond_aux_match = re.match(r"^(?:was|were)\s+(.+)$", cond, re.IGNORECASE)
     # A condition that ALREADY starts with "was/were" (e.g. "was incomplete",
     # "was missing") is an adjective/participle PREDICATE -- "was" belongs
@@ -1075,6 +1119,17 @@ def format_deviation_why_question(
     had_leading_aux = bool(cond_aux_match)
     if cond_aux_match:
         cond = cond_aux_match.group(1)
+
+    # ACTIVE past-tense verb phrase with a direct object (see
+    # `_is_active_past_transitive`): a complete finite clause. Realise it as an
+    # embedded clause rather than forcing "was/were" in front of it. Decided on
+    # grammatical shape only, and only when the condition did not already carry
+    # its own was/were or a leading negation.
+    if (not had_leading_aux and not cond.lower().startswith("not ")
+            and _is_active_past_transitive(cond)):
+        _sa = raw_subj if re.match(r"^(?:the|a|an|my|your|his|her|its|our|their|this|that)\b", raw_subj, re.IGNORECASE) else f"the {raw_subj}"
+        _sa = _sa[0].lower() + _sa[1:] if _sa[:1].isupper() and not _sa.split()[0].isupper() else _sa
+        return f"Why is it that {_sa} {cond}{temporal_suffix}?"
 
     if is_actor_noun(raw_subj):
         stripped_actor = strip_leading_article(raw_subj).lower()

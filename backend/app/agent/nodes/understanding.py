@@ -62,8 +62,6 @@ async def understand_finding_node(state: AgentState) -> AgentState:
     errors = list(state.get("errors", []))
 
     settings = get_settings()
-    client = get_llm_client(timeout_seconds=settings.ollama_extraction_timeout_seconds)
-
     from app.models.analysis import ObservationQualityResult, ObservationQualityStatus
     from app.services.semantic_subject import resolve_deviation, validate_semantic_subject
     from app.services.instruction_detector import classify_instruction
@@ -378,9 +376,11 @@ async def understand_finding_node(state: AgentState) -> AgentState:
                 timeout_seconds=None,
             )
             if _raw_ctx is not None:
-                canonical_semantic_context = validate_canonical_context(
-                    _raw_ctx, ledger, request.finding_text
-                )
+                from app.services import request_timing
+                with request_timing.stage("canonical_validation"):
+                    canonical_semantic_context = validate_canonical_context(
+                        _raw_ctx, ledger, request.finding_text
+                    )
         except Exception as exc:  # noqa: BLE001 - fail-closed by design
             logger.warning("LLM-primary semantic interpretation failed (%s); deterministic floor used.", exc)
             canonical_semantic_context = None

@@ -61,10 +61,13 @@ def apply_user_copilot_token(request: Request) -> LQMSUserSession | None:
         token = user_session.get_decrypted_token()
         if token:
             if user_session.auth_provider == "github":
-                settings.copilot_github_token = token
+                # Application login != Copilot provider credential. The login token
+                # is only reused as a Copilot credential when explicitly enabled.
+                if settings.copilot_use_app_oauth_token:
+                    settings.copilot_github_token = token
+                    from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
+                    reset_copilot_clients()
                 settings.llm_provider = "github_copilot"
-                from app.services.llm.providers.github_copilot_provider import reset_copilot_clients
-                reset_copilot_clients()
             else:
                 settings.microsoft_copilot_access_token = token
                 settings.llm_provider = "microsoft_copilot"

@@ -54,9 +54,13 @@ class LLMExecutionConfig:
     model: str                    # bare model, provider-neutral, e.g. "qwen3:8b"
     litellm_model: str            # adapter-boundary identifier, e.g. "ollama_chat/qwen3:8b"
     api_base: str | None = None
-    api_key: str | None = None    # secret -- never logged, never serialized
+    api_key: str | None = field(default=None, repr=False)  # secret -- never logged, never serialized, never in repr
     extra_params: dict[str, Any] = field(default_factory=dict)
     fallback_enabled: bool = False
+    # Where the credential for this route comes from. Never a secret; safe to log.
+    # github_copilot: "configured_token" (COPILOT_GITHUB_TOKEN / explicit token),
+    # "oauth_cache" (LiteLLM native device-flow credentials), "missing".
+    auth_source: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         """Safe view for logs / API -- NO api_key."""
@@ -65,6 +69,7 @@ class LLMExecutionConfig:
             "model": self.model,
             "litellm_model": self.litellm_model,
             "fallback_enabled": self.fallback_enabled,
+            **({"auth_source": self.auth_source} if self.auth_source else {}),
         }
 
 
@@ -161,13 +166,46 @@ def resolve_execution_config(
 
     if canonical == "github_copilot":
         bare_model = bare_model or settings.copilot_model or "auto"
+        # Credential resolution (first match wins; never a fake key, never another provider):
+        #  1. a configured Copilot credential (COPILOT_GITHUB_TOKEN / explicitly supplied /
+        #     opted-in app token)  -> app Copilot-SDK session route
+        #  2. LiteLLM's NATIVE device-flow credentials (its own token directory):
+        #       - a concrete model -> LiteLLM's native `github_copilot/<model>` route
+        #         (LiteLLM authenticates and refreshes itself; no api_key passed);
+        #       - the app-level alias `auto` (the SDK picks the model; the native
+        #         route needs a concrete id) -> the SDK session route, authenticated
+        #         with the cached OAuth access token.
+        #  3. nothing available -> auth_source="missing": callers fail fast.
+        _session_token = settings.copilot_github_token or None
+        if _session_token:
+            return LLMExecutionConfig(
+                provider="github_copilot", model=bare_model,
+                litellm_model=f"{GITHUB_LITELLM_PREFIX}/{bare_model}",
+                api_key=_session_token,
+                extra_params={"log_level": settings.copilot_log_level},
+                fallback_enabled=settings.llm_fallback_enabled, auth_source="configured_token",
+            )
+        from app.services.llm import github_copilot_auth as _gha
+        if _gha.credentials_usable():
+            if bare_model in ("auto", ""):
+                return LLMExecutionConfig(
+                    provider="github_copilot", model=bare_model or "auto",
+                    litellm_model=f"{GITHUB_LITELLM_PREFIX}/{bare_model or 'auto'}",
+                    api_key=_gha.read_access_token(),
+                    extra_params={"log_level": settings.copilot_log_level},
+                    fallback_enabled=settings.llm_fallback_enabled, auth_source="oauth_cache",
+                )
+            return LLMExecutionConfig(
+                provider="github_copilot", model=bare_model,
+                litellm_model=f"github_copilot/{bare_model}",
+                api_key=None, extra_params={},
+                fallback_enabled=settings.llm_fallback_enabled, auth_source="oauth_cache",
+            )
         return LLMExecutionConfig(
-            provider="github_copilot",
-            model=bare_model,
+            provider="github_copilot", model=bare_model,
             litellm_model=f"{GITHUB_LITELLM_PREFIX}/{bare_model}",
-            api_key=settings.copilot_github_token or None,
-            extra_params={"log_level": settings.copilot_log_level},
-            fallback_enabled=settings.llm_fallback_enabled,
+            api_key=None, extra_params={"log_level": settings.copilot_log_level},
+            fallback_enabled=settings.llm_fallback_enabled, auth_source="missing",
         )
 
     # Native LiteLLM cloud providers -- single route, no failover.

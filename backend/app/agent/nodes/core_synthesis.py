@@ -1616,6 +1616,13 @@ def _derive_deterministic_impact(request_finding_text: str, canonical, observed_
     return impact, clean_noun, topic, actor
 
 
+class _SynthesisLLMDisabled(Exception):
+    """Control-flow signal: no validated canonical interpretation exists and the
+    synthesis LLM fallback (primary + recovery calls) is disabled -- the
+    single-inference path goes straight to deterministic evidence-grounded
+    synthesis instead of issuing another full inference."""
+
+
 class _CanonicalCausalReady(Exception):
     """Control-flow signal: the validated canonical semantic interpretation
     already carries the causal state core_synthesis would otherwise ask an
@@ -1928,6 +1935,8 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
     try:
         if _use_canonical_causal:
             raise _CanonicalCausalReady()
+        if not settings.agent_synthesis_llm_fallback_enabled:
+            raise _SynthesisLLMDisabled()
         # Section 1/2: compact schema/prompt, sufficient-not-excessive token
         # ceiling. A response that fills the whole budget and still parses
         # as valid, schema-conformant JSON is ACCEPTED below -- reaching the
@@ -2073,25 +2082,33 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
 
     except Exception as primary_exc:
         from app.services.ollama_client import get_last_call_metadata as get_last_ollama_metadata
-        primary_ollama_meta = get_last_ollama_metadata()
-        primary_failure_type = _classify_failure(primary_exc, primary_ollama_meta)
-        llm_metrics.increment(f"llm_primary_{_failure_metric_suffix(primary_failure_type)}")
-        llm_metrics.record_execution(
-            request_id=_request_id, node="core_synthesis", model=settings.ollama_model, phase="primary",
-            elapsed_ms=primary_ollama_meta.get("elapsed_ms"), failure_type=primary_failure_type,
-        )
-        logger.info(
-            "node=core_synthesis failure_type=%s hit_output_limit=%s eval_count=%s max_output_tokens=%s exc=%s",
-            primary_failure_type,
-            primary_ollama_meta.get("hit_output_limit"),
-            primary_ollama_meta.get("eval_count"),
-            primary_ollama_meta.get("max_output_tokens"),
-            primary_exc,
-        )
-        trace.append(AgentTraceStep.warn(
-            f"Core synthesis primary call did not produce a usable result ({primary_failure_type}) — "
-            "attempting compact JSON-first recovery before deterministic synthesis."
-        ))
+        _llm_fallback = not isinstance(primary_exc, _SynthesisLLMDisabled)
+        if _llm_fallback:
+            primary_ollama_meta = get_last_ollama_metadata()
+            primary_failure_type = _classify_failure(primary_exc, primary_ollama_meta)
+            llm_metrics.increment(f"llm_primary_{_failure_metric_suffix(primary_failure_type)}")
+            llm_metrics.record_execution(
+                request_id=_request_id, node="core_synthesis", model=settings.ollama_model, phase="primary",
+                elapsed_ms=primary_ollama_meta.get("elapsed_ms"), failure_type=primary_failure_type,
+            )
+            logger.info(
+                "node=core_synthesis failure_type=%s hit_output_limit=%s eval_count=%s max_output_tokens=%s exc=%s",
+                primary_failure_type,
+                primary_ollama_meta.get("hit_output_limit"),
+                primary_ollama_meta.get("eval_count"),
+                primary_ollama_meta.get("max_output_tokens"),
+                primary_exc,
+            )
+            trace.append(AgentTraceStep.warn(
+                f"Core synthesis primary call did not produce a usable result ({primary_failure_type}) — "
+                "attempting compact JSON-first recovery before deterministic synthesis."
+            ))
+        else:
+            logger.info("node=core_synthesis no canonical interpretation; synthesis LLM fallback disabled (single-inference path)")
+            trace.append(AgentTraceStep.warn(
+                "Core synthesis: no validated canonical interpretation and the synthesis LLM fallback is "
+                "disabled (single-inference path) — using deterministic evidence-grounded synthesis."
+            ))
 
         from app.services.llm_router import get_last_call_metadata
         _router_meta = get_last_call_metadata()
@@ -2111,8 +2128,11 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
         # causal-fields-only retry against a materially smaller prompt and
         # a smaller (but sufficient) output budget first.
         # -------------------------------------------------------------
-        llm_metrics.increment("llm_recovery_attempted")
+        if _llm_fallback:
+            llm_metrics.increment("llm_recovery_attempted")
         try:
+            if not _llm_fallback:
+                raise _SynthesisLLMDisabled()
             recovery_prompt = recovery_template.format(
                 finding_text=request.finding_text,
                 evidence_ledger_json=json.dumps(_trim_evidence_for_recovery(claim_ids), default=str),
@@ -2157,6 +2177,8 @@ async def core_synthesis_node(state: AgentState) -> AgentState:
                 "failure). Impact/CAPA below use deterministic derivation since the recovery schema is "
                 "causal-reasoning only."
             ))
+        except _SynthesisLLMDisabled:
+            pass  # deterministic synthesis below; nothing was attempted, so nothing to record
         except Exception as recovery_exc:
             recovery_meta = get_last_ollama_metadata()
             recovery_failure_type = _classify_failure(recovery_exc, recovery_meta)

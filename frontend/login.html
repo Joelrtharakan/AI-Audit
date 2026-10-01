@@ -550,7 +550,7 @@
 <script src="config.js"></script>
 <script>
     $(function() {
-        var apiBase = (typeof LQMS_AI_CONFIG !== "undefined" && LQMS_AI_CONFIG.API_BASE_URL) || "http://localhost:8010";
+        var apiBase = ((typeof LQMS_AI_CONFIG !== "undefined" && LQMS_AI_CONFIG.apiBaseUrl) || "http://localhost:8010").replace(/\/+$/, "");
         $("#btnSignInMicrosoft").attr("href", apiBase + "/api/auth/microsoft/login");
         $("#btnSignInGithub").attr("href", apiBase + "/api/auth/github/login");
 

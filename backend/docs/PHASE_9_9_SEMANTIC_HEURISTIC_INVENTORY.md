@@ -38,7 +38,7 @@ Categories: **A** structural, **B** arithmetic, **C** provenance, **D** presenta
 | `app/agent/grounding_guard.py` | 9/5/5 | 4 | C/E (hallucination/contamination guard on generated text) | live | **KEEP** | Provenance/containment; REVIEW the few regex checks that read meaning. |
 | `app/agent/recurrence_guard.py` | 13/0/1 | 5 | F (raw-text recurrence / previous-CAPA detection) | floor | **MIGRATE** | Canonical `recurrence` + `explicit_previous_capa_reference` (LLM-primary, evidence-id gated). Risk MEDIUM. |
 | `app/agent/analytical_validator.py` | 4/4/9 | 11 | A/C (structural repairs of structured outputs; word-overlap helpers) | live | **KEEP; REVIEW overlap helpers** | Phase 9.9 fixed a status-promotion defect here (REPORTED -> SUPPORTED). Risk MEDIUM. |
-| `app/services/canonical_context_validator.py` | 10/1/2 | 9 | C + F (regex vetoes on LLM strings; `_restates_observation` word overlap; `_AGG_META`) | live | **REVIEW** | Vetoes can only DEMOTE LLM claims (fail-closed). Replace with structured self_review/consistency review where possible. Risk HIGH. |
+| `app/services/canonical_context_validator.py` | 10/1/2 | 9 | C + F (regex vetoes on LLM strings; `_restates_observation` word overlap; `_AGG_META`) | live | **REVIEW** | Vetoes can only DEMOTE LLM claims (fail-closed). Phase 9.9 REMOVED the `_asserts_as_fact` veto on `information_gaps` / plan `unknown` (live run: it deleted the model's only gap `the reason for identical invoices`; no existing test depended on it). The veto remains on remediation activity text (lines ~821/836). Replace the rest with structured self_review/consistency review. Risk HIGH. |
 | `app/services/epistemic_modality.py` | 9/3/1 | 1 | F (grammatical stance/modality classification of raw clauses) | floor | **MIGRATE** | Canonical `epistemic_status` (LLM-primary). Risk HIGH. |
 | `app/services/instruction_detector.py` | 10/1/3 | 4 | E (prompt-injection detection over untrusted text) | live (security) | **KEEP** | Security boundary, not meaning classification; prompt also instructs the model to treat content as data. |
 | `app/services/attribution_extraction.py` | 8/1/0 | 2 | F (degraded-mode attribution extraction) | degraded only | **REVIEW** | Used only when LLM extraction unavailable. Risk LOW. |
@@ -80,6 +80,7 @@ Categories: **A** structural, **B** arithmetic, **C** provenance, **D** presenta
 | `app/remediation/calculator.py` | 0/1/0 | 3 | B (arithmetic) | live | **KEEP** | Phase 9.9: no invented most-likely for alternatives. |
 | `app/routers/health.py` | 0/1/0 | 0 | A (constants) | live | **KEEP** | - |
 | `app/routers/investigate.py` | 0/1/0 | 1 | E/A (constants) | live | **KEEP** | - |
+| `app/services/evidence_ids.py` | 3/0/0 | 1 | C (evidence-label id SYNTAX: `C2:` prefix shape; no meaning) | live | **KEEP** | Phase 9.9 provenance registry; resolves/display-maps ids, never guesses; unresolvable -> None. |
 | `app/services/canonical_consistency_review.py` | 0/1/0 | 1 | A/C (structural; no prose) | live | **KEEP** | Phase 9.8/9.9. Imports no `re`. |
 | `app/services/canonical_finding_interpreter.py` | 0/1/0 | 12 | A (schema hint constant) | live | **KEEP** | - |
 | `app/services/llm_metrics.py` | 0/1/0 | 3 | A (metric labels) | live | **KEEP** | - |

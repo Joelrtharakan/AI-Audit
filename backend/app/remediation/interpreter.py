@@ -53,38 +53,33 @@ _SCHEMA_HINT = (
     '"cost_components":[{"component_id":str(required),"description":str(required),"activity_ids":[str],'
     '"cost_category":str,'
     '"value_kind":"REMEDIATION_COST|UNIT_RATE|QUOTED_PRICE|BUDGET|ESTIMATE|'
-    'OBSERVED_FINANCIAL_LOSS|HISTORICAL_EXPENDITURE (REQUIRED -- what the money IS; an '
-    'incurred loss / past spend is NOT a remediation cost; if you cannot classify it, '
-    'do not emit a priced component)",'
+    'OBSERVED_FINANCIAL_LOSS|HISTORICAL_EXPENDITURE (REQUIRED)",'
     '"quantity":num,"quantity_unit":str,'
     '"quantity_basis":"EVIDENCED|DERIVED|ASSUMED|NOT_ESTABLISHED",'
-    '"quantity_derivation":str(REQUIRED when quantity_basis=DERIVED -- one line: '
-    '"2 machines x 6 h/machine = 12 h"),"derived_from_calculation_id":str,'
+    '"quantity_derivation":str(REQUIRED when DERIVED),"derived_from_calculation_id":str,'
     '"unit_cost":num,"unit_cost_low":num,"unit_cost_high":num,'
     '"unit_cost_basis":"VERIFIED|REPORTED|ESTIMATED|ASSUMED|NOT_ESTABLISHED","currency":str,'
     '"amount_type":"PER_QUANTITY|PER_HOUR|PER_UNIT|PER_EVENT|PER_IMPLEMENTATION|COMPONENT|SUBTOTAL|TOTAL|ALTERNATIVE",'
     '"alternative_group":str(only for ALTERNATIVE),"is_primary_option":bool(only for ALTERNATIVE),'
-    '"recurrence":"ONE_TIME|RECURRING|UNKNOWN -- UNKNOWN when one-time vs recurring cannot be established; NEVER default to ONE_TIME",'
+    '"recurrence":"ONE_TIME|RECURRING|UNKNOWN",'
     '"recurring_period":str(REQUIRED when recurrence=RECURRING),'
+    '"scope_role":"ESTABLISHED_REMEDIATION|PROPOSED_REMEDIATION|PREVENTIVE|MONITORING|OPTIONAL|UNRELATED|NOT_ESTABLISHED",'
     '"source_reference_ids":[str],"assumptions":[str],"rationale":str}],'
     '"calculation_proposals":[{"calculation_id":str(required),'
     '"operation":"MULTIPLY|SUM|SUBTRACT|DIVIDE",'
     '"operands":[{"label":str,"value":num,"unit":str,"source_component_id":str,'
-    '"evidence_refs":[str]}](explicit values you supply -- the executor combines '
-    'exactly these),"component_ids":[str](legacy: reference components instead of operands),'
-    '"produces":"LOW|MOST_LIKELY|HIGH|COMPONENT_AMOUNT (EXACTLY one -- never TOTAL/SUM)",'
+    '"evidence_refs":[str]}],"component_ids":[str],'
+    '"produces":"LOW|MOST_LIKELY|HIGH|COMPONENT_AMOUNT",'
     '"target_component_id":str(the component this plan prices),'
-    '"frequency":"ONE_TIME|RECURRING (REQUIRED -- MUST match the component recurrence; a plan '
-    'with operands and no frequency is rejected)",'
+    '"frequency":"ONE_TIME|RECURRING (REQUIRED)",'
     '"recurring_period":str(when RECURRING: "month"/"week"/"quarter"/"year"),'
     '"horizon":num,"horizon_unit":str,'
-    '"horizon_basis":"EXPLICIT|DERIVED|UNKNOWN|NOT_APPLICABLE (EXPLICIT only when the '
-    'evidence/auditor states a time horizon -- NEVER assume one, e.g. never 12 months)",'
+    '"horizon_basis":"EXPLICIT|DERIVED|UNKNOWN|NOT_APPLICABLE",'
     '"currency":str,'
     '"result_represents":str(what the number is: "monthly verification labour"),'
     '"reason":str}],'
     '"overall_status":"EVIDENCE_BACKED|ASSUMPTION_BASED|NOT_ASSESSABLE",'
-    '"estimability":"ESTIMABLE|BOUNDED_ONLY|SINGLE_VERIFIED_COST|NOT_ASSESSABLE",'
+    '"estimability":"ESTIMABLE|BOUNDED_ONLY|SINGLE_VERIFIED_COST|NOT_ASSESSABLE (ONLY these four)",'
     '"not_assessable_reason":"IMPLEMENTATION_SCOPE_UNKNOWN|QUANTITY_UNKNOWN|PRICING_BASIS_UNAVAILABLE|'
     'REMEDIATION_NOT_DEFINED|CONFLICTING_EVIDENCE|INSUFFICIENT_EVIDENCE",'
     '"range_assumptions":[str],"uncertainty_reasons":[str],"evidence_improves_estimate":[str],'
@@ -93,7 +88,7 @@ _SCHEMA_HINT = (
     'needed -- NEVER a number/rate/amount),"why_required":str,"acceptable_evidence":str(e.g. '
     '"supplier quotation" OR "approved internal rate + authorised effort estimate" OR '
     '"fixed-price service quotation"),"enables_estimate_type":"EXACT_ESTIMATE|RANGE_ESTIMATE|'
-    'PARTIAL_ESTIMATE"}]}'
+    'PARTIAL_ESTIMATE (only here)"}]}'
 )
 
 
@@ -140,8 +135,22 @@ def _context_block(
     # The finding text is a citable pricing source in its own right -- a rate /
     # price / quantity / recurrence stated here is evidence. Cite it as FINDING
     # (spec Pass 51 sections 3-6).
+    # The ledger is built from the finding's own sentences: when it is verbatim
+    # the whole finding (structural check, defaults to False), send the text ONCE.
+    # The FINDING citation id stays valid either way.
+    from app.services.context_dedup import ledger_covers_finding
+    _finding_in_ledger = ledger_covers_finding(
+        finding_text,
+        [getattr(i, "claim", None) or getattr(i, "text", "") or "" for i in (evidence_ledger or [])],
+        max_claim_chars=_MAX_STMT_CHARS,
+    )
     lines: list[str] = [
-        f"FINDING (a pricing source -- cite as FINDING): {finding_text or '(none)'}",
+        (
+            "FINDING (a pricing source -- cite as FINDING or by E-id): its full text is exactly the "
+            "evidence items below, verbatim."
+            if _finding_in_ledger
+            else f"FINDING (a pricing source -- cite as FINDING): {finding_text or '(none)'}"
+        ),
         "",
     ]
     _canon = _canonical_block(canonical_state)
@@ -167,19 +176,11 @@ def _context_block(
             _rr.append(f"  INVESTIGATION (not remediation, not priced): {_clip(a.activity, 160)}")
         if not _rem_acts:
             _rr.append(
-                "  => NO established remediation activity. The implementation scope has not "
-                "yet been determined -- the correct output is estimability=NOT_ASSESSABLE "
-                "(not_assessable_reason=REMEDIATION_NOT_DEFINED / IMPLEMENTATION_SCOPE_UNKNOWN). "
-                "Do NOT manufacture procedure/training/monitoring/control activities to fill "
-                "the cost section. Price only genuine remediation, never the investigation work."
+                "  => NO established remediation activity: estimability=NOT_ASSESSABLE "
+                "(REMEDIATION_NOT_DEFINED / IMPLEMENTATION_SCOPE_UNKNOWN); invent none, price no investigation."
             )
         else:
-            _rr.append(
-                "  => These ARE the remediation activities. Produce cost reasoning for "
-                "EXACTLY these -- one activity per line below, keyed by its id. Do NOT add "
-                "an activity, do NOT replace one, do NOT split investigation work back in. "
-                "Your `activities` array, if you emit one, must mirror this list 1:1."
-            )
+            _rr.append("  => These ARE the remediation activities (mirror 1:1; add, replace or split none):")
         _pi_by_aid: dict[str, Any] = {}
         for p in (getattr(semantic_context, "pricing_information", []) or []):
             if getattr(p, "action_id", None):
@@ -196,10 +197,8 @@ def _context_block(
                     getattr(_pi, "pricing_basis", None), getattr(_pi, "rationale", None),
                     getattr(_pi, "observed_value_in_finding", None)) if x)
                 if _basis:
-                    _line += (f"\n     PRICING INPUTS the evidence establishes for {_aid}: "
-                              f"{_clip(_basis, 200)} — produce a cost_component reflecting EVERY "
-                              "distinct price/rate here; never omit the equipment/materials price "
-                              "because an installation or labour price for the same activity follows it")
+                    _line += (f"\n     PRICING INPUTS established for {_aid}: "
+                              f"{_clip(_basis, 200)} — one cost_component per distinct price/rate")
             _rr.append(_line)
         # A monetary value flagged by the canonical layer as NOT a remediation
         # cost -- but only when it is NOT tied to an established remediation
@@ -214,8 +213,8 @@ def _context_block(
                     "finding, NOT a remediation cost"
                 )
         if _rr:
-            lines.append("REMEDIATION REASONING (from the canonical interpretation "
-                         "-- consume this, do not re-interpret the finding):\n" + "\n".join(_rr))
+            lines.append("REMEDIATION REASONING (canonical interpretation -- consume, do not re-interpret):\n"
+                         + "\n".join(_rr))
             lines.append("")
     else:
         # Fallback path: the upstream semantic interpretation is unavailable, so
@@ -245,14 +244,12 @@ def _context_block(
         _id = f"E{idx}" + (f" ({_m.group(1).replace(' ', '').upper()})" if _m else "")
         ev_lines.append(f"{_id} [{status}]: {_clip(claim)}")
     lines.append(
-        "EVIDENCE (inspect EVERY item -- AND the FINDING text above -- for prices, rates, "
-        "quantities, effort, units and currency BEFORE deciding any pricing input is "
-        "missing -- cite evidence items by their E-id, cite the finding as FINDING):\n"
+        "EVIDENCE (check every item and the FINDING for prices, rates, quantities, effort, units, "
+        "currency before calling an input missing; cite by E-id or FINDING):\n"
         + (
             "\n".join(ev_lines)
             if ev_lines
-            else "(no separate evidence items -- the FINDING text above IS the pricing "
-            "evidence; cite it as FINDING)"
+            else "(none -- the FINDING text is the pricing evidence; cite it as FINDING)"
         )
     )
     lines.append("")

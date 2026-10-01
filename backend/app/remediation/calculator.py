@@ -41,6 +41,10 @@ from app.remediation.semantic_models import (
 
 _PER_X_TYPES = frozenset({"PER_QUANTITY", "PER_HOUR", "PER_UNIT", "PER_EVENT", "PER_IMPLEMENTATION"})
 _ADDITIVE_TYPES = _PER_X_TYPES | {"COMPONENT"}
+# scope_role values the MODEL declared to mean "this price does not belong to the
+# current remediation total". Structural use of the model's own enum: the figure is
+# still rendered as a priced cost driver, it is just not added into the total.
+_OUT_OF_TOTAL_SCOPE_ROLES = frozenset({"UNRELATED", "OPTIONAL"})
 
 _BASIS_RANK = {
     "VERIFIED": 4, "REPORTED": 3, "ESTIMATED": 2, "ASSUMED": 1, "NOT_ESTABLISHED": 0,
@@ -112,7 +116,18 @@ def _multiplies(c: RemediationCostComponent) -> bool:
     quantity is present" -- Phase 9.7 §2."""
     has_qty = c.quantity is not None or (c.quantity_low is not None and c.quantity_high is not None)
     has_rate = c.unit_cost is not None or (c.unit_cost_low is not None and c.unit_cost_high is not None)
-    return c.amount_type in _PER_X_TYPES and has_qty and has_rate
+    return is_rate_figure(c) and has_qty and has_rate
+
+
+def is_rate_figure(c: RemediationCostComponent) -> bool:
+    """The figure is a per-item RATE: tagged PER_* by `amount_type`, OR classified
+    UNIT_RATE by the model's own `value_kind` on a COMPONENT line. A rate the
+    model classified as a rate but mis-tagged COMPONENT must still be multiplied
+    by its stated quantity -- otherwise "45 hours at 1,600/hour" would surface
+    as 1,600. Both fields are the model's enum declarations; no text is read."""
+    return c.amount_type in _PER_X_TYPES or (
+        c.amount_type == "COMPONENT" and getattr(c, "value_kind", "") == "UNIT_RATE"
+    )
 
 
 def _point_amount(c: RemediationCostComponent) -> float | None:
@@ -126,6 +141,8 @@ def _point_amount(c: RemediationCostComponent) -> float | None:
         if c.quantity is not None and c.unit_cost is not None:
             return _round(c.quantity * c.unit_cost)
         return None
+    if _multiplies(c) and c.quantity is not None and c.unit_cost is not None:
+        return _round(c.quantity * c.unit_cost)  # UNIT_RATE line mis-tagged COMPONENT
     return _round(c.unit_cost) if c.unit_cost is not None else None
 
 
@@ -213,6 +230,7 @@ def assemble_estimate(
     components: list[RemediationCostComponent],
     accepted_proposals: list[RemediationCalculationProposal],
     traces: list[RemediationCalculationTrace],
+    scope_established: bool = True,
 ) -> AssembledEstimate:
     est = AssembledEstimate()
 
@@ -235,6 +253,7 @@ def assemble_estimate(
     results: list[RemediationCostComponentResult] = []
     rows: list[_Row] = []
     _currency_dropped: list[str] = []
+    _excluded_from_total: list[str] = []
     for c in components:
         pt = _point_amount(c)
         lo = _bound_amount(c, "low")
@@ -272,6 +291,7 @@ def assemble_estimate(
             calculation_formula="pricing basis stated without a currency" if currency_unusable else _formula(c),
             recurrence=c.recurrence,
             recurring_period=c.recurring_period,
+            scope_role=getattr(c, "scope_role", "NOT_ESTABLISHED"),
             confidence=RemediationConfidence.LOW if currency_unusable else _CONF_FROM_BASIS.get(c.unit_cost_basis, RemediationConfidence.LOW),
             source_reference_ids=list(c.source_reference_ids),
             assumptions=list(c.assumptions),
@@ -283,6 +303,9 @@ def assemble_estimate(
             continue
         if not _has_amount:
             est.unpriced_component_ids.append(c.component_id)
+            continue
+        if getattr(c, "scope_role", "NOT_ESTABLISHED") in _OUT_OF_TOTAL_SCOPE_ROLES:
+            _excluded_from_total.append(c.component_id)  # known price, outside the current scope
             continue
         # A component contributes to the combined roll-up ONLY when the evidence
         # establishes exactly ONE working currency. With components in multiple
@@ -296,6 +319,11 @@ def assemble_estimate(
         elif eff_currency and working_currency is None and len(currencies) > 1:
             est.unpriced_component_ids.append(c.component_id)
 
+    if _excluded_from_total:
+        est.uncertainty_reasons.append(
+            f"{len(_excluded_from_total)} priced component(s) were classified as outside the current "
+            "remediation scope; their prices are shown but are not included in the totals."
+        )
     if _currency_dropped:
         est.uncertainty_reasons.append(
             f"{len(_currency_dropped)} cost component(s) provided a figure with no currency, and the "
@@ -351,7 +379,7 @@ def assemble_estimate(
             est.recurring_horizon_total = _round(est.recurring_cost * _h)
 
     if one_time:
-        low, ml, high, method = _aggregate_one_time(one_time, _results_by_id, est)
+        low, ml, high, method = _aggregate_one_time(one_time, _results_by_id, est, scope_established)
         est.one_time_cost = ml
         est.low, est.most_likely, est.high = low, ml, high
         est.estimation_method = method
@@ -371,6 +399,7 @@ def _aggregate_one_time(
     rows: list[_Row],
     results_by_id: dict[str, RemediationCostComponentResult],
     est: AssembledEstimate,
+    scope_established: bool = True,
 ) -> tuple[float | None, float | None, float | None, str]:
     """Combine one-time rows by their declared semantic role. Returns
     (low, most_likely, high, method_note)."""
@@ -494,9 +523,12 @@ def _aggregate_one_time(
             return from_parts_low, None, from_parts_high, "; ".join(methods) or "range established; no single most-likely figure"
         return None, None, None, "; ".join(methods) or "no calculable one-time cost"
     if not methods:
+        # "required" asserts the work is established remediation; only say it when
+        # the model's scope declaration supports it (Phase 9.9 §7).
+        _req = "required implementation" if scope_established else "priced activity"
         methods.append(
-            "sum of the required implementation components"
-            if len(additive) > 1 else "single implementation cost"
+            f"sum of the {_req} components"
+            if len(additive) > 1 else ("single implementation cost" if scope_established else "single priced activity cost")
         )
     return from_parts_low, from_parts_ml, from_parts_high, "; ".join(methods)
 

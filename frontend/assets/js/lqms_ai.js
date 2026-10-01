@@ -565,7 +565,19 @@
         } else if (capa.recommended_investigation && capa.recommended_investigation.length) {
             immActions = capa.recommended_investigation;
         }
-        if (immActions.length) {
+        var actionItems = (report.immediate_action_items && report.immediate_action_items.length) ? report.immediate_action_items : [];
+        if (actionItems.length) {
+            // Canonical action state: each action carries its own lifecycle status
+            // (Proposed / Recommended / Authorized / Completed). Authorization and
+            // completion appear only when the server kept them (evidence-backed).
+            html += "<ol style='padding-left:18px; margin-bottom:0; font-size:13px; color:#334155;'>";
+            actionItems.forEach(function(it) {
+                html += "<li style='margin-bottom:10px; line-height:1.5; font-weight:500;'><div>" + escapeHtml(it.activity) + "</div>"
+                    + "<div style='font-size:11px; color:#64748b; font-weight:700;'>Action status: " + escapeHtml(statusLabel(it.action_status))
+                    + ((it.evidence_ids && it.evidence_ids.length) ? " (evidence: " + escapeHtml(it.evidence_ids.join(", ")) + ")" : "") + "</div></li>";
+            });
+            html += "</ol>";
+        } else if (immActions.length) {
             html += "<ol style='padding-left:18px; margin-bottom:0; font-size:13px; color:#334155;'>";
             immActions.forEach(function(act) {
                 html += "<li style='margin-bottom:10px; line-height:1.5; font-weight:500;'>" + escapeHtml(act) + "</li>";
@@ -646,6 +658,11 @@
         html += "<span style='font-size:11px; font-weight:800; background:#fef2f2; color:#dc2626; border:1px solid #fecaca; padding:5px 12px; border-radius:20px; text-transform:uppercase; letter-spacing:0.5px;'>" + safeEsc(String(impact.status || "REQUIRES_ASSESSMENT").replace(/_/g, " ")) + "</span>";
         html += "</div>";
 
+        if (report.canonical_impact) {
+            // Impact basis comes from the canonical state, not from regenerated prose.
+            html += "<div style='font-size:12px; color:#475569; margin-bottom:8px;'><strong>Impact basis:</strong> " + safeEsc(statusLabel(report.canonical_impact.status))
+                + ((report.canonical_impact.categories && report.canonical_impact.categories.length) ? " &middot; " + safeEsc(report.canonical_impact.categories.join(", ")) : "") + "</div>";
+        }
         if (impact.narrative) {
             html += "<p style='font-size:13px; color:#334155; margin-bottom:16px; line-height:1.6; background:#f8fafc; padding:12px 16px; border-radius:10px; border:1px solid #f1f5f9; font-weight:500;'>" + safeEsc(impact.narrative) + "</p>";
         }
@@ -793,12 +810,13 @@
                     && rcNum(rc.low_estimate) && rcNum(rc.high_estimate) && rc.low_estimate === rc.high_estimate);
                 if (rcExactTotal && rcMl) {
                     html += "<div style='background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:12px 16px; margin-bottom:10px;'>";
-                    html += "<div style='font-size:10px; font-weight:800; color:#15803d; text-transform:uppercase; letter-spacing:0.5px;'>Expected Remediation Cost</div>";
+                    var rcScopeOk = (rc.scope_status === "ESTABLISHED");
+                    html += "<div style='font-size:10px; font-weight:800; color:#15803d; text-transform:uppercase; letter-spacing:0.5px;'>" + (rcScopeOk ? "Expected Remediation Cost" : "Priced Activity Estimate") + "</div>";
                     html += "<div style='font-size:20px; font-weight:800; color:#0f172a;'>" + rcMl + "</div>";
                     // Final hardening Phase 15: "EXACT" = the arithmetic is exact
                     // given the evidence-stated quantities/rates -- NOT a
                     // guaranteed real-world incurred amount.
-                    html += "<div style='font-size:11px; color:#15803d; margin-top:4px;'>Exact arithmetic over the quantities and rates stated in the evidence &mdash; not a guaranteed incurred cost; excludes taxes, contingency and price movement unless stated.</div>";
+                    html += "<div style='font-size:11px; color:#15803d; margin-top:4px;'>Exact arithmetic over the quantities and rates stated in the evidence &mdash; not a guaranteed incurred cost; excludes taxes, contingency and price movement unless stated." + (rcScopeOk ? "" : " The relationship of this activity to the remediation is " + safeEsc(statusLabel(rc.scope_status || "NOT_ESTABLISHED").toLowerCase()) + "; the amount is not an established remediation cost.") + "</div>";
                     html += "</div>";
                 } else if (rc.is_partial_estimate) {
                     // Final hardening ISSUE 3/4/6/8: a PARTIAL_ESTIMATE is the
@@ -829,6 +847,17 @@
                     if (rcOt) html += "<strong>One-time cost:</strong> " + rcOt + "&nbsp;&nbsp;";
                     if (rcRec) html += "<strong>Recurring cost:</strong> " + rcRec + (rc.recurring_period ? " per " + safeEsc(rc.recurring_period) : "");
                     html += "</div>";
+                    // The recurring amount stays SEPARATE from the one-time amount, and its
+                    // relationship to the remediation is the model's declared scope role --
+                    // shown, never assumed. Nothing is added into the one-time figure.
+                    (rc.cost_components || []).filter(function(c) { return c.recurrence === "RECURRING"; }).forEach(function(c) {
+                        var cAmt = rcMoney(c.calculated_amount, c.currency);
+                        if (!cAmt) return;
+                        html += "<div style='font-size:12px; color:#475569; margin-bottom:6px;'><strong>Recurring priced activity:</strong> " + safeEsc(c.description || "") + " &mdash; " + cAmt + (c.recurring_period ? " per " + safeEsc(c.recurring_period) : "")
+                            + " &middot; Relationship to remediation: " + safeEsc(statusLabel(c.scope_role || "NOT_ESTABLISHED"))
+                            + ((c.source_reference_ids && c.source_reference_ids.length) ? " &middot; Evidence: " + safeEsc(c.source_reference_ids.map(function(r){ return (rc.evidence_labels || {})[r] || r; }).join(", ")) : "")
+                            + "</div>";
+                    });
                     // Spec §14/§15/§17: a recurring cost with no established number of
                     // occurrences / horizon has NO finite total -- say so explicitly so
                     // the periodic figure is never read as the remediation total.
@@ -913,11 +942,15 @@
                 // visual-only and inserts no character, so without it these
                 // labels glue together on any text extraction (e.g.
                 // "Pricing: EXACT ESTIMATEConfidence: LOWClassification: ...").
+                // Five separate facets, never conflated: arithmetic exactness, estimate
+                // classification, semantic scope, confidence, evidence provenance.
+                if (rc.arithmetic_status && rc.arithmetic_status !== "NONE") html += "<span>Arithmetic: <strong>" + safeEsc(statusLabel(rc.arithmetic_status)) + "</strong></span> ";
+                html += "<span>Scope: <strong>" + safeEsc(statusLabel(rc.scope_status || "NOT_ESTABLISHED")) + "</strong></span> ";
                 if (rc.pricing_status) html += "<span>Pricing: <strong>" + safeEsc(String(rc.pricing_status).replace(/_/g, " ")) + "</strong></span> ";
                 html += "<span>Confidence: <strong>" + safeEsc(String(rc.confidence || "NOT_ASSESSABLE").replace(/_/g, " ")) + "</strong></span> ";
                 html += "<span>Classification: " + rcBadge(rc.estimate_classification) + "</span> ";
                 if (rc.estimation_method) html += "<span>Method: " + safeEsc(rc.estimation_method) + "</span> ";
-                if (rc.evidence_basis && rc.evidence_basis.length) html += "<span>Evidence Basis: " + safeEsc(rc.evidence_basis.join(", ")) + "</span>";
+                if (rc.evidence_basis && rc.evidence_basis.length) html += "<span>Evidence Basis: " + safeEsc(rc.evidence_basis.map(function(r){ return (rc.evidence_labels || {})[r] || r; }).join(", ")) + "</span>";
                 html += "</div>";
             }
 

@@ -31,7 +31,7 @@ def _valid_ids(evidence_count: int) -> set[str]:
 
 
 def review_canonical_consistency(
-    ctx: CanonicalFindingContext, evidence_count: int
+    ctx: CanonicalFindingContext, evidence_count: int, ledger_statuses: set[str] | None = None
 ) -> list[str]:
     """Return a list of structural contradiction codes (empty = consistent)."""
     issues: list[str] = []
@@ -72,6 +72,22 @@ def review_canonical_consistency(
     for i, s in enumerate(ctx.investigation_plan):
         if any(h not in hyp_ids for h in s.related_hypothesis_ids):
             issues.append(f"PLAN_STEP_HYPOTHESIS_DANGLING:{i}")
+
+    # --- object / activity / process separation: one phrase copied into
+    #     several fields (exact normalised identity; no meaning inspected)
+    def _n(x):
+        return " ".join((x or "").split()).casefold()
+    _proc = _n(ctx.affected_process)
+    if _proc:
+        for _name, _val in (("activity", ctx.affected_activity), ("subject", ctx.finding_subject),
+                            ("condition", ctx.observed_condition), ("requirement", ctx.affected_requirement)):
+            if _n(_val) == _proc:
+                issues.append(f"PROCESS_COPIES_{_name.upper()}")
+
+    # --- finding-level epistemic status vs the evidence actually held
+    if ctx.epistemic_status == "VERIFIED" and ledger_statuses is not None and ledger_statuses:
+        if not any(x.endswith("VERIFIED") and not x.endswith("UNVERIFIED") for x in ledger_statuses):
+            issues.append("EPISTEMIC_STATUS_EXCEEDS_EVIDENCE")
 
     # --- investigation gap identity (structure only: ids / exact-string identity)
     seen_gap: dict[str, int] = {}

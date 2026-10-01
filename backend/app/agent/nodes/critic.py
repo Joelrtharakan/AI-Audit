@@ -122,6 +122,28 @@ async def critic_node(state: AgentState) -> AgentState:
         state["errors"] = errors
         return state
 
+    # SINGLE-INFERENCE PATH: the deterministic firewall above flagged a concern,
+    # but a second LLM review pass is NOT run automatically. The analysis is
+    # preserved exactly as produced (never rewritten here) and the concern is
+    # recorded for the mandatory human review. The LLM critic remains available
+    # behind `agent_critic_llm_enabled` for explicit opt-in only.
+    if not settings.agent_critic_llm_enabled:
+        trace.append(AgentTraceStep.warn(
+            "Deterministic critic firewall flagged a possible grounding/structure concern; "
+            "no second LLM review is run (single-inference path). Analysis preserved as-is — "
+            "human review required."
+        ))
+        return {
+            **state,
+            "critic_approved": False,
+            "critic_send_back": False,
+            "critic_feedback": "Deterministic check flagged a possible grounding/structure concern; human review required.",
+            "critic_status": "DETERMINISTIC_FLAGGED",
+            "critic_iteration": critic_iteration + 1,
+            "trace": trace,
+            "errors": errors,
+        }
+
     client = get_llm_client(timeout_seconds=settings.ollama_critic_timeout_seconds)
 
     system_prompt = (settings.agent_prompts_dir / "system_prompt.txt").read_text(encoding="utf-8")

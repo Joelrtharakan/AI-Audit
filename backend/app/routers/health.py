@@ -35,11 +35,25 @@ def _is_github(provider: str) -> bool:
     return provider.strip().lower() in _GITHUB_PROVIDER_ALIASES
 
 
+def _github_copilot_auth_status() -> dict:
+    from app.services.llm.github_copilot_auth import auth_status
+    return auth_status()
+
+
+def _copilot_provider_auth(settings) -> dict:
+    from app.services.llm.github_copilot_auth import provider_auth_status
+    return provider_auth_status(settings)
+
+
 def _has_any_copilot_token(settings, user_session) -> bool:
     return bool(
         settings.microsoft_copilot_access_token
         or settings.copilot_github_token
-        or (user_session and user_session.copilot_enabled)
+        # An application GitHub LOGIN is not a Copilot provider credential: only
+        # non-GitHub (Entra) sessions count here; GitHub Copilot availability is
+        # decided by the provider credential below.
+        or (user_session and user_session.copilot_enabled and user_session.auth_provider != "github")
+        or (settings.llm_provider == "github_copilot" and _copilot_provider_auth(settings)["status"] != "MISSING")
     )
 
 
@@ -87,6 +101,17 @@ async def get_provider_status(request: Request) -> dict[str, Any]:
         "has_microsoft_token": bool(settings.microsoft_copilot_access_token),
         "has_github_token": bool(settings.copilot_github_token),
         "has_copilot_token": has_token,
+        # Credential availability only (no secret, no model call): AVAILABLE /
+        # REFRESH_REQUIRED / MISSING for LiteLLM's native GitHub Copilot credentials.
+        "github_copilot_auth": _github_copilot_auth_status(),
+        # TWO DIFFERENT AUTHENTICATION DOMAINS, reported separately:
+        #   application_login          -> who is signed in to THIS application
+        #   copilot_provider_authentication -> whether GitHub Copilot can be used as the LLM
+        "application_login": {
+            "authenticated": bool(user_session),
+            "auth_provider": user_session.auth_provider if user_session else None,
+        },
+        "copilot_provider_authentication": _copilot_provider_auth(settings),
         "authenticated": bool(user_session),
         "auth_provider": user_session.auth_provider if user_session else None,
         "details": status,
