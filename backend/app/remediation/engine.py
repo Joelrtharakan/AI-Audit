@@ -621,42 +621,19 @@ async def estimate_remediation_cost(
         # validation, so a genuine verified price is never dropped as
         # "unsupported" merely because it was cited by the finding's own label.
         # Pure structural id bookkeeping -- no semantic interpretation.
-        _ref_alias: dict[str, str] = {}
-        _label_re = re.compile(r"^\s*([A-Za-z]{1,4}\s?\d+)\s*[:.)\]\-]")
-        # Labels the FINDING TEXT itself assigns to its claims, in order
-        # ("C1: ... C2: ... C3: ..."). The k-th distinct label lines up with the
-        # k-th evidence item the pipeline derived from those claims.
-        _text_labels: list[str] = []
-        for _lab in re.findall(r"\b([A-Za-z]{1,3}\s?\d{1,3})\s*[:.)\]\-]", str(finding_text or "")):
-            _u = _lab.replace(" ", "").upper()
-            if _u not in _text_labels:
-                _text_labels.append(_u)
-        for _i, _item in enumerate(evidence_ledger):
-            _eid = f"E{_i}"
-            _claim = getattr(_item, "claim", None) or getattr(_item, "text", "") or ""
-            _m = _label_re.match(str(_claim))
-            if _m:
-                _lab = _m.group(1).replace(" ", "").upper()
-                _ref_alias.setdefault(_lab, _eid)
-            if _i < len(_text_labels):
-                _ref_alias.setdefault(_text_labels[_i], _eid)
-            # also accept a bare index / 1-based index, and the common
-            # claim-label forms C<n>/E<n> keyed 1-based to this position.
-            _ref_alias.setdefault(str(_i), _eid)
-            _ref_alias.setdefault(str(_i + 1), _eid)
-            _ref_alias.setdefault(f"C{_i + 1}", _eid)
-        # Common ways a model refers to the finding text itself -> the reserved
-        # "FINDING" id (spec Pass 51 section 6). Structural id bookkeeping only.
-        for _alias in ("FINDING", "FINDINGTEXT", "THEFINDING", "F0", "F1", "FIND"):
-            _ref_alias.setdefault(_alias, "FINDING")
-        if _ref_alias:
-            def _canon_ref(r: str) -> str:
-                rr = str(r or "").strip()
-                return _ref_alias.get(rr.replace(" ", "").upper(), rr)
-            for _c in interp.cost_components:
-                _c.source_reference_ids = [_canon_ref(r) for r in (_c.source_reference_ids or [])]
-            for _a in interp.activities:
-                _a.source_reference_ids = [_canon_ref(r) for r in (getattr(_a, "source_reference_ids", []) or [])]
+        from app.services.evidence_ids import build_registry
+        _registry = build_registry(evidence_ledger, finding_text)
+        # Structural id bookkeeping only (see app.services.evidence_ids): resolve a
+        # model-emitted reference to the internal handle by the evidence's OWN
+        # stated label; unresolvable references are kept verbatim (never guessed)
+        # so the validator can reject/flag them.
+        def _canon_ref(r: str) -> str:
+            rr = str(r or "").strip()
+            return _registry.resolve(rr) or rr
+        for _c in interp.cost_components:
+            _c.source_reference_ids = [_canon_ref(r) for r in (_c.source_reference_ids or [])]
+        for _a in interp.activities:
+            _a.source_reference_ids = [_canon_ref(r) for r in (getattr(_a, "source_reference_ids", []) or [])]
         components, proposals, outcome = validate_and_plan(
             interp,
             valid_evidence_ids=valid_evidence_ids,
@@ -677,10 +654,16 @@ async def estimate_remediation_cost(
 
     _priced_ids = {c.component_id for c in components} - set(est.unpriced_component_ids)
 
-    # --- Overall status.
-    has_evidence_backed_component = any(
-        c.unit_cost_basis in ("VERIFIED", "REPORTED") or c.quantity_basis in ("EVIDENCED", "DERIVED")
-        for c in components
+    # --- Overall status. Phase 9.5 Defect 1: this must agree with
+    # `est.estimate_classification` -- which already applies the correct
+    # "weakest basis wins" rule (app.remediation.calculator._classify) -- not
+    # a separate, weaker "ANY component is evidence-backed" check. The old
+    # `any(...)` rule let a single small VERIFIED/REPORTED driver label the
+    # WHOLE total "EVIDENCE_BACKED" / MEDIUM confidence even when the
+    # dominant-value driver was only ESTIMATED/ASSUMED (e.g. a BELIEF-priced
+    # component capped to ESTIMATED) -- overstating support for the total.
+    has_evidence_backed_component = est.estimate_classification in (
+        CostBasis.VERIFIED, CostBasis.REPORTED,
     )
     bounded = (
         est.most_likely is not None
@@ -989,6 +972,11 @@ async def estimate_remediation_cost(
         )
 
     result.remediation_strategy = _framed_strategy
+    try:
+        _used = {r for c in components for r in c.source_reference_ids} | set(result.evidence_basis or [])
+        result.evidence_labels = {r: _registry.display(r) for r in sorted(_used)}
+    except NameError:  # registry only exists on the validated path
+        pass
     result.unresolved_pricing_drivers = [
         RemediationUnresolvedDriver(component_id=d.component_id, description=d.description)
         for d in _unresolved_drivers

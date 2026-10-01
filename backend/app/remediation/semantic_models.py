@@ -162,6 +162,13 @@ class RemediationCostComponent(BaseModel):
         "OBSERVED_FINANCIAL_LOSS", "HISTORICAL_EXPENDITURE", "OTHER", "NOT_ESTABLISHED",
     ] = "NOT_ESTABLISHED"
     quantity: float | None = None
+    # Optional LLM-expressed range on the QUANTITY itself (e.g. "70-110
+    # hours" at a single fixed rate) -- symmetric to unit_cost_low/high
+    # below, which ranges the RATE instead. Either side of a multiplying
+    # component may be ranged independently; the calculator propagates
+    # whichever bound(s) are actually present (Phase 9.7 §2).
+    quantity_low: float | None = None
+    quantity_high: float | None = None
     quantity_unit: str | None = None
     quantity_basis: QuantityBasisStr = "NOT_ESTABLISHED"
     # Required when quantity_basis == "DERIVED": the LLM's transparent, one-line
@@ -192,7 +199,7 @@ class RemediationCostComponent(BaseModel):
     interpretation_confidence: Confidence = "LOW"
     rationale: str = ""
 
-    @field_validator("quantity", "unit_cost", "unit_cost_low", "unit_cost_high", mode="before")
+    @field_validator("quantity", "quantity_low", "quantity_high", "unit_cost", "unit_cost_low", "unit_cost_high", mode="before")
     @classmethod
     def _finite_value(cls, v: Any) -> float | None:
         return _finite(v)

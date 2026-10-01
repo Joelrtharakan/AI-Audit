@@ -17,7 +17,7 @@ import datetime as dt
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from app.financial.models import FinancialAnalysisResult
 from app.models.autonomy import AutonomyDecision
@@ -1438,6 +1438,11 @@ class InvestigationQuestion(BaseModel):
     causal_level: str | None = None
     unresolved_relation: str | None = None
     information_gain_rank: int | None = None
+    # Phase 9.9: identity of the canonical semantic gap this question renders
+    # (SemInvestigationStep.gap_id). None for questions from paths that have no
+    # canonical gap. Two questions with the same gap_id are the SAME gap.
+    gap_id: str | None = None
+    gap_status: str | None = None
     # Phase 14 Section 5: deterministic ordinal information-gain classification
     # for a graph-grounded question, computed ONLY from the number of
     # proposition_ids structurally backing its target causal-uncertainty edge
@@ -1476,6 +1481,30 @@ class InvestigationPlan(BaseModel):
     areas: list[str] = []
     questions: list[InvestigationQuestion] = []
     evidence_to_collect: list[str] = []
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def unlinked_evidence(self) -> list[str]:
+        """Evidence-to-collect items NOT already attached to a question, by exact
+        (whitespace/case-normalised) string identity -- so a section can show
+        what is still open without repeating evidence already rendered under a
+        question. Structural identity only; no wording is compared."""
+        def _n(x: str | None) -> str:
+            return " ".join((x or "").split()).casefold()
+        attached = {
+            _n(e) for q in list(self.questions) + list(self.root_cause_questions)
+            + list(self.detection_control_questions) + list(self.financial_questions)
+            + list(self.systemic_questions)
+            for e in (q.evidence_required, q.evidence) if e
+        }
+        out: list[str] = []
+        seen: set[str] = set()
+        for e in self.evidence_to_collect:
+            k = _n(e)
+            if k and k not in attached and k not in seen:
+                seen.add(k)
+                out.append(e)
+        return out
     root_cause_questions: list[InvestigationQuestion] = []
     detection_control_questions: list[InvestigationQuestion] = []
     financial_questions: list[InvestigationQuestion] = []
@@ -1849,6 +1878,10 @@ class InvestigationReport(BaseModel):
     # over. `canonical_semantic_status` records WHY, for internal diagnostics.
     semantic_mode: Literal["CANONICAL_LLM", "DETERMINISTIC_FALLBACK", "DETERMINISTIC"] = "DETERMINISTIC"
     canonical_semantic_status: str = "NOT_ATTEMPTED"
+    # Phase 9.9: structural contradiction codes from the canonical consistency
+    # review (and regeneration log). Codes only -- never prose. Non-empty =>
+    # the review contract carries SEMANTIC_CONSISTENCY_ISSUES.
+    semantic_consistency_issues: list[str] = Field(default_factory=list)
     evidence_completeness: EvidenceCompleteness = EvidenceCompleteness.COMPLETE
     root_cause: RootCauseAnalysis
     contributing_factors: list[ContributingFactor] = []

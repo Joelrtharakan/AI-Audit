@@ -1,5 +1,5 @@
 {
-  "certificate_id": "d1ed80708c18f28ce2c37254",
+  "certificate_id": "f63510bf8ba8f65f0eb41360",
   "identity": {
     "provider": "ollama",
     "model": "qwen3:8b",
@@ -9,7 +9,7 @@
     "inference_config_hash": "b26993598dffd1f1",
     "benchmark_hash": "038066fd75ec4623"
   },
-  "generated_at": 1789980427.262461,
+  "generated_at": 1790320490.866534,
   "correct_count": 16,
   "safe_abstention_count": 0,
   "caught_error_count": 6,

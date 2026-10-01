@@ -708,21 +708,28 @@ _DECLARATIVE_PAST_VERB_RE = re.compile(
 
 
 def _strip_redundant_subject_echo(subject: str, rest: str) -> str:
-    """If `rest` ends with the SAME noun phrase already extracted as
-    `subject` (a source sentence like "X were found to be inadequate X"),
-    drop that trailing echo before composing the question. Pure string-level
-    deduplication between two spans ALREADY extracted from the same
-    sentence -- never an inference about what the finding means -- so
-    "Why were X inadequate X?" realizes as "Why were X inadequate?" instead
-    of restating the subject twice. Leaves `rest` untouched when no exact
-    echo is present, for any subject/domain."""
+    """If `rest` begins OR ends with the SAME noun phrase already extracted
+    as `subject` (a source sentence like "X were found to be inadequate X",
+    or a condition phrase already headed by its own subject like
+    "X overdue"), drop that echo before composing the question. Pure
+    string-level deduplication between two spans ALREADY extracted from the
+    same sentence -- never an inference about what the finding means -- so
+    neither "Why were X inadequate X?" nor "Why was X X overdue?" restates
+    the subject twice. Leaves `rest` untouched when no exact echo is
+    present, or when stripping would leave nothing, for any subject/domain."""
     subj_norm = re.sub(r"^(?:the|a|an)\s+", "", subject.strip(), flags=re.IGNORECASE).rstrip(".")
     if not subj_norm:
         return rest
     rest_stripped = rest.rstrip(".")
-    pattern = re.compile(rf"(?:^|\s)(?:the|a|an)?\s*{re.escape(subj_norm)}\s*$", re.IGNORECASE)
-    new_rest = pattern.sub("", rest_stripped).rstrip()
-    return new_rest if new_rest else rest
+    trailing = re.compile(rf"(?:^|\s)(?:the|a|an)?\s*{re.escape(subj_norm)}\s*$", re.IGNORECASE)
+    new_rest = trailing.sub("", rest_stripped).rstrip()
+    if new_rest and new_rest != rest_stripped:
+        return new_rest
+    leading = re.compile(rf"^(?:the|a|an)?\s*{re.escape(subj_norm)}\s+", re.IGNORECASE)
+    m = leading.match(rest_stripped)
+    if m and len(rest_stripped) > m.end():
+        return rest_stripped[m.end():].rstrip()
+    return rest
 
 
 def _lower_leading_word(text: str) -> str:
@@ -850,12 +857,20 @@ def deviation_as_clause(deviation: str | None) -> str:
     s = (deviation or "").strip().rstrip(".")
     if not s:
         return s
+
+    def _lower_lead(t: str) -> str:
+        # Never mid-sentence-capitalize an ordinary word ("The ventilation
+        # system...") when this clause is embedded after "...establishes
+        # that {clause}" -- but never touch a genuine acronym/identifier
+        # (an all-caps leading word).
+        return t[0].lower() + t[1:] if t[:1].isupper() and not t.split()[0].isupper() else t
+
     parts = re.split(r"\s+[—–-]{1,2}\s+", s, maxsplit=1)
     if len(parts) != 2:
-        return s
+        return _lower_lead(s)
     subj, cond = parts[0].strip(), parts[1].strip()
     if not subj or not cond:
-        return s
+        return _lower_lead(s)
     # condition already carries a verb ("was not completed", "did not meet ...")
     if re.match(r"^(?:was|were|is|are|has|have|had|did|does|do|not\b)", cond, re.IGNORECASE):
         aux = ""

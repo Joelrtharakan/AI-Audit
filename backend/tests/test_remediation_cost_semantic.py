@@ -327,3 +327,178 @@ async def test_report_generator_populates_remediation_cost(monkeypatch):
     assert report.remediation_cost is not report.financial_analysis
 
     get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.5 Defect 1: overall cost status/confidence must agree with
+# `estimate_classification` (which already applies "weakest basis wins") --
+# not a separate, weaker "ANY component is evidence-backed" rule. A single
+# small VERIFIED/REPORTED driver must not label a total EVIDENCE_BACKED /
+# MEDIUM confidence when the dominant-value driver is only BELIEF-derived
+# (capped to ESTIMATED). Domain-neutral: guard installation / inspection /
+# service call is illustrative, not a hardcoded scenario.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_dominant_belief_priced_component_prevents_evidence_backed_overall_status():
+    interp = {
+        "strategy": {"remediation_summary": "Install guards and inspect."},
+        "activities": [
+            {"activity_id": "A0", "description": "Install physical guards", "disposition": "CORRECTIVE_ACTION",
+             "depends_on_root_cause": False, "derived_from": "FINDING"},
+            {"activity_id": "A1", "description": "Independent engineering inspection", "disposition": "CORRECTIVE_ACTION",
+             "depends_on_root_cause": False, "derived_from": "FINDING"},
+        ],
+        "cost_components": [
+            {"component_id": "C1", "description": "Guard installation per unit", "activity_ids": ["A0"],
+             "cost_category": "labor", "value_kind": "UNIT_RATE", "amount_type": "PER_UNIT",
+             "recurrence": "ONE_TIME", "unit_cost_basis": "REPORTED", "unit_cost": 38000, "quantity": 3,
+             "quantity_unit": "unit", "quantity_basis": "EVIDENCED", "currency": "INR",
+             "source_reference_ids": ["E0"]},
+            {"component_id": "C2", "description": "Engineering inspection", "activity_ids": ["A1"],
+             "cost_category": "labor", "value_kind": "REMEDIATION_COST", "amount_type": "COMPONENT",
+             "recurrence": "ONE_TIME", "unit_cost_basis": "VERIFIED", "unit_cost": 12000, "currency": "INR",
+             "source_reference_ids": ["E1"]},
+        ],
+        "calculation_proposals": [], "overall_status": "EVIDENCE_BACKED",
+    }
+    ledger = [
+        _ev("A contractor stated an approximate rate for guard installation.", EvidenceStatus.BELIEF),
+        _ev("An invoice confirms the engineering inspection cost.", EvidenceStatus.VERIFIED),
+    ]
+    rc = await _run(interp, ledger, finding="Physical guards were missing on three units.")
+    # dominant driver (114000 of 126000) is BELIEF-derived -> capped ESTIMATED
+    assert rc.estimate_classification == CostBasis.ESTIMATED
+    # overall status/confidence must agree with that weakest-basis result,
+    # never independently claim evidence-backed support for the total
+    assert rc.status == RemediationEstimateStatus.ASSUMPTION_BASED
+    assert str(rc.confidence).split(".")[-1] in ("LOW", "NOT_ASSESSABLE")
+
+
+@pytest.mark.asyncio
+async def test_all_verified_or_reported_components_remain_evidence_backed():
+    interp = {
+        "strategy": {"remediation_summary": "Replace part and inspect."},
+        "activities": [{"activity_id": "A0", "description": "Replace and inspect", "disposition": "CORRECTIVE_ACTION",
+                        "depends_on_root_cause": False, "derived_from": "FINDING"}],
+        "cost_components": [
+            {"component_id": "C1", "description": "Replacement part", "activity_ids": ["A0"],
+             "cost_category": "materials", "value_kind": "REMEDIATION_COST", "amount_type": "COMPONENT",
+             "recurrence": "ONE_TIME", "unit_cost_basis": "VERIFIED", "unit_cost": 5000, "currency": "INR",
+             "source_reference_ids": ["E0"]},
+            {"component_id": "C2", "description": "Inspection labor", "activity_ids": ["A0"],
+             "cost_category": "labor", "value_kind": "REMEDIATION_COST", "amount_type": "COMPONENT",
+             "recurrence": "ONE_TIME", "unit_cost_basis": "REPORTED", "unit_cost": 2000, "currency": "INR",
+             "source_reference_ids": ["E1"]},
+        ],
+        "calculation_proposals": [], "overall_status": "EVIDENCE_BACKED",
+    }
+    ledger = [
+        _ev("An invoice confirms the replacement part cost.", EvidenceStatus.VERIFIED),
+        _ev("A technician reported the inspection labor cost.", EvidenceStatus.REPORTED),
+    ]
+    rc = await _run(interp, ledger, finding="A worn part was found and requires replacement.")
+    assert rc.estimate_classification in (CostBasis.VERIFIED, CostBasis.REPORTED)
+    assert rc.status == RemediationEstimateStatus.EVIDENCE_BACKED
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.5 Defect 2: a recurring cost present in the evidence must never
+# silently disappear, and must not acquire an invented horizon/total.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_recurring_component_is_reported_separately_not_folded_into_one_time():
+    interp = {
+        "strategy": {"remediation_summary": "One-time fix plus an ongoing service."},
+        "activities": [
+            {"activity_id": "A0", "description": "One-time corrective work", "disposition": "CORRECTIVE_ACTION",
+             "depends_on_root_cause": False, "derived_from": "FINDING"},
+            {"activity_id": "A1", "description": "Ongoing monthly service", "disposition": "CORRECTIVE_ACTION",
+             "depends_on_root_cause": False, "derived_from": "FINDING"},
+        ],
+        "cost_components": [
+            {"component_id": "C1", "description": "One-time corrective work", "activity_ids": ["A0"],
+             "cost_category": "labor", "value_kind": "REMEDIATION_COST", "amount_type": "COMPONENT",
+             "recurrence": "ONE_TIME", "unit_cost_basis": "VERIFIED", "unit_cost": 10000, "currency": "INR",
+             "source_reference_ids": ["E0"]},
+            {"component_id": "C2", "description": "Monthly service", "activity_ids": ["A1"],
+             "cost_category": "services", "value_kind": "REMEDIATION_COST", "amount_type": "COMPONENT",
+             "recurrence": "RECURRING", "recurring_period": "month", "unit_cost_basis": "REPORTED",
+             "unit_cost": 3500, "currency": "INR", "source_reference_ids": ["E1"]},
+        ],
+        "calculation_proposals": [], "overall_status": "EVIDENCE_BACKED",
+    }
+    ledger = [
+        _ev("An invoice confirms the one-time corrective work cost.", EvidenceStatus.VERIFIED),
+        _ev("A vendor quote states the monthly service cost.", EvidenceStatus.REPORTED),
+    ]
+    rc = await _run(interp, ledger, finding="A corrective fix plus an ongoing monthly service is required.")
+    assert rc.one_time_cost == 10000.0
+    assert rc.recurring_cost == 3500.0
+    assert rc.recurring_period and "month" in rc.recurring_period
+    # no fabricated horizon/total for the recurring component
+    assert rc.recurring_horizon_total is None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.6 §4: multi-machine labor + consumables (BELIEF) + a verified
+# recurring monitoring service must combine additively for the one-time
+# subtotal, keep the recurring cost separate with no fabricated horizon, and
+# never let the VERIFIED recurring price upgrade the BELIEF-derived
+# one-time components' epistemic status. Domain-neutral scenario -- the
+# machine/labor/consumable/service nouns are illustrative test data only.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_multi_unit_labor_and_consumables_plus_verified_recurring_service():
+    interp = {
+        "strategy": {"remediation_summary": "Perform overdue preventive maintenance and monitor."},
+        "activities": [
+            {"activity_id": "A0", "description": "Perform overdue maintenance labor", "disposition": "CORRECTIVE_ACTION",
+             "depends_on_root_cause": False, "derived_from": "FINDING"},
+            {"activity_id": "A1", "description": "Replace consumables", "disposition": "CORRECTIVE_ACTION",
+             "depends_on_root_cause": False, "derived_from": "FINDING"},
+            {"activity_id": "A2", "description": "Condition-monitoring service", "disposition": "CORRECTIVE_ACTION",
+             "depends_on_root_cause": False, "derived_from": "FINDING"},
+        ],
+        "cost_components": [
+            {"component_id": "C1", "description": "Technician labor across the unit group", "activity_ids": ["A0"],
+             "cost_category": "labor", "value_kind": "UNIT_RATE", "amount_type": "PER_HOUR",
+             "recurrence": "ONE_TIME", "unit_cost_basis": "REPORTED", "unit_cost": 1100, "quantity": 45,
+             "quantity_unit": "hour", "quantity_basis": "EVIDENCED", "currency": "INR",
+             "source_reference_ids": ["E0"]},
+            {"component_id": "C2", "description": "Replacement consumables across the unit group", "activity_ids": ["A1"],
+             "cost_category": "materials", "value_kind": "UNIT_RATE", "amount_type": "PER_UNIT",
+             "recurrence": "ONE_TIME", "unit_cost_basis": "REPORTED", "unit_cost": 6500, "quantity": 9,
+             "quantity_unit": "unit", "quantity_basis": "EVIDENCED", "currency": "INR",
+             "source_reference_ids": ["E1"]},
+            {"component_id": "C3", "description": "Condition-monitoring service for the unit group", "activity_ids": ["A2"],
+             "cost_category": "services", "value_kind": "REMEDIATION_COST", "amount_type": "COMPONENT",
+             "recurrence": "RECURRING", "recurring_period": "month", "unit_cost_basis": "VERIFIED",
+             "unit_cost": 14000, "currency": "INR", "source_reference_ids": ["E2"]},
+        ],
+        "calculation_proposals": [], "overall_status": "EVIDENCE_BACKED",
+    }
+    ledger = [
+        _ev("A manager estimates technician-hours and a per-hour rate for the maintenance work.", EvidenceStatus.BELIEF),
+        _ev("A manager estimates a per-unit consumables cost.", EvidenceStatus.BELIEF),
+        _ev("A vendor contract confirms the monitoring service price.", EvidenceStatus.VERIFIED),
+    ]
+    rc = await _run(interp, ledger, finding="Nine units have overdue preventive maintenance.")
+    assert rc.one_time_cost == 108000.0  # 45*1100 + 9*6500
+    assert rc.recurring_cost == 14000.0
+    assert rc.recurring_period and "month" in rc.recurring_period
+    assert rc.recurring_horizon_total is None
+    # a VERIFIED recurring price must not upgrade the BELIEF-derived one-time
+    # components' overall epistemic classification
+    assert rc.estimate_classification == CostBasis.ESTIMATED
+    assert rc.status == RemediationEstimateStatus.ASSUMPTION_BASED
+    labor = next(c for c in rc.cost_components if c.component_id == "C1")
+    consumables = next(c for c in rc.cost_components if c.component_id == "C2")
+    service = next(c for c in rc.cost_components if c.component_id == "C3")
+    assert labor.unit_cost_basis == CostBasis.ESTIMATED
+    assert consumables.unit_cost_basis == CostBasis.ESTIMATED
+    assert service.unit_cost_basis == CostBasis.VERIFIED
+    assert "45 hours" in (labor.calculation_formula or "")
+    assert "9 units" in (consumables.calculation_formula or "")

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from typing import Any
 
+from app.auth import require_internal_api_key
 from app.config import get_settings
 from app.services import llm_metrics
 from app.services.llm import get_llm_provider
@@ -114,8 +115,8 @@ async def get_provider_status(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/api/v1/provider")
-@router.post("/health/provider")
+@router.post("/api/v1/provider", dependencies=[Depends(require_internal_api_key)])
+@router.post("/health/provider", dependencies=[Depends(require_internal_api_key)])
 async def switch_provider(payload: SwitchProviderRequest, request: Request) -> dict[str, Any]:
     """Dynamically switch the active LLM provider (Ollama vs Microsoft 365 Copilot)."""
     settings = get_settings()

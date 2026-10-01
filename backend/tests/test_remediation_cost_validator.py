@@ -155,3 +155,35 @@ def test_belief_cap_does_not_touch_an_already_estimated_basis():
     )
     assert comps[0].unit_cost_basis == "ESTIMATED"
     assert not any("belief" in d.lower() for d in outcome.llm_disagreements)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.5 Defect 3: evidence-reference integrity across namespaces --
+# component identifiers (C<n>) and evidence-ledger identifiers (E<n>) are
+# DIFFERENT namespaces; a component referencing an E-id that does not exist
+# in the evidence ledger must be stripped and flagged, never silently
+# displayed as if it resolved.
+# --------------------------------------------------------------------------- #
+
+def test_evidence_reference_from_a_different_namespace_is_rejected_not_displayed():
+    interp = _interp([{
+        "component_id": "C1", "description": "labor", "cost_category": "labor",
+        "unit_cost": 5000, "unit_cost_basis": "REPORTED", "currency": "INR",
+        "amount_type": "TOTAL", "source_reference_ids": ["E7"],  # E7 not in the 2-item ledger (E0/E1)
+    }])
+    comps, _, outcome = validate_and_plan(interp, {"E0", "E1"})
+    assert comps[0].source_reference_ids == []
+    assert any("E7" in d and "do not exist" in d for d in outcome.llm_disagreements)
+
+
+def test_component_id_is_never_mistaken_for_an_evidence_id():
+    # A component citing another COMPONENT id (a causal-graph-style node id,
+    # not an evidence id) as its evidence must not be treated as resolved.
+    interp = _interp([{
+        "component_id": "C2", "description": "materials", "cost_category": "materials",
+        "unit_cost": 2000, "unit_cost_basis": "REPORTED", "currency": "INR",
+        "amount_type": "TOTAL", "source_reference_ids": ["C1"],
+    }])
+    comps, _, outcome = validate_and_plan(interp, {"E0", "E1"})
+    assert comps[0].source_reference_ids == []
+    assert any("C1" in d for d in outcome.llm_disagreements)

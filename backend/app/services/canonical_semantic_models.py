@@ -225,6 +225,14 @@ class SemInvestigationStep(BaseModel):
     decision_enabled: str | None = None
     related_hypothesis_ids: list[str] = Field(default_factory=list)
     priority: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
+    # Phase 9.9: this step IS the canonical representation of one semantic
+    # investigation gap. `gap_id` is its stable identity (assigned by the model,
+    # or by the validator as G<n> when missing/duplicated); downstream sections
+    # (plan question, evidence list, investigation areas) render THIS gap and
+    # never regenerate an equivalent one. `unknown` = description,
+    # `why_it_matters` = objective, `evidence_that_would_resolve` = evidence.
+    gap_id: str | None = None
+    status: Literal["OPEN", "RESOLVED_BY_EVIDENCE", "NOT_APPLICABLE"] = "OPEN"
 
 
 class SemRemediationAction(BaseModel):
@@ -262,6 +270,51 @@ class SemRemediationAction(BaseModel):
     depends_on_root_cause: bool = False
     pricing_evidence_needed: str | None = None
     scope_evidence_needed: str | None = None
+    # Phase 9.8: lifecycle status of the action. PROPOSED is the safe default --
+    # a recommendation is never an authorized or completed action. AUTHORIZED /
+    # COMPLETED are LLM claims that must cite evidence ids; the structural
+    # validator demotes an uncited claim to PROPOSED (provenance check, not
+    # a reading of the action text).
+    action_status: Literal[
+        "PROPOSED", "RECOMMENDED", "AUTHORIZED", "COMPLETED", "NOT_ESTABLISHED",
+    ] = "PROPOSED"
+    action_status_evidence_ids: list[str] = Field(default_factory=list)
+
+
+class SemImpact(BaseModel):
+    """Impact state as the LLM reasons it from the evidence. `status`
+    separates an impact the evidence OBSERVED from one that is merely
+    POTENTIAL; NOT_ESTABLISHED / REQUIRES_ASSESSMENT preserve uncertainty
+    rather than letting domain plausibility stand in for a consequence.
+    `categories` are the impact dimensions the LLM says apply (process,
+    quality, safety, regulatory, financial, ...), free-form by design."""
+
+    status: Literal[
+        "OBSERVED", "POTENTIAL", "NOT_ESTABLISHED", "REQUIRES_ASSESSMENT",
+    ] = "NOT_ESTABLISHED"
+    categories: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class SemSelfReview(BaseModel):
+    """The model's own critique of its structured output (Phase 9.8 §21).
+    Each flag is a question the model answers about ITS OWN output; any
+    `True` is an admission of a defect and routes the result to human review
+    / regeneration. Defaults are the clean answer so omission is neutral."""
+
+    introduced_unsupported_fact: bool = False
+    confused_observation_with_cause: bool = False
+    promoted_belief_to_verified: bool = False
+    lost_material_evidence: bool = False
+    lost_cost_component: bool = False
+    merged_one_time_and_recurring: bool = False
+    collapsed_range: bool = False
+    invented_horizon: bool = False
+    invented_process_or_object: bool = False
+    unsupported_investigation_question: bool = False
+    claimed_action_authorized_or_completed_without_evidence: bool = False
+    went_past_evidence_boundary: bool = False
+    notes: list[str] = Field(default_factory=list)
 
 
 class SemPricingItem(BaseModel):
@@ -386,6 +439,19 @@ class CanonicalFindingContext(BaseModel):
     # genuine `remediation_activities` entry -- the validator drops any that
     # point at investigation work or nothing.
     pricing_information: list[SemPricingItem] = Field(default_factory=list)
+
+    # Phase 9.8: impact state + the model's self-critique + the structural
+    # consistency review result (written by canonical_consistency_review, never
+    # by the LLM). `review_required` is set when a structural contradiction
+    # was detected; the LLM output is preserved, not rewritten.
+    impact: SemImpact | None = None
+    self_review: SemSelfReview | None = None
+    consistency_issues: list[str] = Field(default_factory=list)
+    review_required: bool = False
+    # Written by the interpreter when a regeneration pass ran: the ORIGINAL
+    # issue codes (never silently dropped) and, if a retry was rejected, the
+    # high-risk fields on which it diverged. Any entry forces human review.
+    regeneration_log: list[str] = Field(default_factory=list)
 
     # The unchanged financial semantic layer from the previous pass.
     financial: SemanticFindingInterpretation = Field(default_factory=SemanticFindingInterpretation)

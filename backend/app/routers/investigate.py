@@ -41,13 +41,14 @@ from app.services.llm_client import (
     LLMError,
     NoLLMProviderConfiguredError,
 )
+from app.services.rate_limiter import enforce_investigation_rate_limit
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/v1",
     tags=["investigate"],
-    dependencies=[Depends(require_internal_api_key)],
+    dependencies=[Depends(require_internal_api_key), Depends(enforce_investigation_rate_limit)],
 )
 
 # (marker text, label) -- matched against AgentTraceStep.message to bound

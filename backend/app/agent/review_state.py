@@ -89,8 +89,20 @@ def derive_review_state(report: InvestigationReport) -> ReviewState:
                      "At least one remediation cost component has unresolved recurrence.")
                 break
 
+    # --- canonical semantic consistency (structural codes only) -------------
+    if getattr(report, "semantic_consistency_issues", None):
+        _add(reasons, "SEMANTIC_CONSISTENCY_ISSUES",
+             "The model's structured output contained internal contradictions or unresolved "
+             "evidence references (" + ", ".join(report.semantic_consistency_issues[:6]) + ").")
+
     # --- financial exposure ---------------------------------------------
     fin = report.financial_analysis
+    if fin is not None and getattr(fin, "reasoning_source", "NONE") in (
+        "DETERMINISTIC_REGEX", "DETERMINISTIC_FALLBACK_LEGACY"
+    ):
+        _add(reasons, "FINANCIAL_SEMANTICS_NOT_LLM_VERIFIED",
+             "Monetary figures were extracted deterministically; their semantic role (remediation, "
+             "loss, recurring, estimate) was not established by the LLM and must be confirmed.")
     if fin is not None and getattr(fin, "financial_semantic_status", "OK") in _TRANSIENT_LLM:
         _add(reasons, "FINANCIAL_MODEL_FAILURE",
              f"Financial-exposure model status: {fin.financial_semantic_status}.")

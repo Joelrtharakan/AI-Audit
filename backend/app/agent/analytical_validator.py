@@ -1331,7 +1331,10 @@ def sync_five_why_status_with_causal_state(
 
     targets: list[tuple[str, str]] = []  # (statement, resolved_status)
     if mechanism and mechanism.statement and mechanism.status in ("VERIFIED", "REPORTED"):
-        targets.append((mechanism.statement, "VERIFIED" if mechanism.status == "VERIFIED" else "SUPPORTED"))
+        # Epistemic fidelity (Phase 9.9): a REPORTED mechanism is someone's
+        # account, not independently established -- the step carries the
+        # reported status, never SUPPORTED (INV-CAUSAL-REPORTED-002/005/006).
+        targets.append((mechanism.statement, "VERIFIED" if mechanism.status == "VERIFIED" else "REPORTED_UNVERIFIED"))
     rc_status = getattr(getattr(root_cause, "status", None), "value", getattr(root_cause, "status", None))
     if leading_stmt and rc_status in ("ESTABLISHED", "SUPPORTED", "VERIFIED"):
         targets.append((leading_stmt, "VERIFIED" if rc_status in ("ESTABLISHED", "VERIFIED") else "SUPPORTED"))

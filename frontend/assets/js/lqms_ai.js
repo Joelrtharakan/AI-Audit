@@ -49,6 +49,27 @@
     // already-parsed response text, so there is no place left for a literal \uXXXX
     // string to survive to the DOM. escapeHtml() below only HTML-escapes for safe
     // insertion; it does not touch unicode content.
+    // Presentation boundary: internal enum values (UNKNOWN, NOT_ESTABLISHED,
+    // REPORTED_UNVERIFIED, ...) are never shown raw in natural-language output.
+    // Generic humanizer -- no per-value special cases: underscores become
+    // spaces, sentence case. A few labels that read better than the
+    // mechanical form are listed explicitly; anything else falls through.
+    var STATUS_LABELS = {
+        UNKNOWN: "Unknown", NOT_ESTABLISHED: "Not established", REQUIRES_EVIDENCE: "Requires evidence",
+        REPORTED_UNVERIFIED: "Reported, unverified", REPORTED_STATEMENT: "Reported statement",
+        VERIFIED: "Verified", SUPPORTED: "Supported", BELIEF: "Belief", ESTIMATED: "Estimated",
+        INFERRED: "Inferred", PROPOSED: "Proposed", RECOMMENDED: "Recommended",
+        AUTHORIZED: "Authorized", COMPLETED: "Completed", NOT_ASSESSABLE: "Not assessable",
+        REQUIRES_ASSESSMENT: "Requires assessment", HIGH: "High", MEDIUM: "Medium", LOW: "Low"
+    };
+    function statusLabel(v) {
+        if (v === null || v === undefined || v === "") return "";
+        var key = String(v).trim();
+        if (STATUS_LABELS.hasOwnProperty(key)) return STATUS_LABELS[key];
+        var t = key.replace(/_/g, " ").toLowerCase();
+        return t.charAt(0).toUpperCase() + t.slice(1);
+    }
+
     function escapeHtml(text) {
         return $("<div/>").text(text || "").html();
     }
@@ -69,6 +90,22 @@
     }
 
     function safeEsc(val) { return escapeHtml(safeStr(val)); }
+
+    // General English count-agreement for a quantity-unit noun ("hour",
+    // "machine") -- pure grammar (does the count equal 1?), never an
+    // inspection of what the unit word means. Mirrors
+    // app.remediation.calculator._pluralize_unit on the backend so the
+    // same "45 hour" -> "45 hours" fix applies wherever quantity/unit is
+    // rendered directly instead of through the backend-formatted formula.
+    function pluralizeUnit(unit, count) {
+        if (!unit || Math.abs(Number(count) - 1) < 1e-9) return unit;
+        var lower = String(unit).toLowerCase();
+        if (/[sxz]$|ch$|sh$/.test(lower)) return unit + "es";
+        if (/y$/.test(lower) && unit.length > 1 && "aeiou".indexOf(lower[lower.length - 2]) === -1) {
+            return unit.slice(0, -1) + "ies";
+        }
+        return unit + "s";
+    }
 
     function addAiBadge($field) {
         $field.attr(AI_POPULATED_FLAG, "1");
@@ -138,7 +175,7 @@
         var impact = report.impact_assessment || {};
         var fiveWhy = report.five_why || {};
 
-        var categoryText = rc.category ? rc.category : "TO_BE_CONFIRMED";
+        var categoryText = (rc.category ? rc.category : "TO_BE_CONFIRMED").replace(/_/g, " ");
         var isDegraded = report.analysis_mode === "DEGRADED";
 
         var html = "<div style='font-family: \"Inter\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif; color: #1e293b; background: linear-gradient(145deg, #f8fafc 0%, #f1f5f9 50%, #e2e8f0 100%); border-radius: 20px; padding: 28px; box-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.08), 0 0 0 1px #cbd5e1; margin-top: 15px; margin-bottom: 25px;'>";
@@ -204,10 +241,14 @@
         // Confidence Metric Card
         html += "<div style='background:#ffffff; border:1px solid #cbd5e1; border-radius:14px; padding:16px 18px; box-shadow:0 2px 6px rgba(15,23,42,0.04);'>";
         html += "<div style='font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.8px;'>Analysis Confidence</div>";
-        html += "<div style='display:flex; gap:6px; margin-top:8px;'>";
-        html += "<span style='background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; font-size:10px; font-weight:700; padding:4px 8px; border-radius:6px;'>Obs: " + escapeHtml(report.observation_confidence || "HIGH") + "</span>";
-        html += "<span style='background:#fffbe6; color:#b45309; border:1px solid #fde68a; font-size:10px; font-weight:700; padding:4px 8px; border-radius:6px;'>RC: " + escapeHtml(report.root_cause_confidence || "LOW") + "</span>";
-        html += "<span style='background:#faf5ff; color:#7e22ce; border:1px solid #e9d5ff; font-size:10px; font-weight:700; padding:4px 8px; border-radius:6px;'>Overall: " + escapeHtml(report.overall_confidence || "MEDIUM") + "</span>";
+        // Each value is its own BLOCK row with a full label, so screen output and
+        // text extraction both keep them separate and unambiguous
+        // ("Observation Confidence: High" / "Root-Cause Confidence: Low" /
+        // "Overall Confidence: Medium"). The underlying values are untouched.
+        html += "<div style='display:flex; flex-direction:column; gap:6px; margin-top:8px;'>";
+        html += "<div style='background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; font-size:11px; font-weight:700; padding:4px 8px; border-radius:6px;'>Observation Confidence: " + escapeHtml(statusLabel(report.observation_confidence || "HIGH")) + "</div>";
+        html += "<div style='background:#fffbe6; color:#b45309; border:1px solid #fde68a; font-size:11px; font-weight:700; padding:4px 8px; border-radius:6px;'>Root-Cause Confidence: " + escapeHtml(statusLabel(report.root_cause_confidence || "LOW")) + "</div>";
+        html += "<div style='background:#faf5ff; color:#7e22ce; border:1px solid #e9d5ff; font-size:11px; font-weight:700; padding:4px 8px; border-radius:6px;'>Overall Confidence: " + escapeHtml(statusLabel(report.overall_confidence || "MEDIUM")) + "</div>";
         html += "</div>";
         html += "</div>";
 
@@ -292,7 +333,7 @@
         // --- 2. AI-Suggested Root-Cause Hypothesis Card ---
         html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
         html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
-        html += "<span style='font-weight:800; font-size:16px; color:#0f172a; letter-spacing:-0.2px;'>Root Cause Hypotheses & Causal Analysis</span>";
+        html += "<span style='font-weight:800; font-size:16px; color:#0f172a; letter-spacing:-0.2px;'>Root Cause Hypotheses & Causal Analysis</span> ";
         html += "<span style='background:#f0f9ff; color:#0284c7; font-size:11px; font-weight:700; padding:5px 14px; border-radius:20px; border:1px solid #bae6fd; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(categoryText) + "</span>";
         html += "</div>";
 
@@ -450,12 +491,17 @@
             html += "<p style='font-size:13px; color:#64748b; font-style:italic; margin-bottom:16px;'>No specific investigation questions generated.</p>";
         }
 
-        if (invEvidence.length > invQuestions.length) {
+        // Evidence already shown under a question is NOT repeated here. The server
+        // computes `unlinked_evidence` by identity (evidence not attached to any
+        // investigation question); the positional slice is only a legacy fallback
+        // for older payloads that lack the field.
+        var extraEvidence = Array.isArray(inv.unlinked_evidence) ? inv.unlinked_evidence : invEvidence.slice(invQuestions.length);
+        if (extraEvidence.length) {
             html += "<div style='background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px; font-size:12px; color:#475569;'>";
             // Phase 9.3 Issue 2: this list mixes evidence requirements with
             // unresolved facts/questions -- do not assert that every item is an
             // "artifact". Neutral label.
-            html += "<strong style='color:#0f172a;'>Additional evidence and open points to resolve during the investigation:</strong> " + escapeHtml(invEvidence.slice(invQuestions.length).join("; "));
+            html += "<strong style='color:#0f172a;'>Additional evidence and open points to resolve during the investigation:</strong> " + escapeHtml(extraEvidence.join("; "));
             html += "</div>";
         }
         html += "</div>";
@@ -484,15 +530,11 @@
                 html += "</div>";
                 html += "<div style='flex-grow:1; background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:14px 18px;'>";
                 html += "<div style='font-weight:700; font-size:14px; color:#0f172a; line-height:1.4;'>" + escapeHtml(step.question) + "</div>";
-                html += "<div style='font-size:13px; color:#334155; margin-top:8px; display:flex; align-items:center; justify-content:space-between; background:#ffffff; padding:10px 14px; border-radius:8px; border:1px solid #f1f5f9;'>";
-                html += "<span style='font-weight:500;'>↳ " + escapeHtml(step.answer || "Requires verification") + "</span>";
-                // A literal space between these two <span> elements -- flexbox
-                // spacing is visual-only and does not exist for copy/paste or
-                // any programmatic text extraction, so without it the prose
-                // sentence and the structured status badge glue together with
-                // no separator (e.g. "...can be drawn.UNKNOWN") the moment the
-                // text is extracted rather than rendered on screen.
-                html += " <span style='background:" + badgeBg + "; color:" + badgeTxt + "; border:1px solid " + badgeBorder + "; font-size:10px; font-weight:800; padding:3px 10px; border-radius:12px; flex-shrink:0; margin-left:12px; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(stStatus) + "</span>";
+                html += "<div style='font-size:13px; color:#334155; margin-top:8px; display:flex; flex-direction:column; gap:8px; background:#ffffff; padding:10px 14px; border-radius:8px; border:1px solid #f1f5f9;'>";
+                html += "<div style='font-weight:500;'>↳ " + escapeHtml(step.answer || "Requires verification") + "</div>";
+                // The status is a separate, labelled BLOCK element (never an inline
+                // sibling of the sentence) and shows a human label, not the raw enum.
+                html += "<div><span style='background:" + badgeBg + "; color:" + badgeTxt + "; border:1px solid " + badgeBorder + "; font-size:11px; font-weight:700; padding:3px 10px; border-radius:12px;'>Evidence status: " + escapeHtml(statusLabel(stStatus)) + "</span></div>";
                 html += "</div>";
                 html += "</div></div>";
             });
@@ -543,7 +585,7 @@
         html += "<div class='col-sm-6' style='margin-bottom:20px;'><div style='background:linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%); border:1px solid #dcfce7; border-radius:16px; padding:20px 22px; height:100%; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.05);'>";
         html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid #dcfce7;'>";
         html += "<h5 style='font-weight:800; color:#15803d; margin:0; font-size:16px; letter-spacing:-0.2px;'>" + areasHeading + "</h5>";
-        html += "<span style='font-size:10px; font-weight:800; background:#dcfce7; color:#15803d; padding:4px 10px; border-radius:12px; border:1px solid #bbf7d0; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(capa.status || "INVESTIGATION_REQUIRED") + "</span>";
+        html += "<span style='font-size:10px; font-weight:800; background:#dcfce7; color:#15803d; padding:4px 10px; border-radius:12px; border:1px solid #bbf7d0; text-transform:uppercase; letter-spacing:0.5px;'>" + escapeHtml(String(capa.status || "INVESTIGATION_REQUIRED").replace(/_/g, " ")) + "</span>";
         html += "</div>";
 
         var potentialAreas = (capa.potential_areas || []).filter(function(text) {
@@ -559,7 +601,12 @@
                 var clean = text.replace(/SHORT[_-]?CODE/gi, "").replace(/PLACEHOLDER/gi, "").replace(/^[_\s-]+|[_\s-]+$/g, "").trim();
                 if (!clean || clean.length < 3) return;
                 html += "<li style='margin-bottom:10px; display:flex; align-items:flex-start; gap:8px; font-weight:500;'>";
-                html += "<span style='color:#22c55e; font-weight:800;'>✔</span> <span>" + escapeHtml(clean) + "</span>";
+                // These are UNRESOLVED investigation areas / potential CAPA
+                // scope (see areasHeading above: "Cause Not Yet Established"
+                // when root cause is NOT_ESTABLISHED, "Potential" scope
+                // otherwise) -- a green checkmark is a completion cue and
+                // must never be used here; a neutral open-item marker only.
+                html += "<span style='color:#64748b; font-weight:800;'>&#9675;</span> <span>" + escapeHtml(clean) + "</span>";
                 html += "</li>";
             });
             html += "</ul>";
@@ -596,7 +643,7 @@
         html += "<div style='background:#ffffff; border-radius:16px; padding:22px 24px; box-shadow:0 10px 25px -5px rgba(0, 0, 0, 0.1); border:1px solid #e2e8f0;'>";
         html += "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #f1f5f9;'>";
         html += "<h5 style='font-weight:800; font-size:16px; color:#0f172a; margin:0; letter-spacing:-0.2px;'>Risk & Impact Assessment</h5>";
-        html += "<span style='font-size:11px; font-weight:800; background:#fef2f2; color:#dc2626; border:1px solid #fecaca; padding:5px 12px; border-radius:20px; text-transform:uppercase; letter-spacing:0.5px;'>" + safeEsc(impact.status || "REQUIRES_ASSESSMENT") + "</span>";
+        html += "<span style='font-size:11px; font-weight:800; background:#fef2f2; color:#dc2626; border:1px solid #fecaca; padding:5px 12px; border-radius:20px; text-transform:uppercase; letter-spacing:0.5px;'>" + safeEsc(String(impact.status || "REQUIRES_ASSESSMENT").replace(/_/g, " ")) + "</span>";
         html += "</div>";
 
         if (impact.narrative) {
@@ -823,7 +870,7 @@
                         if (c.is_derived) html += " &middot; <span style='color:#94a3b8;'>derived</span>";
                         html += "<br>";
                         if (rcNum(c.quantity) && rcNum(c.unit_cost)) {
-                            html += safeEsc((c.quantity).toLocaleString()) + (c.quantity_unit ? " " + safeEsc(c.quantity_unit) : "") + " &times; " + safeEsc((c.unit_cost).toLocaleString());
+                            html += safeEsc((c.quantity).toLocaleString()) + (c.quantity_unit ? " " + safeEsc(pluralizeUnit(c.quantity_unit, c.quantity)) : "") + " &times; " + safeEsc((c.unit_cost).toLocaleString());
                             if (amt) html += " = <strong>" + amt + "</strong>";
                         } else if (amt) {
                             html += "<strong>" + amt + "</strong>";
@@ -832,7 +879,7 @@
                         }
                         html += " &middot; " + rcBadge(c.unit_cost_basis) + " &middot; " + safeEsc(c.recurrence === "RECURRING" ? "recurring" : (c.recurrence === "UNKNOWN" ? "recurrence not established" : "one-time"));
                         if (c.source_reference_ids && c.source_reference_ids.length) {
-                            html += " &middot; <span style='color:#64748b;'>evidence: " + safeEsc(c.source_reference_ids.join(", ")) + "</span>";
+                            html += " &middot; <span style='color:#64748b;'>evidence: " + safeEsc(c.source_reference_ids.map(function(r){ return ((rc && rc.evidence_labels) || {})[r] || r; }).join(", ")) + "</span>";
                         }
                         var cBasis = c.rationale || c.calculation_formula;
                         if (cBasis) html += "<br><span style='color:#64748b; font-size:11px;'>" + safeEsc(cBasis) + "</span>";
@@ -862,10 +909,14 @@
                 html += rcAuditorInputs(rc);
 
                 html += "<div style='display:flex; flex-wrap:wrap; gap:14px; font-size:11px; color:#475569; font-weight:600; margin-bottom:8px;'>";
-                if (rc.pricing_status) html += "<span>Pricing: <strong>" + safeEsc(String(rc.pricing_status).replace(/_/g, " ")) + "</strong></span>";
-                html += "<span>Confidence: <strong>" + safeEsc(String(rc.confidence || "NOT_ASSESSABLE").replace(/_/g, " ")) + "</strong></span>";
-                html += "<span>Classification: " + rcBadge(rc.estimate_classification) + "</span>";
-                if (rc.estimation_method) html += "<span>Method: " + safeEsc(rc.estimation_method) + "</span>";
+                // A literal trailing space after each badge -- flex `gap` is
+                // visual-only and inserts no character, so without it these
+                // labels glue together on any text extraction (e.g.
+                // "Pricing: EXACT ESTIMATEConfidence: LOWClassification: ...").
+                if (rc.pricing_status) html += "<span>Pricing: <strong>" + safeEsc(String(rc.pricing_status).replace(/_/g, " ")) + "</strong></span> ";
+                html += "<span>Confidence: <strong>" + safeEsc(String(rc.confidence || "NOT_ASSESSABLE").replace(/_/g, " ")) + "</strong></span> ";
+                html += "<span>Classification: " + rcBadge(rc.estimate_classification) + "</span> ";
+                if (rc.estimation_method) html += "<span>Method: " + safeEsc(rc.estimation_method) + "</span> ";
                 if (rc.evidence_basis && rc.evidence_basis.length) html += "<span>Evidence Basis: " + safeEsc(rc.evidence_basis.join(", ")) + "</span>";
                 html += "</div>";
             }

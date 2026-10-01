@@ -64,9 +64,13 @@ def _close(a: float, b: float) -> bool:
 
 @dataclass
 class _Row:
-    """One priceable component in a single currency: point + range bounds."""
+    """One priceable component in a single currency: point + range bounds.
+    `point` is None for a component the evidence establishes ONLY as a range
+    (no single best-estimate stated) -- Phase 9.7 §2: such a component still
+    contributes to low/high, but the aggregate most-likely figure must not
+    manufacture a midpoint to fill the gap."""
     c: RemediationCostComponent
-    point: float
+    point: float | None
     low: float
     high: float
 
@@ -103,37 +107,98 @@ def _multiplies(c: RemediationCostComponent) -> bool:
     per-item RATE (PER_*). For COMPONENT / TOTAL / SUBTOTAL / ALTERNATIVE the
     `unit_cost` field carries that line's flat amount; any `quantity` is
     descriptive. `amount_type` is the LLM's explicit, deterministic signal --
-    the calculator never re-guesses it (spec section 6)."""
-    return c.amount_type in _PER_X_TYPES and c.quantity is not None and c.unit_cost is not None
+    the calculator never re-guesses it (spec section 6). A quantity given
+    only as a range (no single point value stated) still counts as "a
+    quantity is present" -- Phase 9.7 §2."""
+    has_qty = c.quantity is not None or (c.quantity_low is not None and c.quantity_high is not None)
+    has_rate = c.unit_cost is not None or (c.unit_cost_low is not None and c.unit_cost_high is not None)
+    return c.amount_type in _PER_X_TYPES and has_qty and has_rate
 
 
 def _point_amount(c: RemediationCostComponent) -> float | None:
     if c.amount_type in _PER_X_TYPES:
-        return _round(c.quantity * c.unit_cost) if _multiplies(c) else None
+        if not _multiplies(c):
+            return None
+        # A most-likely figure requires an actual POINT quantity AND a POINT
+        # rate -- Phase 9.7 §2 forbids manufacturing a midpoint when either
+        # side was stated only as a range. Range-only components contribute
+        # to low/high but not to the point/most-likely figure.
+        if c.quantity is not None and c.unit_cost is not None:
+            return _round(c.quantity * c.unit_cost)
+        return None
     return _round(c.unit_cost) if c.unit_cost is not None else None
 
 
 def _bound_amount(c: RemediationCostComponent, which: str) -> float | None:
-    edge = c.unit_cost_low if which == "low" else c.unit_cost_high
-    if edge is None:
-        return _point_amount(c)
+    """Phase 9.7 §2: a multiplying (quantity x rate) component's range may
+    come from either side independently -- a ranged QUANTITY at a fixed
+    rate ("70-110 hours at Rs 1,900/hour"), a ranged RATE at a fixed
+    quantity, or both. Each side's bound defaults to its own point value
+    when that side has no stated range, so a range on only one factor is
+    never silently collapsed to the point amount on that factor."""
+    rate_edge = c.unit_cost_low if which == "low" else c.unit_cost_high
+    qty_edge = c.quantity_low if which == "low" else c.quantity_high
     if _multiplies(c):
-        return _round(c.quantity * edge)
+        if rate_edge is None and qty_edge is None:
+            return _point_amount(c)
+        rate = rate_edge if rate_edge is not None else c.unit_cost
+        qty = qty_edge if qty_edge is not None else c.quantity
+        if qty is None or rate is None:
+            # e.g. only quantity_high stated (no quantity_low, no point
+            # quantity) -- the "low" bound genuinely cannot be computed;
+            # never guess rather than silently return a wrong number.
+            return None
+        return _round(qty * rate)
+    if rate_edge is None:
+        return _point_amount(c)
     if c.amount_type in _PER_X_TYPES:
         return None
-    return _round(edge)
+    return _round(rate_edge)
+
+
+def _pluralize_unit(unit: str, count: float) -> str:
+    """General English count-agreement for a quantity unit noun ("hour",
+    "machine", "visit") -- pure grammar, not a semantic classifier: it never
+    inspects what the unit MEANS, only whether the stated count is 1. The
+    unit word itself remains entirely the LLM's own semantic choice."""
+    if not unit or abs(count - 1) < 1e-9:
+        return unit
+    lower = unit.lower()
+    if lower.endswith(("s", "x", "z", "ch", "sh")):
+        return unit + "es"
+    if lower.endswith("y") and len(unit) > 1 and unit[-2].lower() not in "aeiou":
+        return unit[:-1] + "ies"
+    return unit + "s"
 
 
 def _formula(c: RemediationCostComponent) -> str:
+    """Phase 9.7 §2/§3/§4: preserve a range as a range in the displayed
+    formula, whether the range lives on the quantity, the rate, or a flat
+    (non-multiplying) amount -- never collapse it to a fabricated point,
+    and never claim "no calculable amount" merely because no single point
+    value was stated when a genuine range was."""
+    cur = f"{c.currency} " if c.currency else ""
     if _multiplies(c):
-        unit = f" {c.quantity_unit}" if c.quantity_unit else ""
-        cur = f"{c.currency} " if c.currency else ""
-        return (
-            f"{c.quantity:g}{unit} x {cur}{c.unit_cost:g} = "
-            f"{cur}{_round(c.quantity * c.unit_cost):g}"
-        )
-    if c.unit_cost is not None and c.amount_type not in _PER_X_TYPES:
+        unit_word = c.quantity_unit or ""
+        if c.quantity is not None:
+            qty_desc = f"{c.quantity:g}" + (f" {_pluralize_unit(unit_word, c.quantity)}" if unit_word else "")
+        elif c.quantity_low is not None and c.quantity_high is not None:
+            qty_desc = f"{c.quantity_low:g}-{c.quantity_high:g}" + (
+                f" {_pluralize_unit(unit_word, c.quantity_high)}" if unit_word else "")
+        else:
+            qty_desc = "an unspecified quantity"
+        rate_desc = f"{cur}{c.unit_cost:g}" if c.unit_cost is not None else "an unspecified rate"
+        low, high = _bound_amount(c, "low"), _bound_amount(c, "high")
+        if low is not None and high is not None and not _close(low, high):
+            return f"{qty_desc} x {rate_desc} = {cur}{low:g}-{cur}{high:g}"
+        point = _point_amount(c)
+        if point is not None:
+            return f"{qty_desc} x {rate_desc} = {cur}{point:g}"
+        return f"{qty_desc} x {rate_desc} (range not fully established)"
+    if c.unit_cost is not None:
         return f"{c.unit_cost:g} (stated amount)"
+    if c.unit_cost_low is not None and c.unit_cost_high is not None:
+        return f"{c.unit_cost_low:g}-{c.unit_cost_high:g} (stated range)"
     return "no calculable amount"
 
 
@@ -176,10 +241,13 @@ def assemble_estimate(
         hi = _bound_amount(c, "high")
 
         # Currency resolution for THIS component -- adopt the single working
-        # currency when the component stated none, never invent one.
-        eff_currency = c.currency or (working_currency if pt is not None else None)
+        # currency when the component stated none, never invent one. A
+        # range-only component (no point) needs a currency just as much as
+        # a point one -- Phase 9.7 §2.
+        _has_amount = pt is not None or (lo is not None and hi is not None)
+        eff_currency = c.currency or (working_currency if _has_amount else None)
         # A figure with no currency and none to adopt is not a usable amount.
-        currency_unusable = pt is not None and eff_currency is None
+        currency_unusable = _has_amount and eff_currency is None
         render_amount = None if currency_unusable else pt
 
         results.append(RemediationCostComponentResult(
@@ -193,8 +261,14 @@ def assemble_estimate(
             unit_cost_basis=_basis("NOT_ESTABLISHED" if currency_unusable else c.unit_cost_basis),
             currency=eff_currency,
             calculated_amount=render_amount,
-            calculated_amount_low=lo if (lo is not None and render_amount is not None and lo != render_amount) else None,
-            calculated_amount_high=hi if (hi is not None and render_amount is not None and hi != render_amount) else None,
+            calculated_amount_low=(
+                lo if (not currency_unusable and lo is not None and (render_amount is None or lo != render_amount))
+                else None
+            ),
+            calculated_amount_high=(
+                hi if (not currency_unusable and hi is not None and (render_amount is None or hi != render_amount))
+                else None
+            ),
             calculation_formula="pricing basis stated without a currency" if currency_unusable else _formula(c),
             recurrence=c.recurrence,
             recurring_period=c.recurring_period,
@@ -207,7 +281,7 @@ def assemble_estimate(
             _currency_dropped.append(c.component_id)
             est.unpriced_component_ids.append(c.component_id)
             continue
-        if pt is None:
+        if not _has_amount:
             est.unpriced_component_ids.append(c.component_id)
             continue
         # A component contributes to the combined roll-up ONLY when the evidence
@@ -238,7 +312,15 @@ def assemble_estimate(
     recurring = [r for r in rows if r.c.recurrence == "RECURRING"]
 
     if recurring:
-        est.recurring_cost = _round(sum(r.point for r in recurring))
+        # A range-only recurring component (no point) cannot contribute a
+        # single recurring figure -- Phase 9.7 §2 forbids manufacturing one.
+        if any(r.point is None for r in recurring):
+            est.uncertainty_reasons.append(
+                "A recurring cost driver is stated only as a range with no single best "
+                "estimate; the recurring total is not expressed as one figure."
+            )
+        else:
+            est.recurring_cost = _round(sum(r.point for r in recurring))
         periods = {r.c.recurring_period for r in recurring if r.c.recurring_period}
         est.recurring_period = next(iter(periods), None) if len(periods) == 1 else None
         if len(periods) > 1:
@@ -303,7 +385,7 @@ def _aggregate_one_time(
     #     itemised additive components is the SAME money -- drop it (mark
     #     derived). One that disagrees, or has no components to roll up, is
     #     kept as its own additive line and the discrepancy is flagged.
-    additive_sum = sum(r.point for r in additive)
+    additive_sum = sum(r.point for r in additive if r.point is not None)
     for st in subtotals:
         if additive and _close(st.point, additive_sum):
             if st.c.component_id in results_by_id:
@@ -321,6 +403,10 @@ def _aggregate_one_time(
 
     # --- ALTERNATIVE options: bracket each group as a scenario, never sum.
     alt_low = alt_ml = alt_high = 0.0
+    # Phase 9.9 §12: a most-likely figure for alternatives exists only when the
+    # LLM DECLARED a primary option (with a single point value) for every
+    # decision group. Picking "the first option" or adding 0 would invent one.
+    _alt_ml_established = True
     if alternatives:
         groups: dict[str, list[_Row]] = {}
         for r in alternatives:
@@ -331,19 +417,29 @@ def _aggregate_one_time(
             primary = next((r for r in grp if r.c.is_primary_option), None)
             alt_low += min(lows)
             alt_high += max(highs)
-            alt_ml += primary.point if primary is not None else min(r.point for r in grp)
+            _cand = primary.point if primary is not None else None
+            if _cand is None:
+                _alt_ml_established = False
+            else:
+                alt_ml += _cand
         methods.append(
             f"range reflects {sum(len(g) for g in groups.values())} alternative implementation "
             f"option(s) across {len(groups)} decision(s)"
         )
 
-    add_ml = sum(r.point for r in additive)
+    _additive_missing_point = any(r.point is None for r in additive)
+    add_ml = None if (_additive_missing_point or not _alt_ml_established) else sum(r.point for r in additive)
     add_low = sum(r.low for r in additive)
     add_high = sum(r.high for r in additive)
-    if any(r.low != r.point or r.high != r.point for r in additive):
+    if _additive_missing_point:
+        methods.append(
+            "one or more components are stated only as a range with no single best estimate; "
+            "no most-likely figure is established for those components"
+        )
+    elif any(r.low != r.point or r.high != r.point for r in additive):
         methods.append("range assembled from component-level cost uncertainty")
 
-    from_parts_ml = _round(add_ml + alt_ml)
+    from_parts_ml = _round(add_ml + alt_ml) if add_ml is not None else None
     from_parts_low = _round(add_low + alt_low)
     from_parts_high = _round(add_high + alt_high)
 
@@ -351,7 +447,7 @@ def _aggregate_one_time(
     if grand_totals:
         if len(grand_totals) > 1:
             # Competing complete totals -> treat as alternatives to each other.
-            pts = sorted(r.point for r in grand_totals)
+            pts = sorted(r.point for r in grand_totals if r.point is not None)
             est.uncertainty_reasons.append(
                 f"The evidence states more than one complete implementation total ({', '.join(f'{p:g}' for p in pts)}); "
                 "they are shown as a range rather than reconciled to a single figure."
@@ -391,6 +487,11 @@ def _aggregate_one_time(
     #     alternative). A genuine range appears only from component uncertainty
     #     or alternative options.
     if from_parts_ml is None:
+        # Phase 9.7 §2: a missing most-likely figure (one or more components
+        # are range-only) must not blank out a genuinely computable low/high
+        # range -- only the point/most-likely figure is unavailable.
+        if from_parts_low is not None and from_parts_high is not None:
+            return from_parts_low, None, from_parts_high, "; ".join(methods) or "range established; no single most-likely figure"
         return None, None, None, "; ".join(methods) or "no calculable one-time cost"
     if not methods:
         methods.append(

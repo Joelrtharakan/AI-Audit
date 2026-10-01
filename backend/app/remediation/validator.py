@@ -325,9 +325,29 @@ def _validate_component(
     if data.get("quantity") is not None and not _finite_pos(data["quantity"]):
         data["quantity"] = None
         data["quantity_basis"] = "NOT_ESTABLISHED"
-    for k in ("unit_cost_low", "unit_cost_high"):
+    for k in ("unit_cost_low", "unit_cost_high", "quantity_low", "quantity_high"):
         if data.get(k) is not None and not _finite_pos(data[k]):
             data[k] = None
+    # Phase 9.7 §2: an inverted range (low > high) on either side of a
+    # multiplying component is a structural error -- discard the range
+    # rather than propagate arithmetic in the wrong direction. Preserves the
+    # point quantity/unit_cost; only the invalid bound pair is dropped.
+    if (data.get("quantity_low") is not None and data.get("quantity_high") is not None
+            and data["quantity_low"] > data["quantity_high"]):
+        outcome.llm_disagreements.append(
+            f"{c.component_id}: quantity_low ({data['quantity_low']:g}) exceeds quantity_high "
+            f"({data['quantity_high']:g}) -- an inverted range; both discarded."
+        )
+        data["quantity_low"] = None
+        data["quantity_high"] = None
+    if (data.get("unit_cost_low") is not None and data.get("unit_cost_high") is not None
+            and data["unit_cost_low"] > data["unit_cost_high"]):
+        outcome.llm_disagreements.append(
+            f"{c.component_id}: unit_cost_low ({data['unit_cost_low']:g}) exceeds unit_cost_high "
+            f"({data['unit_cost_high']:g}) -- an inverted range; both discarded."
+        )
+        data["unit_cost_low"] = None
+        data["unit_cost_high"] = None
 
     # --- Recurrence / period consistency (spec Pass 33 §2/§6/§30). NOT a
     # semantic rule -- it reconciles two fields of the SAME LLM output that
@@ -495,6 +515,8 @@ def _validate_component(
         )
         data["quantity"] = None
         data["quantity_basis"] = "NOT_ESTABLISHED"
+        data["quantity_low"] = None
+        data["quantity_high"] = None
 
     return RemediationCostComponent(**data)
 

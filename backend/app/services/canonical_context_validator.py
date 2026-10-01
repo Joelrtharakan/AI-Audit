@@ -153,7 +153,62 @@ def validate_canonical_context(
 
     _validate_llm_primary_fields(sanitized, finding_text)
     _validate_llm_reasoning_fields(sanitized, evidence_ledger, finding_text)
+    _enforce_action_status_and_impact_provenance(sanitized, valid_ids)
+
+    # Phase 9.8: structural cross-section review of the model's RAW output
+    # (before sanitization repaired it), so a contradiction the validator
+    # silently fixed above is still surfaced for human review. The sanitized
+    # content is not touched by the review -- only the issue list is recorded.
+    from app.services.canonical_consistency_review import review_canonical_consistency
+    issues = review_canonical_consistency(context, len(evidence_ledger))
+    issues = issues + [x for x in (context.regeneration_log or []) if x not in issues]
+    sanitized.consistency_issues = issues
+    sanitized.review_required = bool(issues)
     return sanitized
+
+
+def _assign_gap_identity(ctx: CanonicalFindingContext) -> None:
+    """Structural identity for canonical investigation gaps (no prose read):
+    every gap gets a unique, stable `gap_id`. A missing id is assigned G<n>; a
+    duplicate id keeps its first holder and the later step is re-identified.
+    The ORIGINAL contradiction (duplicate id) is still reported by the review,
+    which runs on the model's raw output. `information_gaps` becomes a pure
+    projection of the plan steps when steps exist, so the two can never
+    diverge into separately-worded copies of one gap."""
+    taken: set[str] = set()
+    for s in ctx.investigation_plan:
+        gid = (s.gap_id or "").strip()
+        if gid and gid not in taken:
+            s.gap_id = gid
+            taken.add(gid)
+            continue
+        n = 1
+        while f"G{n}" in taken:
+            n += 1
+        s.gap_id = f"G{n}"
+        taken.add(s.gap_id)
+    if ctx.investigation_plan:
+        ctx.information_gaps = [s.unknown.strip() for s in ctx.investigation_plan]
+
+
+def _enforce_action_status_and_impact_provenance(
+    ctx: CanonicalFindingContext, valid_ids: set[str]
+) -> None:
+    """Provenance validation (no prose read): an action may only be AUTHORIZED /
+    COMPLETED if it cites evidence ids that resolve; otherwise it is demoted
+    to PROPOSED (the safe state). An OBSERVED impact without resolvable
+    evidence is demoted to NOT_ESTABLISHED. Unresolved ids are dropped, never
+    invented."""
+    for a in list(ctx.remediation_activities) + list(ctx.investigation_activities):
+        a.action_status_evidence_ids = [
+            e for e in a.action_status_evidence_ids if e in valid_ids
+        ]
+        if a.action_status in ("AUTHORIZED", "COMPLETED") and not a.action_status_evidence_ids:
+            a.action_status = "PROPOSED"
+    if ctx.impact is not None:
+        ctx.impact.evidence_ids = [e for e in ctx.impact.evidence_ids if e in valid_ids]
+        if ctx.impact.status == "OBSERVED" and not ctx.impact.evidence_ids:
+            ctx.impact.status = "NOT_ESTABLISHED"
 
 
 # --- LLM-PRIMARY field safety (spec Phase 5) --------------------------------
@@ -619,6 +674,7 @@ def _validate_llm_reasoning_fields(
         s.related_hypothesis_ids = [h for h in s.related_hypothesis_ids if h in valid_hyp_ids]
         kept_steps.append(s)
     ctx.investigation_plan = kept_steps
+    _assign_gap_identity(ctx)
 
     # Role = UNKNOWN: a statement of what is not established. Kept unless it
     # actually asserts a cause/blame as fact.

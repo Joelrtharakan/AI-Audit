@@ -129,6 +129,10 @@ class Settings(BaseSettings):
     # deterministic and fast; dedicated LLM-primary tests enable it
     # explicitly.
     canonical_semantic_llm_primary: bool = True
+    # Phase 9.8: when the structural consistency review finds a contradiction in
+    # the model's own output, ask the SAME provider/model once more with the
+    # issue codes (never prose rewriting). Default OFF = one call per request.
+    canonical_semantic_consistency_regeneration: bool = False
 
     # Remediation Cost Estimation (app.remediation): a SEPARATE semantic
     # analysis from financial exposure -- "what will it cost to correct/
@@ -365,6 +369,15 @@ class Settings(BaseSettings):
     # Internal auth
     internal_api_key: str = ""
 
+    # Request throttling on the expensive AI-analysis endpoints (/investigate,
+    # /analyze-finding). In-process sliding-window limiter (app.services.
+    # rate_limiter) -- adequate for a single-worker deployment; a multi-worker
+    # or multi-instance deployment MUST back this with a shared store (e.g.
+    # Redis) instead, since separate processes do not share this counter.
+    # Configurable, not a hardcoded business assumption -- tune per deployment.
+    rate_limit_requests_per_minute: int = 30
+    rate_limit_enabled: bool = True
+
     # CORS
     allowed_origins: str = "http://localhost:5500,http://localhost:5501,http://localhost:5510"
 
@@ -376,7 +389,7 @@ class Settings(BaseSettings):
     # Per-stage semantic-contract versions (spec §26) -- bump when the
     # canonical / remediation prompt or its output schema changes so an
     # AI-assisted decision is reproducible. Stamped into the stage log lines.
-    canonical_semantic_prompt_version: str = "2026-09-01"
+    canonical_semantic_prompt_version: str = "2026-10-01"
     remediation_cost_prompt_version: str = "2026-09-01b"
 
     # -------------------------------------------------------------------------

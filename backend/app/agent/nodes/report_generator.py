@@ -477,6 +477,9 @@ async def generate_report_node(state: AgentState) -> AgentState:
         investigation_mode=investigation_mode,
         semantic_mode=state.get("semantic_mode", "DETERMINISTIC"),  # type: ignore[arg-type]
         canonical_semantic_status=str(state.get("canonical_semantic_status", "NOT_ATTEMPTED")),
+        semantic_consistency_issues=list(
+            getattr(state.get("canonical_semantic_context"), "consistency_issues", None) or []
+        ),
         root_cause=root_cause,
         contributing_factors=state.get("contributing_factors", []),
         investigation=investigation_plan,

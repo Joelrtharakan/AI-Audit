@@ -75,7 +75,8 @@ _SCHEMA_HINT = (
     '"information_gaps": [str], '
     '"investigation_plan": [{"unknown": str, "why_it_matters": str|null, '
     '"evidence_that_would_resolve": str|null, "decision_enabled": str|null, '
-    '"related_hypothesis_ids": [str], "priority": "HIGH"|"MEDIUM"|"LOW"}], '
+    '"related_hypothesis_ids": [str], "priority": "HIGH"|"MEDIUM"|"LOW", '
+    '"gap_id": str, "status": "OPEN"|"RESOLVED_BY_EVIDENCE"|"NOT_APPLICABLE"}], '
     '"remediation_obligation": "ESTABLISHED_CORRECTIVE_OBLIGATION"|"RECONCILIATION_REQUIRED"|'
     '"INVESTIGATION_REQUIRED"|"IMMEDIATE_CORRECTION_ONLY"|"NO_SYSTEMIC_REMEDIATION_JUSTIFIED"|"NOT_DETERMINED", '
     '"remediation_obligation_rationale": str|null, '
@@ -84,7 +85,9 @@ _SCHEMA_HINT = (
     '"remediation_activities": [{"action_id": str, "activity": str, '
     '"disposition": "IMMEDIATE_CORRECTION"|"CONTAINMENT"|"CORRECTIVE_ACTION"|"CONDITIONAL_SYSTEMIC"|"EFFECTIVENESS_CHECK", '
     '"addresses_condition": str|null, "justification": str|null, "depends_on_root_cause": bool, '
-    '"pricing_evidence_needed": str|null, "scope_evidence_needed": str|null}], '
+    '"pricing_evidence_needed": str|null, "scope_evidence_needed": str|null, '
+    '"action_status": "PROPOSED"|"RECOMMENDED"|"AUTHORIZED"|"COMPLETED"|"NOT_ESTABLISHED", '
+    '"action_status_evidence_ids": [str]}], '
     '"immediate_actions": [str], "conditional_actions": [str], '
     '"pricing_information": [{"action_id": str|null, "pricing_basis": str|null, "rationale": str|null, '
     '"evidence_available": bool, "observed_value_in_finding": str|null, "observed_value_is_remediation_cost": bool}], '
@@ -96,7 +99,14 @@ _SCHEMA_HINT = (
     '"evidence_status": "VERIFIED"|"REPORTED"|"UNVERIFIED"|"CONTRADICTED"}], '
     '"explicit_previous_capa_reference": bool, "previous_capa_evidence_ids": [str], '
     '"evidence_boundaries": [{"description": str, "related_claim_ids": [str]}], '
-    '"unresolved_ambiguities": [str]}'
+    '"unresolved_ambiguities": [str], '
+    '"impact": {"status": "OBSERVED"|"POTENTIAL"|"NOT_ESTABLISHED"|"REQUIRES_ASSESSMENT", '
+    '"categories": [str], "evidence_ids": [str]}|null, '
+    '"self_review": {"introduced_unsupported_fact": bool, "confused_observation_with_cause": bool, '
+    '"promoted_belief_to_verified": bool, "lost_material_evidence": bool, "lost_cost_component": bool, '
+    '"merged_one_time_and_recurring": bool, "collapsed_range": bool, "invented_horizon": bool, '
+    '"invented_process_or_object": bool, "unsupported_investigation_question": bool, '
+    '"claimed_action_authorized_or_completed_without_evidence": bool, "went_past_evidence_boundary": bool}}'
 )
 
 
@@ -262,6 +272,54 @@ async def interpret_finding_canonically_with_status(
         return "SCHEMA_INVALID", None
 
     status: CanonicalInterpretStatus = "SALVAGED" if salvaged else "SUCCESS"
+
+    # Optional second pass (Phase 9.8/9.9). The structural review (no prose
+    # read) found the model's own fields contradicting each other. Ask the
+    # same provider once with the issue CODES. Fewer issues is NOT proof of a
+    # better answer, so the retry is adopted ONLY if it is a structural repair
+    # (every high-risk semantic conclusion identical, no item lost). The
+    # original issues are always recorded and force human review.
+    if settings.canonical_semantic_consistency_regeneration:
+        from app.services.canonical_consistency_review import (
+            retry_is_structural_repair, review_canonical_consistency,
+        )
+        _n = len(evidence_ledger)
+        _issues = review_canonical_consistency(context, _n)
+        if _issues:
+            _log_entries = [f"REGENERATION_TRIGGERED_BY:{c}" for c in _issues]
+            try:
+                _retry_msgs = messages + [
+                    {"role": "assistant", "content": str(raw)},
+                    {"role": "user", "content": (
+                        "Your JSON has internal contradictions: " + "; ".join(_issues[:12])
+                        + ". Re-emit the complete JSON, resolving them structurally. Do NOT change "
+                        "any other conclusion; prefer NOT_ESTABLISHED / omission over unsupported claims."
+                    )},
+                ]
+                _raw2 = await llm_client.chat_completion(
+                    _retry_msgs, temperature=0.0, response_format_json=True,
+                    max_tokens=settings.canonical_semantic_max_tokens,
+                    num_ctx=settings.canonical_semantic_num_ctx,
+                    node="canonical_semantic_interpretation",
+                    timeout_seconds=effective_timeout,
+                )
+                _ctx2, _salv2 = _validate_or_salvage(parse_llm_json(_raw2))
+                if _ctx2 is None:
+                    _log_entries.append("REGENERATION_REJECTED:INVALID_RETRY")
+                else:
+                    _ok, _div = retry_is_structural_repair(context, _ctx2)
+                    if _ok and len(review_canonical_consistency(_ctx2, _n)) < len(_issues):
+                        context = _ctx2
+                        status = "SALVAGED" if _salv2 else "SUCCESS"
+                        _log_entries.append("REGENERATION_ADOPTED:STRUCTURAL_REPAIR")
+                    elif _ok:
+                        _log_entries.append("REGENERATION_REJECTED:NO_STRUCTURAL_IMPROVEMENT")
+                    else:
+                        _log_entries.append("REGENERATION_REJECTED:CHANGED_SEMANTICS:" + ",".join(_div))
+            except Exception as exc:  # noqa: BLE001 - keep the first result
+                _log_entries.append(f"REGENERATION_REJECTED:{type(exc).__name__}")
+            context.regeneration_log = _log_entries
+
     _log(status, resp_len=len(str(raw)))
     return status, context
 

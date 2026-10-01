@@ -120,6 +120,13 @@ class RemediationCostComponentResult(BaseModel):
 class RemediationCostResult(BaseModel):
     """Authoritative consolidated Remediation Cost Estimate."""
 
+    # Provenance display map (Phase 9.9): internal evidence handle (E1) -> the
+    # evidence's OWN stated label (C2). Built from the evidence text by
+    # app.services.evidence_ids -- never invented; a handle with no stated
+    # label maps to itself. Rendering uses this so the auditor sees the label
+    # the evidence carries, not an internal index.
+    evidence_labels: dict[str, str] = Field(default_factory=dict)
+
     status: RemediationEstimateStatus = RemediationEstimateStatus.NOT_ASSESSABLE
 
     remediation_strategy: str = ""

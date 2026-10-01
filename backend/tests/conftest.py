@@ -33,6 +33,15 @@ os.environ.setdefault("REMEDIATION_COST_ESTIMATION_ENABLED", "false")
 # it True and install recorded responses.
 os.environ.setdefault("CANONICAL_SEMANTIC_LLM_PRIMARY", "false")
 
+# The /investigate and /analyze-finding request-rate limiter (app.services.
+# rate_limiter) is a single, process-global counter keyed by the shared
+# INTERNAL_API_KEY -- exactly the identity every TestClient call in this
+# suite presents. Left enabled, unrelated test files sharing one pytest
+# process would accumulate hits against the SAME bucket and could trip a
+# spurious 429 as the suite grows. Disabled by default for the regression
+# suite; dedicated rate-limiter tests re-enable it for themselves.
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+
 import pytest
 
 

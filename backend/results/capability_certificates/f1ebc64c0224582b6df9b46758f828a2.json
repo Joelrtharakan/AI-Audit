@@ -1,15 +1,15 @@
 {
-  "certificate_id": "cc7846e90583d62bda0d5ada",
+  "certificate_id": "628a31f9e034cd71e33008ad",
   "identity": {
     "provider": "ollama",
     "model": "qwen3:8b",
     "model_version": "",
-    "semantic_schema_version": "3c84fc68de63c116",
-    "contract_version": "ad682f1b14fdb729",
-    "inference_config_hash": "59b7003c27a8fce5",
+    "semantic_schema_version": "71c3062b6a7786e6",
+    "contract_version": "47e7124c8f25e88e",
+    "inference_config_hash": "7866d63830422cd4",
     "benchmark_hash": "038066fd75ec4623"
   },
-  "generated_at": 1790319247.3732932,
+  "generated_at": 1790832134.2957828,
   "correct_count": 16,
   "safe_abstention_count": 0,
   "caught_error_count": 6,

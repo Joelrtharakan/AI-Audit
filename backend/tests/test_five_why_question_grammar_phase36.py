@@ -174,3 +174,62 @@ def test_declarative_to_why_question_drops_a_trailing_subject_echo():
 def test_declarative_to_why_question_unaffected_when_no_echo_present():
     assert _d2q("The preventive-maintenance controls were inadequate.") == \
         "Why were the preventive-maintenance controls inadequate?"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.6 §2: the subject echo can appear at the START of the condition
+# phrase too ("Why was X X overdue?"), not only at the end. Generalizes the
+# Phase 9.4 trailing-echo fix to a leading echo -- same string-level
+# deduplication of two already-extracted spans, no new semantic inference.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("subject,condition", [
+    ("the preventive maintenance", "preventive maintenance overdue"),
+    ("the calibration program", "calibration program insufficient"),
+    ("the vendor qualification", "vendor qualification incomplete"),
+])
+def test_subject_echoed_at_the_start_of_the_condition_is_not_duplicated(subject, condition):
+    q = format_deviation_why_question(subject, condition)
+    subj_words = subject.replace("the ", "").lower()
+    assert q.lower().count(subj_words) == 1, q
+
+
+def test_leading_echo_fix_does_not_regress_trailing_echo_fix():
+    q = format_deviation_why_question(
+        "the preventive-maintenance controls", "inadequate preventive-maintenance controls")
+    assert q.lower().count("preventive-maintenance controls") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.7 §12: "The available evidence establishes that The ventilation
+# system..." -- deviation_as_clause's early-return path (no em-dash to
+# split on -- an already-formed plain sentence) skipped the leading-word
+# lowercase normalization every OTHER path already applied, so a
+# capitalized deviation string double-capitalized mid-sentence.
+# --------------------------------------------------------------------------- #
+
+from app.services.semantic_subject import deviation_as_clause as _dac
+
+
+@pytest.mark.parametrize("deviation", [
+    "The ventilation system pressure differential failed",
+    "The calibration record was not completed",
+    "The reconciliation did not match the control total",
+])
+def test_deviation_as_clause_lowercases_a_plain_sentence_with_no_dash(deviation):
+    clause = _dac(deviation)
+    assert clause[0].islower()
+    sentence = f"The available evidence establishes that {clause}, but does not establish why."
+    assert ", but does not establish why." in sentence
+    assert " that The " not in sentence
+
+
+def test_deviation_as_clause_still_splits_the_dash_joined_form():
+    clause = _dac("The ventilation system — pressure differential failed")
+    assert clause.startswith("the ventilation system")
+
+
+@pytest.mark.parametrize("identifier_led", ["H1 was not resolved", "X occurred"])
+def test_deviation_as_clause_never_lowercases_a_genuine_identifier(identifier_led):
+    clause = _dac(identifier_led)
+    assert clause.split()[0] == identifier_led.split()[0]

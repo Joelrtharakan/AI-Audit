@@ -143,11 +143,13 @@ def _plan_from_canonical_structure(
     evidence: list[str] = []
 
     def _q(qid: str, text: str, purpose: str, ev: str = "not specified",
-           prio: str = "P2", decision: str | None = None, hyp_ids: list[str] | None = None) -> None:
+           prio: str = "P2", decision: str | None = None, hyp_ids: list[str] | None = None,
+           gap_id: str | None = None, gap_status: str | None = None) -> None:
         questions.append(InvestigationQuestion(
             id=qid, question_id=qid, question=text, purpose=purpose, evidence=ev,
             decision_rule=decision, priority=prio, status="ACTIVE",
             category="EVIDENCE_VERIFICATION", target_hypothesis_ids=hyp_ids or [],
+            gap_id=gap_id, gap_status=gap_status,
         ))
         if ev and ev != "not specified":
             evidence.append(ev)
@@ -161,7 +163,8 @@ def _plan_from_canonical_structure(
                s.why_it_matters or "Resolve an open question this finding raises",
                s.evidence_that_would_resolve or "not specified",
                _pri.get(s.priority, "P2"), s.decision_enabled,
-               [x for x in s.related_hypothesis_ids if x in _hyp_ids])
+               [x for x in s.related_hypothesis_ids if x in _hyp_ids],
+               gap_id=s.gap_id, gap_status=s.status)
     else:
         # B. derive from other canonical structured fields.
         _gaps = [str(g).strip() for g in (getattr(sc, "information_gaps", []) or []) if str(g).strip()]
@@ -240,10 +243,15 @@ def _plan_from_canonical_structure(
     if _gaps_all:
         areas = _gaps_all[:4]
 
+    # Phase 9.9: when the plan came from canonical gap steps, those steps ARE the
+    # gaps. The gap descriptions are already rendered as the questions/areas, so
+    # they are NOT appended to the evidence list a second time (that was the
+    # source of the same requirement appearing under "Additional evidence").
+    _evidence_out = _dedup_str(evidence) if _steps else _dedup_str(evidence + _gaps_all)
     return hyps, InvestigationPlan(
         areas=areas,
         questions=questions,
-        evidence_to_collect=_dedup_str(evidence + _gaps_all),
+        evidence_to_collect=_evidence_out,
         status="QUESTIONS_GENERATED",
     )
 

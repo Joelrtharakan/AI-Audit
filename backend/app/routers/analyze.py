@@ -7,10 +7,14 @@ from app.models.analysis import AnalyzeFindingResponse
 from app.models.requests import AnalyzeFindingRequest
 from app.services.finding_analysis_service import FindingAnalysisService
 from app.services.llm_client import LLMError
+from app.services.rate_limiter import enforce_investigation_rate_limit
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1", tags=["analyze"], dependencies=[Depends(require_internal_api_key)])
+router = APIRouter(
+    prefix="/api/v1", tags=["analyze"],
+    dependencies=[Depends(require_internal_api_key), Depends(enforce_investigation_rate_limit)],
+)
 
 
 def get_finding_analysis_service() -> FindingAnalysisService:

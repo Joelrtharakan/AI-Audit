@@ -244,3 +244,36 @@ def test_irrelevant_narrative_does_not_create_an_artifact_or_leak_an_enum():
     assert str(a.root_cause.status) == str(b.root_cause.status)
     for t in _all_prose(a) + _all_prose(b):
         assert not _ENUM.search(t)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.5: unresolved investigation/CAPA-scope items must never carry a
+# completion cue (a green checkmark implies "done"/"verified", contradicting
+# the section's own "Cause Not Yet Established" / "Potential" heading).
+# --------------------------------------------------------------------------- #
+
+def test_frontend_investigation_areas_do_not_use_a_completion_checkmark():
+    js = (Path(__file__).resolve().parent.parent.parent / "frontend" / "assets" / "js" / "lqms_ai.js").read_text()
+    assert "color:#22c55e; font-weight:800;'>&#10004;" not in js
+    assert "color:#22c55e; font-weight:800;'>✔" not in js
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.5: the report-level confidence badges (Obs/RC/Overall) and the
+# remediation-cost status badges (Pricing/Confidence/Classification/...) must
+# not glue together on text extraction -- flex `gap` is visual-only.
+# --------------------------------------------------------------------------- #
+
+def test_frontend_confidence_badges_are_text_separated():
+    js = (Path(__file__).resolve().parent.parent.parent / "frontend" / "assets" / "js" / "lqms_ai.js").read_text()
+    idx = js.index('>Obs: "')
+    window = js[idx:idx + 600]
+    assert '"</span>";\n        html += "<span' not in window, "Obs/RC badges glued with no separator"
+
+
+def test_frontend_cost_status_badges_are_text_separated():
+    js = (Path(__file__).resolve().parent.parent.parent / "frontend" / "assets" / "js" / "lqms_ai.js").read_text()
+    idx = js.index("Pricing: <strong>")
+    window = js[idx:idx + 700]
+    assert '"</strong></span>";\n                html += "<span>Confidence' not in window
+    assert '"</span>";\n                html += "<span>Classification' not in window
